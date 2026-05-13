@@ -1200,16 +1200,85 @@ TSharedPtr<FJsonValue> FEditorHandlers::PieGetRuntimeValue(const TSharedPtr<FJso
 		return MCPResult(ErrResult);
 	}
 
-	// Find the property via reflection
-	FProperty* Property = TargetActor->GetClass()->FindPropertyByName(*PropertyName);
+	// #344/#381: dotted-path resolution. propertyName "Inventory.Slots" or
+	// "StatsComponent.CurrentHP" descends through component subobjects /
+	// struct fields. Previously only flat property names worked, forcing
+	// execute_python for every nested read on a UActorComponent subobject.
+	TArray<FString> PathParts;
+	PropertyName.ParseIntoArray(PathParts, TEXT("."));
+
+	UStruct* CurrentStruct = TargetActor->GetClass();
+	const void* CurrentContainer = TargetActor;
+	FProperty* Property = nullptr;
+
+	for (int32 i = 0; i < PathParts.Num(); ++i)
+	{
+		FProperty* Seg = CurrentStruct->FindPropertyByName(FName(*PathParts[i]));
+
+		// Bare component name at the head of the path resolves against the
+		// actor's component list when no property of that name matches - so
+		// "StatsComponent.CurrentHP" reaches the component subobject without
+		// the caller having to know the C++ UPROPERTY name.
+		if (!Seg && i == 0)
+		{
+			UActorComponent* MatchedComp = nullptr;
+			for (UActorComponent* Comp : TargetActor->GetComponents())
+			{
+				if (Comp && Comp->GetName() == PathParts[i]) { MatchedComp = Comp; break; }
+			}
+			if (MatchedComp)
+			{
+				CurrentContainer = MatchedComp;
+				CurrentStruct = MatchedComp->GetClass();
+				continue;
+			}
+		}
+
+		if (!Seg)
+		{
+			return MCPError(FString::Printf(
+				TEXT("Property '%s' not found at '%s' (segment %d)"),
+				*PathParts[i], *PropertyName, i));
+		}
+		if (i < PathParts.Num() - 1)
+		{
+			if (FStructProperty* SP = CastField<FStructProperty>(Seg))
+			{
+				CurrentContainer = SP->ContainerPtrToValuePtr<void>(const_cast<void*>(CurrentContainer));
+				CurrentStruct = SP->Struct;
+			}
+			else if (FObjectProperty* OP = CastField<FObjectProperty>(Seg))
+			{
+				UObject* SubObject = OP->GetObjectPropertyValue(
+					OP->ContainerPtrToValuePtr<void>(const_cast<void*>(CurrentContainer)));
+				if (!SubObject)
+				{
+					return MCPError(FString::Printf(
+						TEXT("Cannot descend into '%s' - reference is null"), *PathParts[i]));
+				}
+				CurrentContainer = SubObject;
+				CurrentStruct = SubObject->GetClass();
+			}
+			else
+			{
+				return MCPError(FString::Printf(
+					TEXT("'%s' is not a struct or sub-object - cannot descend"), *PathParts[i]));
+			}
+		}
+		else
+		{
+			Property = Seg;
+		}
+	}
+
 	if (!Property)
 	{
-		return MCPError(FString::Printf(TEXT("Property '%s' not found on actor '%s'"), *PropertyName, *ActorPath));
+		return MCPError(FString::Printf(TEXT("Property path '%s' did not resolve to a leaf property"), *PropertyName));
 	}
 
 	// Read property value and serialize based on type
 	auto Result = MCPSuccess();
-	const void* PropertyValue = Property->ContainerPtrToValuePtr<void>(TargetActor);
+	const void* PropertyValue = Property->ContainerPtrToValuePtr<void>(const_cast<void*>(CurrentContainer));
 
 	if (FStrProperty* StrProp = CastField<FStrProperty>(Property))
 	{
@@ -2235,8 +2304,35 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 		return MCPError(FString::Printf(TEXT("Actor not found in %s world: %s"), WorldScope == TEXT("pie") ? TEXT("PIE") : TEXT("editor"), *ActorLabel));
 	}
 
-	UFunction* Func = Target->FindFunction(FName(*FunctionName));
-	if (!Func) return MCPError(FString::Printf(TEXT("Function '%s' not found on %s"), *FunctionName, *Target->GetClass()->GetName()));
+	// #382: optional `component` redirects the call target to a named subobject
+	// (e.g. invoke `Server_Deconstruct` on the actor's BuildModeComponent).
+	// Without this, RPCs / UFUNCTIONs that live on a component subobject can't
+	// be reached via invoke_function and force execute_python.
+	UObject* CallTarget = Target;
+	FString ComponentName;
+	if (Params->TryGetStringField(TEXT("component"), ComponentName) && !ComponentName.IsEmpty())
+	{
+		UActorComponent* FoundComp = nullptr;
+		for (UActorComponent* Comp : Target->GetComponents())
+		{
+			if (Comp && Comp->GetName() == ComponentName) { FoundComp = Comp; break; }
+		}
+		if (!FoundComp)
+		{
+			TArray<FString> CompNames;
+			for (UActorComponent* Comp : Target->GetComponents())
+			{
+				if (Comp) CompNames.Add(Comp->GetName());
+			}
+			return MCPError(FString::Printf(
+				TEXT("Component '%s' not found on actor '%s'. Available: [%s]"),
+				*ComponentName, *ActorLabel, *FString::Join(CompNames, TEXT(", "))));
+		}
+		CallTarget = FoundComp;
+	}
+
+	UFunction* Func = CallTarget->FindFunction(FName(*FunctionName));
+	if (!Func) return MCPError(FString::Printf(TEXT("Function '%s' not found on %s"), *FunctionName, *CallTarget->GetClass()->GetName()));
 
 	TArray<uint8> ParamBuf;
 	ParamBuf.SetNumZeroed(Func->ParmsSize);
@@ -2248,6 +2344,15 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 
 	const TSharedPtr<FJsonObject>* ArgObj = nullptr;
 	Params->TryGetObjectField(TEXT("args"), ArgObj);
+
+	// #383: optional actorArgs maps UObject* parameters to live actor labels in
+	// the active world. LoadObject only resolves asset paths, so any actor-to-
+	// actor RPC (Horse->ServerMount(PlayerCharacter)) previously had to be
+	// done via execute_python. With actorArgs, the same call becomes:
+	//   invoke_function(actorLabel="Horse_01", functionName="ServerMount",
+	//                   actorArgs={Player: "PlayerCharacter_0"})
+	const TSharedPtr<FJsonObject>* ActorArgObj = nullptr;
+	Params->TryGetObjectField(TEXT("actorArgs"), ActorArgObj);
 
 	if (ArgObj && (*ArgObj).IsValid())
 	{
@@ -2271,10 +2376,76 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 		}
 	}
 
-	Target->ProcessEvent(Func, ParamBuf.GetData());
+	// Apply actor-label resolution AFTER plain args so explicit args[paramName]
+	// stays authoritative when both are supplied. Walk every UObject* parm and
+	// resolve the matching actorArgs entry.
+	if (ActorArgObj && (*ActorArgObj).IsValid())
+	{
+		for (TFieldIterator<FProperty> It(Func); It && (It->PropertyFlags & CPF_Parm); ++It)
+		{
+			FProperty* P = *It;
+			if (P->PropertyFlags & CPF_ReturnParm) continue;
+			if ((P->PropertyFlags & CPF_OutParm) && !(P->PropertyFlags & CPF_ReferenceParm)) continue;
+
+			FObjectProperty* OP = CastField<FObjectProperty>(P);
+			if (!OP) continue;
+			FString ActorArgLabel;
+			if (!(*ActorArgObj)->TryGetStringField(P->GetName(), ActorArgLabel) || ActorArgLabel.IsEmpty())
+			{
+				continue;
+			}
+
+			AActor* RefActor = nullptr;
+			for (TActorIterator<AActor> ActorIt(World); ActorIt; ++ActorIt)
+			{
+				if (ActorIt->GetActorLabel() == ActorArgLabel) { RefActor = *ActorIt; break; }
+			}
+			if (!RefActor)
+			{
+				for (TFieldIterator<FProperty> CleanupIt(Func); CleanupIt && (CleanupIt->PropertyFlags & CPF_Parm); ++CleanupIt)
+				{
+					CleanupIt->DestroyValue_InContainer(ParamBuf.GetData());
+				}
+				return MCPError(FString::Printf(
+					TEXT("actorArgs[%s]: actor '%s' not found in %s world"),
+					*P->GetName(), *ActorArgLabel,
+					WorldScope == TEXT("pie") ? TEXT("PIE") : TEXT("editor")));
+			}
+			if (!RefActor->IsA(OP->PropertyClass))
+			{
+				// Allow component look-up: if the property expects a UActorComponent
+				// subclass, walk the actor's components and pick the first match.
+				if (OP->PropertyClass->IsChildOf(UActorComponent::StaticClass()))
+				{
+					UActorComponent* MatchedComp = nullptr;
+					for (UActorComponent* Comp : RefActor->GetComponents())
+					{
+						if (Comp && Comp->IsA(OP->PropertyClass)) { MatchedComp = Comp; break; }
+					}
+					if (MatchedComp)
+					{
+						OP->SetObjectPropertyValue(P->ContainerPtrToValuePtr<void>(ParamBuf.GetData()), MatchedComp);
+						continue;
+					}
+				}
+				for (TFieldIterator<FProperty> CleanupIt(Func); CleanupIt && (CleanupIt->PropertyFlags & CPF_Parm); ++CleanupIt)
+				{
+					CleanupIt->DestroyValue_InContainer(ParamBuf.GetData());
+				}
+				return MCPError(FString::Printf(
+					TEXT("actorArgs[%s]: actor '%s' (%s) is not assignable to expected type %s"),
+					*P->GetName(), *ActorArgLabel,
+					*RefActor->GetClass()->GetName(), *OP->PropertyClass->GetName()));
+			}
+			OP->SetObjectPropertyValue(P->ContainerPtrToValuePtr<void>(ParamBuf.GetData()), RefActor);
+		}
+	}
+
+	CallTarget->ProcessEvent(Func, ParamBuf.GetData());
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	if (!ComponentName.IsEmpty()) Result->SetStringField(TEXT("component"), ComponentName);
 	Result->SetStringField(TEXT("functionName"), FunctionName);
 
 	TSharedPtr<FJsonObject> OutVals = MakeShared<FJsonObject>();
@@ -2284,7 +2455,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 		if (P->PropertyFlags & (CPF_ReturnParm | CPF_OutParm))
 		{
 			FString S;
-			P->ExportTextItem_Direct(S, P->ContainerPtrToValuePtr<void>(ParamBuf.GetData()), nullptr, Target, PPF_None);
+			P->ExportTextItem_Direct(S, P->ContainerPtrToValuePtr<void>(ParamBuf.GetData()), nullptr, CallTarget, PPF_None);
 			OutVals->SetStringField(P->GetName(), S);
 		}
 	}
