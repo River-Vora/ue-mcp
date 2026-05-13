@@ -1592,6 +1592,39 @@ TSharedPtr<FJsonValue> FWidgetHandlers::MoveWidget(const TSharedPtr<FJsonObject>
 		return MCPError(FString::Printf(TEXT("New parent '%s' (%s) is not a panel widget"), *NewParentName, *NewParentRaw->GetClass()->GetName()));
 	}
 
+	// #315: refuse self-parenting and cyclic moves. Walking the WBP root chain
+	// down from the new parent and stopping at WidgetToMove would let the move
+	// succeed silently while orphaning the entire subtree (read_tree returns
+	// empty, the asset cannot reload). Reject before mutating.
+	if (NewParentPanel == WidgetToMove)
+	{
+		return MCPError(FString::Printf(
+			TEXT("Refusing cyclic move: cannot reparent '%s' into itself"), *WidgetName));
+	}
+	{
+		UWidget* Ancestor = NewParentPanel;
+		while (Ancestor)
+		{
+			if (Ancestor == WidgetToMove)
+			{
+				return MCPError(FString::Printf(
+					TEXT("Refusing cyclic move: '%s' is an ancestor of '%s' (would create a cycle)"),
+					*WidgetName, *NewParentName));
+			}
+			Ancestor = Ancestor->GetParent();
+		}
+	}
+
+	// #315: moving the root widget into any other panel orphans the tree (the
+	// move clears RootWidget then adds it as a child with no root above it).
+	// Use the dedicated wrap/set_root action for that workflow (#365).
+	if (WidgetBP->WidgetTree->RootWidget == WidgetToMove)
+	{
+		return MCPError(FString::Printf(
+			TEXT("Cannot move the root widget '%s' via move_widget — use widget(set_root) or widget(wrap_root) instead"),
+			*WidgetName));
+	}
+
 	// Idempotency: already child of the target parent?
 	UPanelWidget* OldParent = WidgetToMove->GetParent();
 	FString OldParentName = OldParent ? OldParent->GetName() : TEXT("(root)");
@@ -1609,12 +1642,6 @@ TSharedPtr<FJsonValue> FWidgetHandlers::MoveWidget(const TSharedPtr<FJsonObject>
 	if (OldParent)
 	{
 		OldParent->RemoveChild(WidgetToMove);
-	}
-
-	// If it was the root, clear root
-	if (WidgetBP->WidgetTree->RootWidget == WidgetToMove)
-	{
-		WidgetBP->WidgetTree->RootWidget = nullptr;
 	}
 
 	// Add to new parent
