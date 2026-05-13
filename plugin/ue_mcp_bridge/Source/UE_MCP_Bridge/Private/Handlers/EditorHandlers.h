@@ -132,6 +132,10 @@ private:
 	static TSharedPtr<FJsonValue> ReloadHandlers(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SaveAsset(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SaveAll(const TSharedPtr<FJsonObject>& Params);
+	// #378: flush dirty packages and report per-package success/failure
+	static TSharedPtr<FJsonValue> SaveDirty(const TSharedPtr<FJsonObject>& Params);
+	// #340: enumerate currently-dirty content/map packages
+	static TSharedPtr<FJsonValue> ListDirtyPackages(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetCrashReports(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadEditorLog(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> PieGetRuntimeValue(const TSharedPtr<FJsonObject>& Params);

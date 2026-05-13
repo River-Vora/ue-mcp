@@ -134,6 +134,8 @@ export const editorTool: ToolDef = categoryTool(
     respond_to_dialog: bp("Click a button on the active modal dialog. Params: buttonIndex?, buttonLabel?", "respond_to_dialog"),
     open_asset: bp("Open asset in its editor. Params: assetPath", "open_asset"),
     reload_bridge: bp("Hot-reload Python bridge handlers from disk", "reload_handlers"),
+    save_dirty: bp("Flush every dirty package and return a per-package saved/failed map. Use after multi-step CDO/component edits when set_class_default leaves the asset dirty without persisting (#378). Params: includeMaps? (default true), includeContent? (default true)", "save_dirty", (p) => ({ includeMaps: p.includeMaps, includeContent: p.includeContent })),
+    list_dirty_packages: bp("Enumerate currently-dirty content + map packages (#340)", "list_dirty_packages"),
   },
   undefined,
   {
@@ -181,5 +183,7 @@ export const editorTool: ToolDef = categoryTool(
     width: z.number().optional().describe("Capture width in pixels"),
     height: z.number().optional().describe("Capture height in pixels"),
     fov: z.number().optional().describe("Capture FOV in degrees"),
+    includeMaps: z.boolean().optional().describe("save_dirty: include map packages (default true)"),
+    includeContent: z.boolean().optional().describe("save_dirty: include content packages (default true)"),
   },
 );

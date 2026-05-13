@@ -77,6 +77,8 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("reload_handlers"), &ReloadHandlers);
 	Registry.RegisterHandler(TEXT("save_asset"), &SaveAsset);
 	Registry.RegisterHandler(TEXT("save_all"), &SaveAll);
+	Registry.RegisterHandler(TEXT("save_dirty"), &SaveDirty);
+	Registry.RegisterHandler(TEXT("list_dirty_packages"), &ListDirtyPackages);
 	Registry.RegisterHandler(TEXT("get_crash_reports"), &GetCrashReports);
 	Registry.RegisterHandler(TEXT("read_editor_log"), &ReadEditorLog);
 	Registry.RegisterHandler(TEXT("pie_get_runtime_value"), &PieGetRuntimeValue);
@@ -900,6 +902,120 @@ TSharedPtr<FJsonValue> FEditorHandlers::SaveAll(const TSharedPtr<FJsonObject>& P
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetBoolField(TEXT("success"), bSuccess);
 	Result->SetStringField(TEXT("message"), bSuccess ? TEXT("All dirty packages saved") : TEXT("Some packages may have failed to save"));
+	return MCPResult(Result);
+}
+
+// #378: drive UPackage::SavePackage directly on every dirty content package
+// so callers get a per-package result map. set_class_default and friends
+// occasionally leave packages dirty without persisting; this is the escape
+// hatch that surfaces which packages actually wrote to disk.
+TSharedPtr<FJsonValue> FEditorHandlers::SaveDirty(const TSharedPtr<FJsonObject>& Params)
+{
+	const bool bIncludeMaps = OptionalBool(Params, TEXT("includeMaps"), true);
+	const bool bIncludeContent = OptionalBool(Params, TEXT("includeContent"), true);
+
+	TArray<UPackage*> Dirty;
+	for (TObjectIterator<UPackage> It; It; ++It)
+	{
+		UPackage* Pkg = *It;
+		if (!Pkg || !Pkg->IsDirty()) continue;
+		const FString Name = Pkg->GetName();
+		const bool bIsMap = Pkg->ContainsMap();
+		if (bIsMap && !bIncludeMaps) continue;
+		if (!bIsMap && !bIncludeContent) continue;
+		// Skip code modules + transient packages — only flush content packages
+		// that live in mounted Content directories (have a resolvable .uasset
+		// filename). Engine code packages like /Script/Engine should never be
+		// touched by a content-save flush.
+		if (Name.StartsWith(TEXT("/Script/"))) continue;
+		if (Name.StartsWith(TEXT("/Temp/"))) continue;
+		if (!FPackageName::IsValidLongPackageName(Name)) continue;
+		Dirty.Add(Pkg);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Saved;
+	TArray<TSharedPtr<FJsonValue>> Failed;
+
+	for (UPackage* Pkg : Dirty)
+	{
+		const FString PackageName = Pkg->GetName();
+		const FString Extension = Pkg->ContainsMap()
+			? FPackageName::GetMapPackageExtension()
+			: FPackageName::GetAssetPackageExtension();
+		FString FileName;
+		if (!FPackageName::TryConvertLongPackageNameToFilename(PackageName, FileName, Extension))
+		{
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetStringField(TEXT("package"), PackageName);
+			Entry->SetStringField(TEXT("error"), TEXT("could not resolve on-disk filename"));
+			Failed.Add(MakeShared<FJsonValueObject>(Entry));
+			continue;
+		}
+		FSavePackageArgs SaveArgs;
+		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+		SaveArgs.Error = GError;
+		const bool bOk = UPackage::SavePackage(Pkg, nullptr, *FileName, SaveArgs);
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("package"), PackageName);
+		Entry->SetStringField(TEXT("file"), FileName);
+		Entry->SetBoolField(TEXT("isMap"), Pkg->ContainsMap());
+		if (bOk)
+		{
+			Saved.Add(MakeShared<FJsonValueObject>(Entry));
+		}
+		else
+		{
+			Entry->SetStringField(TEXT("error"), TEXT("SavePackage returned false"));
+			Failed.Add(MakeShared<FJsonValueObject>(Entry));
+		}
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetNumberField(TEXT("dirtyCount"), Dirty.Num());
+	Result->SetNumberField(TEXT("savedCount"), Saved.Num());
+	Result->SetNumberField(TEXT("failedCount"), Failed.Num());
+	Result->SetArrayField(TEXT("saved"), Saved);
+	if (Failed.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("failed"), Failed);
+		Result->SetBoolField(TEXT("success"), false);
+	}
+	return MCPResult(Result);
+}
+
+// #340: list every dirty package (content + map) so callers can audit
+// before flushing. Mirrors EditorLoadingAndSavingUtils.get_dirty_*_packages
+// without the Python escape.
+TSharedPtr<FJsonValue> FEditorHandlers::ListDirtyPackages(const TSharedPtr<FJsonObject>& Params)
+{
+	TArray<TSharedPtr<FJsonValue>> Content;
+	TArray<TSharedPtr<FJsonValue>> Maps;
+	for (TObjectIterator<UPackage> It; It; ++It)
+	{
+		UPackage* Pkg = *It;
+		if (!Pkg || !Pkg->IsDirty()) continue;
+		const FString Name = Pkg->GetName();
+		if (Name.StartsWith(TEXT("/Script/"))) continue;
+		if (Name.StartsWith(TEXT("/Temp/"))) continue;
+		if (!FPackageName::IsValidLongPackageName(Name)) continue;
+
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("package"), Name);
+		if (Pkg->ContainsMap())
+		{
+			Maps.Add(MakeShared<FJsonValueObject>(Entry));
+		}
+		else
+		{
+			Content.Add(MakeShared<FJsonValueObject>(Entry));
+		}
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetNumberField(TEXT("contentCount"), Content.Num());
+	Result->SetNumberField(TEXT("mapCount"), Maps.Num());
+	Result->SetArrayField(TEXT("content"), Content);
+	Result->SetArrayField(TEXT("maps"), Maps);
 	return MCPResult(Result);
 }
 
