@@ -135,6 +135,8 @@ export const editorTool: ToolDef = categoryTool(
     open_asset: bp("Open asset in its editor. Params: assetPath", "open_asset"),
     reload_bridge: bp("Hot-reload Python bridge handlers from disk", "reload_handlers"),
     save_dirty: bp("Flush every dirty package and return a per-package saved/failed map. Use after multi-step CDO/component edits when set_class_default leaves the asset dirty without persisting (#378). Params: includeMaps? (default true), includeContent? (default true)", "save_dirty", (p) => ({ includeMaps: p.includeMaps, includeContent: p.includeContent })),
+    configure_pie: bp("Set ULevelEditorPlaySettings - multi-client PIE, net mode, single-process flag. Params: numClients?, netMode? (standalone|listen|client), runUnderOneProcess?, launchSeparateServer? (#384)", "configure_pie", (p) => ({ numClients: p.numClients, netMode: p.netMode, runUnderOneProcess: p.runUnderOneProcess, launchSeparateServer: p.launchSeparateServer })),
+    get_pie_config: bp("Read current ULevelEditorPlaySettings (numClients, netMode, single-process, separate-server) (#384)", "get_pie_config"),
     list_dirty_packages: bp("Enumerate currently-dirty content + map packages (#340)", "list_dirty_packages"),
   },
   undefined,
@@ -187,5 +189,9 @@ export const editorTool: ToolDef = categoryTool(
     fov: z.number().optional().describe("Capture FOV in degrees"),
     includeMaps: z.boolean().optional().describe("save_dirty: include map packages (default true)"),
     includeContent: z.boolean().optional().describe("save_dirty: include content packages (default true)"),
+    numClients: z.number().optional().describe("configure_pie: number of PIE clients"),
+    netMode: z.string().optional().describe("configure_pie: standalone | listen | client"),
+    runUnderOneProcess: z.boolean().optional().describe("configure_pie: single-process flag"),
+    launchSeparateServer: z.boolean().optional().describe("configure_pie: separate dedicated server"),
   },
 );

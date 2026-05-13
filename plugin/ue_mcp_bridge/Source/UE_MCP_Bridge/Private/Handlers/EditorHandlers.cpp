@@ -33,6 +33,7 @@
 #include "Subsystems/EditorActorSubsystem.h"
 #include "Misc/OutputDeviceRedirector.h"
 #include "FileHelpers.h"
+#include "Settings/LevelEditorPlaySettings.h"
 #include "Misc/DateTime.h"
 #include "HAL/FileManager.h"
 #include "EngineUtils.h"
@@ -110,6 +111,8 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("capture_scene_png"), &CaptureScenePng);
 	Registry.RegisterHandler(TEXT("get_pie_pawn"), &GetPiePawn);
 	Registry.RegisterHandler(TEXT("invoke_function"), &InvokeFunction);
+	Registry.RegisterHandler(TEXT("configure_pie"), &ConfigurePie);
+	Registry.RegisterHandler(TEXT("get_pie_config"), &GetPieConfig);
 }
 
 TSharedPtr<FJsonValue> FEditorHandlers::ExecuteCommand(const TSharedPtr<FJsonObject>& Params)
@@ -2465,5 +2468,161 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 	{
 		It->DestroyValue_InContainer(ParamBuf.GetData());
 	}
+	return MCPResult(Result);
+}
+
+// #384: read/write ULevelEditorPlaySettings via reflection. Direct member
+// access is blocked because the fields are private; FProperty lookup gives
+// us the same access path Python's set_editor_property uses.
+static ULevelEditorPlaySettings* GetPlaySettingsForRW()
+{
+	return GetMutableDefault<ULevelEditorPlaySettings>();
+}
+
+static bool SetIntPropOn(UObject* Obj, const TCHAR* Name, int32 NewVal)
+{
+	FIntProperty* P = CastField<FIntProperty>(Obj->GetClass()->FindPropertyByName(FName(Name)));
+	if (!P) return false;
+	P->SetPropertyValue_InContainer(Obj, NewVal);
+	return true;
+}
+static bool SetBoolPropOn(UObject* Obj, const TCHAR* Name, bool NewVal)
+{
+	FBoolProperty* P = CastField<FBoolProperty>(Obj->GetClass()->FindPropertyByName(FName(Name)));
+	if (!P) return false;
+	P->SetPropertyValue_InContainer(Obj, NewVal);
+	return true;
+}
+static bool SetEnumPropOn(UObject* Obj, const TCHAR* Name, int64 NewVal)
+{
+	FProperty* Prop = Obj->GetClass()->FindPropertyByName(FName(Name));
+	if (!Prop) return false;
+	if (FEnumProperty* EP = CastField<FEnumProperty>(Prop))
+	{
+		EP->GetUnderlyingProperty()->SetIntPropertyValue(EP->ContainerPtrToValuePtr<void>(Obj), NewVal);
+		return true;
+	}
+	if (FByteProperty* BP = CastField<FByteProperty>(Prop))
+	{
+		BP->SetPropertyValue_InContainer(Obj, static_cast<uint8>(NewVal));
+		return true;
+	}
+	return false;
+}
+static int32 GetIntPropOn(const UObject* Obj, const TCHAR* Name, int32 Default = 0)
+{
+	if (FIntProperty* P = CastField<FIntProperty>(Obj->GetClass()->FindPropertyByName(FName(Name))))
+	{
+		return P->GetPropertyValue_InContainer(Obj);
+	}
+	return Default;
+}
+static bool GetBoolPropOn(const UObject* Obj, const TCHAR* Name, bool Default = false)
+{
+	if (FBoolProperty* P = CastField<FBoolProperty>(Obj->GetClass()->FindPropertyByName(FName(Name))))
+	{
+		return P->GetPropertyValue_InContainer(Obj);
+	}
+	return Default;
+}
+static int64 GetEnumPropOn(const UObject* Obj, const TCHAR* Name)
+{
+	FProperty* Prop = Obj->GetClass()->FindPropertyByName(FName(Name));
+	if (!Prop) return 0;
+	if (FEnumProperty* EP = CastField<FEnumProperty>(Prop))
+	{
+		return EP->GetUnderlyingProperty()->GetSignedIntPropertyValue(EP->ContainerPtrToValuePtr<void>(Obj));
+	}
+	if (FByteProperty* BP = CastField<FByteProperty>(Prop))
+	{
+		return BP->GetPropertyValue_InContainer(Obj);
+	}
+	return 0;
+}
+
+static const TCHAR* NetModeNameFromValue(int64 V)
+{
+	switch (V)
+	{
+	case static_cast<int64>(EPlayNetMode::PIE_ListenServer): return TEXT("ListenServer");
+	case static_cast<int64>(EPlayNetMode::PIE_Client):       return TEXT("Client");
+	default: return TEXT("Standalone");
+	}
+}
+
+TSharedPtr<FJsonValue> FEditorHandlers::ConfigurePie(const TSharedPtr<FJsonObject>& Params)
+{
+	ULevelEditorPlaySettings* Settings = GetPlaySettingsForRW();
+	if (!Settings) return MCPError(TEXT("LevelEditorPlaySettings CDO not available"));
+
+	bool bAny = false;
+	int32 NumClients = 0;
+	if (Params->TryGetNumberField(TEXT("numClients"), NumClients) && NumClients > 0)
+	{
+		if (!SetIntPropOn(Settings, TEXT("PlayNumberOfClients"), NumClients))
+		{
+			return MCPError(TEXT("PlayNumberOfClients property not found - engine drift?"));
+		}
+		bAny = true;
+	}
+
+	FString NetMode;
+	if (Params->TryGetStringField(TEXT("netMode"), NetMode) && !NetMode.IsEmpty())
+	{
+		int64 Resolved = static_cast<int64>(EPlayNetMode::PIE_Standalone);
+		const FString N = NetMode.ToLower();
+		if      (N == TEXT("standalone"))    Resolved = static_cast<int64>(EPlayNetMode::PIE_Standalone);
+		else if (N == TEXT("listen") || N == TEXT("listenserver")) Resolved = static_cast<int64>(EPlayNetMode::PIE_ListenServer);
+		else if (N == TEXT("client"))        Resolved = static_cast<int64>(EPlayNetMode::PIE_Client);
+		else
+		{
+			return MCPError(FString::Printf(
+				TEXT("Unknown netMode '%s'. Use standalone | listen | client."), *NetMode));
+		}
+		if (!SetEnumPropOn(Settings, TEXT("PlayNetMode"), Resolved))
+		{
+			return MCPError(TEXT("PlayNetMode property not found - engine drift?"));
+		}
+		bAny = true;
+	}
+
+	bool BVal = false;
+	if (Params->TryGetBoolField(TEXT("runUnderOneProcess"), BVal))
+	{
+		SetBoolPropOn(Settings, TEXT("RunUnderOneProcess"), BVal);
+		bAny = true;
+	}
+	if (Params->TryGetBoolField(TEXT("launchSeparateServer"), BVal))
+	{
+		SetBoolPropOn(Settings, TEXT("bLaunchSeparateServer"), BVal);
+		bAny = true;
+	}
+
+	if (!bAny)
+	{
+		return MCPError(TEXT("Nothing to configure - provide numClients / netMode / runUnderOneProcess / launchSeparateServer"));
+	}
+
+	Settings->SaveConfig();
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetNumberField(TEXT("numClients"), GetIntPropOn(Settings, TEXT("PlayNumberOfClients"), 1));
+	Result->SetStringField(TEXT("netMode"), NetModeNameFromValue(GetEnumPropOn(Settings, TEXT("PlayNetMode"))));
+	Result->SetBoolField(TEXT("runUnderOneProcess"), GetBoolPropOn(Settings, TEXT("RunUnderOneProcess"), true));
+	Result->SetBoolField(TEXT("launchSeparateServer"), GetBoolPropOn(Settings, TEXT("bLaunchSeparateServer"), false));
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FEditorHandlers::GetPieConfig(const TSharedPtr<FJsonObject>& Params)
+{
+	const ULevelEditorPlaySettings* Settings = GetDefault<ULevelEditorPlaySettings>();
+	if (!Settings) return MCPError(TEXT("LevelEditorPlaySettings CDO not available"));
+
+	auto Result = MCPSuccess();
+	Result->SetNumberField(TEXT("numClients"), GetIntPropOn(Settings, TEXT("PlayNumberOfClients"), 1));
+	Result->SetStringField(TEXT("netMode"), NetModeNameFromValue(GetEnumPropOn(Settings, TEXT("PlayNetMode"))));
+	Result->SetBoolField(TEXT("runUnderOneProcess"), GetBoolPropOn(Settings, TEXT("RunUnderOneProcess"), true));
+	Result->SetBoolField(TEXT("launchSeparateServer"), GetBoolPropOn(Settings, TEXT("bLaunchSeparateServer"), false));
 	return MCPResult(Result);
 }
