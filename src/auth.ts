@@ -40,7 +40,7 @@ export class OAuthClientNotConfiguredError extends Error {
 }
 
 function assertClientIdConfigured(): void {
-  if (CLIENT_ID === DEFAULT_CLIENT_ID || CLIENT_ID.includes("REPLACE_WITH_REAL")) {
+  if (!CLIENT_ID || CLIENT_ID.includes("REPLACE_WITH_REAL") || !CLIENT_ID.startsWith("Iv")) {
     throw new OAuthClientNotConfiguredError();
   }
 }
