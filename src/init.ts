@@ -5,6 +5,7 @@ import * as readline from "node:readline";
 import { ProjectContext } from "./project.js";
 import { deploy } from "./deployer.js";
 import { installSkills } from "./skills.js";
+import { readUserAuth, startDeviceFlow, tryExchangeDeviceCode } from "./auth.js";
 import { warn as logWarn } from "./log.js";
 import { BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW, fail, info, ok, warn } from "./ui/ansi.js";
 import { checkboxSelect, multiSelect, singleSelect, type CheckboxItem } from "./ui/select.js";
@@ -254,6 +255,93 @@ function askPath(): Promise<string> {
 }
 
 /* ------------------------------------------------------------------ */
+/*  GitHub feedback authorship (OAuth device flow)                     */
+/* ------------------------------------------------------------------ */
+
+async function runFeedbackAuthStep(): Promise<void> {
+  console.log("");
+  console.log(
+    `  ${BOLD}${CYAN}Feedback authorship${RESET}  ${DIM}(GitHub OAuth, optional)${RESET}`,
+  );
+
+  const cached = await readUserAuth();
+  if (cached) {
+    ok(`Feedback issues will author as @${cached.login} (cached token reused)`);
+    return;
+  }
+
+  console.log(
+    `  ${DIM}Without auth, agent feedback issues author as the ue-mcp-feedback bot,${RESET}`,
+  );
+  console.log(
+    `  ${DIM}hiding who actually reported the gap. One-time browser authorization${RESET}`,
+  );
+  console.log(
+    `  ${DIM}makes every submission author as your real GitHub user.${RESET}`,
+  );
+  console.log("");
+
+  const choice = await singleSelect("Authorize now?", [
+    "Yes - run device flow now (recommended)",
+    "Skip - bot will author feedback issues until I run auth later",
+  ]);
+  if (choice !== 0) {
+    info("Skipped. Run npx ue-mcp auth to set this up later.");
+    return;
+  }
+
+  let pending;
+  try {
+    pending = await startDeviceFlow();
+  } catch (e) {
+    warn(`Device flow start failed: ${e instanceof Error ? e.message : e}`);
+    info("Bot will author feedback issues. Re-run npx ue-mcp init or npx ue-mcp auth to retry.");
+    return;
+  }
+
+  console.log("");
+  console.log(`  ${BOLD}1.${RESET} Open: ${CYAN}${pending.verification_uri}${RESET}`);
+  console.log(`  ${BOLD}2.${RESET} Enter code: ${BOLD}${YELLOW}${pending.user_code}${RESET}`);
+  console.log(`  ${BOLD}3.${RESET} Authorize the ue-mcp-feedback app`);
+  console.log("");
+  console.log(`  ${DIM}Polling every ${pending.interval}s. Code expires in ~15 min. Ctrl-C to skip.${RESET}`);
+
+  const deadline = pending.expires_at * 1000;
+  process.stdout.write("  ");
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pending.interval * 1000));
+    let result;
+    try {
+      result = await tryExchangeDeviceCode(pending);
+    } catch (e) {
+      console.log("");
+      warn(`Auth failed: ${e instanceof Error ? e.message : e}`);
+      info("Bot will author feedback issues until you re-run auth.");
+      return;
+    }
+    if (result.kind === "auth") {
+      console.log("");
+      ok(`Authorized as @${result.auth.login}`);
+      info(`Token cached at ~/.ue-mcp/auth.json (mode 600)`);
+      return;
+    }
+    if (result.kind === "expired") {
+      console.log("");
+      warn("Device code expired. Re-run npx ue-mcp init to retry.");
+      return;
+    }
+    if (result.kind === "denied") {
+      console.log("");
+      warn("Authorization denied. Bot will author feedback issues.");
+      return;
+    }
+    process.stdout.write(".");
+  }
+  console.log("");
+  warn("Timed out waiting for authorization. Bot will author feedback issues.");
+}
+
+/* ------------------------------------------------------------------ */
 /*  Main init flow                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -474,6 +562,9 @@ async function init() {
       info(skillsResult.skillsDir);
     }
   }
+
+  // 9c. GitHub OAuth for feedback authorship
+  await runFeedbackAuthStep();
 
   // 10. Done
   console.log("");
