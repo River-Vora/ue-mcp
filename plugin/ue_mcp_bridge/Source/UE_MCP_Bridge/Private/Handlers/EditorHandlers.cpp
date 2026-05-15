@@ -685,6 +685,39 @@ TSharedPtr<FJsonValue> FEditorHandlers::PieControl(const TSharedPtr<FJsonObject>
 			return MCPError(TEXT("PIE session already active"));
 		}
 
+		// AssetRegistry must be done with its initial scan before PIE can start.
+		// Cold editor starts spend 30-90s scanning; during that window
+		// RequestPlaySession silently no-ops and the caller sees isPlaying=false
+		// with no diagnostic (#406). Either wait it out (default) or return a
+		// structured error if waitForAssetRegistry=false.
+		FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+		IAssetRegistry& Reg = ARM.Get();
+		if (Reg.IsLoadingAssets())
+		{
+			bool bWait = true;
+			Params->TryGetBoolField(TEXT("waitForAssetRegistry"), bWait);
+			double TimeoutSec = 180.0;
+			if (double Override; Params->TryGetNumberField(TEXT("assetRegistryTimeoutSeconds"), Override))
+			{
+				TimeoutSec = Override;
+			}
+			if (!bWait)
+			{
+				auto Err = MCPError(TEXT("AssetRegistry initial scan still in progress; PIE cannot start yet. Retry shortly or pass waitForAssetRegistry=true (default) to block until ready."));
+				return Err;
+			}
+			const double Deadline = FPlatformTime::Seconds() + TimeoutSec;
+			while (Reg.IsLoadingAssets() && FPlatformTime::Seconds() < Deadline)
+			{
+				FPlatformProcess::Sleep(0.25);
+			}
+			if (Reg.IsLoadingAssets())
+			{
+				return MCPError(FString::Printf(TEXT("AssetRegistry still loading after %.1fs; PIE start aborted. Pass assetRegistryTimeoutSeconds to extend the wait, or retry later."), TimeoutSec));
+			}
+			Result->SetBoolField(TEXT("waitedForAssetRegistry"), true);
+		}
+
 		FRequestPlaySessionParams SessionParams;
 		GEditor->RequestPlaySession(SessionParams);
 		Result->SetStringField(TEXT("action"), Action);

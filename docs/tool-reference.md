@@ -470,7 +470,7 @@ UE-MCP exposes **<!-- count:tools -->20<!-- /count --> category tools** covering
 | `execute_python` | Run Python in editor. Params: `code` |
 | `run_python_file` | Run a Python file from disk with __file__/__name__ populated (#142). Params: `filePath, args?` |
 | `set_property` | Set UObject property. Params: `objectPath, propertyName, value` |
-| `play_in_editor` | PIE control. Params: `pieAction (start\\|stop\\|status)` |
+| `play_in_editor` | PIE control. Params: `pieAction (start\\|stop\\|status), waitForAssetRegistry? (start only; default true - block until the AssetRegistry initial scan completes before requesting PIE, otherwise PIE silently no-ops on cold editor starts), assetRegistryTimeoutSeconds? (default 180) (#406)` |
 | `get_runtime_value` | Read PIE actor value. Params: `actorLabel, propertyName` |
 | `get_pie_pawn` | Resolve the controlled pawn in the active PIE world. Params: `playerIndex? (default 0)` |
 | `invoke_function` | Call a BlueprintCallable / Exec UFUNCTION on an actor or one of its components. Params: `actorLabel, functionName, component? (component subobject name, #382), args? (object), actorArgs? (object mapping UObject* parameter name to actor label, resolved against live actors, #383), world? (editor\\|pie)` |
