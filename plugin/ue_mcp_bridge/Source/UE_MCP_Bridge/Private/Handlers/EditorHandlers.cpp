@@ -86,7 +86,6 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("save_asset"), &SaveAsset);
 	Registry.RegisterHandler(TEXT("save_dirty"), &SaveDirty);
 	Registry.RegisterHandler(TEXT("list_dirty_packages"), &ListDirtyPackages);
-	Registry.RegisterHandler(TEXT("pie_get_runtime_value"), &PieGetRuntimeValue);
 	Registry.RegisterHandler(TEXT("build_lighting"), &BuildLighting);
 	Registry.RegisterHandler(TEXT("build_all"), &BuildAll);
 	Registry.RegisterHandler(TEXT("validate_assets"), &ValidateAssets);
@@ -96,7 +95,6 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("create_new_level"), &CreateNewLevel);
 	Registry.RegisterHandler(TEXT("save_current_level"), &SaveCurrentLevel);
 	Registry.RegisterHandler(TEXT("open_asset"), &OpenAsset);
-	// Aliases for TS tool compatibility
 	Registry.RegisterHandler(TEXT("get_runtime_value"), &PieGetRuntimeValue);
 	// New handlers
 	Registry.RegisterHandler(TEXT("run_stat_command"), &RunStatCommand);
