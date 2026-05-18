@@ -151,6 +151,7 @@ namespace
 
 void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 {
+	Registry.RegisterHandler(TEXT("list_assets"), &ListAssets);
 	Registry.RegisterHandler(TEXT("search_assets"), &SearchAssets);
 	Registry.RegisterHandler(TEXT("read_asset"), &ReadAsset);
 	Registry.RegisterHandler(TEXT("read_asset_properties"), &ReadAssetProperties);
@@ -351,6 +352,41 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReindexAssetsFTS(const TSharedPtr<FJsonOb
 	TSharedPtr<FJsonObject> Result = MCPSuccess();
 	Result->SetStringField(TEXT("directory"), Directory);
 	Result->SetNumberField(TEXT("indexedCount"), Found.Num());
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FAssetHandlers::ListAssets(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString Directory = OptionalString(Params, TEXT("directory"), TEXT("/Game"));
+	const bool bRecursive = OptionalBool(Params, TEXT("recursive"), true);
+	const int32 MaxResults = OptionalInt(Params, TEXT("maxResults"), 2000);
+	const FString ClassFilter = OptionalString(Params, TEXT("classFilter"));
+
+	IAssetRegistry& Registry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+	TArray<FAssetData> Found;
+	Registry.GetAssetsByPath(FName(*Directory), Found, bRecursive);
+
+	TArray<TSharedPtr<FJsonValue>> Out;
+	for (const FAssetData& Data : Found)
+	{
+		if (Out.Num() >= MaxResults) break;
+		const FString ClassName = Data.AssetClassPath.GetAssetName().ToString();
+		if (!ClassFilter.IsEmpty() && !ClassName.Equals(ClassFilter, ESearchCase::IgnoreCase) && !ClassName.Contains(ClassFilter))
+		{
+			continue;
+		}
+		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+		Item->SetStringField(TEXT("path"), Data.PackageName.ToString());
+		Item->SetStringField(TEXT("name"), Data.AssetName.ToString());
+		Item->SetStringField(TEXT("className"), ClassName);
+		Out.Add(MakeShared<FJsonValueObject>(Item));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("directory"), Directory);
+	Result->SetBoolField(TEXT("recursive"), bRecursive);
+	Result->SetNumberField(TEXT("assetCount"), Out.Num());
+	Result->SetArrayField(TEXT("assets"), Out);
 	return MCPResult(Result);
 }
 

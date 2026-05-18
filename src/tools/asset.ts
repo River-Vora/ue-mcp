@@ -1,5 +1,3 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { z } from "zod";
 import { categoryTool, bp, type ToolDef } from "../types.js";
 import { Vec3, Rotator } from "../schemas.js";
@@ -8,39 +6,11 @@ export const assetTool: ToolDef = categoryTool(
   "asset",
   "Asset management: list, search, read, CRUD, import meshes/textures, datatables.",
   {
-    list: {
-      description: "List assets in directory. Params: directory?, typeFilter?, recursive?",
-      handler: async (ctx, p) => {
-        ctx.project.ensureLoaded();
-        const dir = p.directory ? ctx.project.resolveContentDir(p.directory as string) : ctx.project.contentDir!;
-        const recursive = p.recursive !== false;
-        const typeFilter = (p.typeFilter as string | undefined)?.toLowerCase();
-        if (!fs.existsSync(dir)) throw new Error(`Directory not found: ${dir}`);
-        const assets: Array<{ path: string; name: string; extension: string; sizeKB: number }> = [];
-        function scan(d: string): void {
-          for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
-            const full = path.join(d, entry.name);
-            if (entry.isDirectory()) { if (recursive) scan(full); }
-            else {
-              const ext = path.extname(entry.name).slice(1).toLowerCase();
-              if (ext !== "uasset" && ext !== "umap") continue;
-              if (typeFilter && ext !== typeFilter) continue;
-              assets.push({ path: ctx.project.getRelativeContentPath(full), name: path.basename(entry.name, path.extname(entry.name)), extension: ext, sizeKB: Math.round(fs.statSync(full).size / 1024) });
-            }
-          }
-        }
-        scan(dir);
-        const result: Record<string, unknown> = { directory: p.directory ?? "/Game/", recursive, assetCount: assets.length, assets: assets.slice(0, 2000) };
-        if (assets.length === 0) {
-          const plugins = ctx.project.discoverPlugins();
-          if (plugins.length > 0) {
-            result.suggestion = `No assets found in ${p.directory ?? "/Game/"}. This project has plugin content — try listing one of these: ${plugins.map((pl) => pl.mountPoint).join(", ")}`;
-            result.availablePlugins = plugins.map((pl) => ({ name: pl.name, mountPoint: pl.mountPoint }));
-          }
-        }
-        return result;
-      },
-    },
+    list: bp(
+      "List assets via the AssetRegistry (sees /Game and every mounted plugin root). Params: directory? (default /Game), classFilter?, recursive? (default true), maxResults? (default 2000)",
+      "list_assets",
+      (p) => ({ directory: p.directory, classFilter: p.classFilter ?? p.typeFilter, recursive: p.recursive, maxResults: p.maxResults }),
+    ),
     search: {
       description: "Search by name/class/path. Params: query, directory?, maxResults?, searchAll?",
       handler: async (ctx, p) => {

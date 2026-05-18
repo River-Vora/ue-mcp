@@ -12,6 +12,7 @@ public:
 
 private:
 	// Handler implementations
+	static TSharedPtr<FJsonValue> ListAssets(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SearchAssets(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadAsset(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadAssetProperties(const TSharedPtr<FJsonObject>& Params);
