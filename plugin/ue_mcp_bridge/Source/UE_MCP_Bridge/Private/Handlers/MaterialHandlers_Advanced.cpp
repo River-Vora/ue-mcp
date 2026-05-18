@@ -96,6 +96,7 @@ TSharedPtr<FJsonValue> FMaterialHandlers::ValidateMaterial(const TSharedPtr<FJso
 	while (Stack.Num() > 0)
 	{
 		UMaterialExpression* Expr = Stack.Pop();
+#if UE_MCP_HAS_5_5_API
 		for (FExpressionInputIterator It{ Expr }; It; ++It)
 		{
 			if (It->Expression && !Referenced.Contains(It->Expression))
@@ -104,6 +105,18 @@ TSharedPtr<FJsonValue> FMaterialHandlers::ValidateMaterial(const TSharedPtr<FJso
 				Stack.Add(It->Expression);
 			}
 		}
+#else
+		// FExpressionInputIterator was added in 5.5; on 5.4 use the legacy GetInput(i) loop.
+		for (int32 InputIdx = 0, InputCount = Expr->GetInputs().Num(); InputIdx < InputCount; ++InputIdx)
+		{
+			FExpressionInput* In = Expr->GetInput(InputIdx);
+			if (In && In->Expression && !Referenced.Contains(In->Expression))
+			{
+				Referenced.Add(In->Expression);
+				Stack.Add(In->Expression);
+			}
+		}
+#endif
 	}
 
 	auto AllExpressions = Material->GetExpressions();
