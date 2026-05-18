@@ -35,6 +35,7 @@ inline FMCPAssetCreate<TAsset> MCPCreateAssetIdempotent(
 	const FString& PackagePath,
 	const FString& OnConflict,
 	const FString& AssetTypeLabel,
+	UClass* AssetClass,
 	UFactory* Factory)
 {
 	FMCPAssetCreate<TAsset> Out;
@@ -45,8 +46,14 @@ inline FMCPAssetCreate<TAsset> MCPCreateAssetIdempotent(
 		return Out;
 	}
 
+	if (!AssetClass)
+	{
+		Out.EarlyReturn = MCPError(FString::Printf(TEXT("%s class is unavailable (plugin not loaded?)"), *AssetTypeLabel));
+		return Out;
+	}
+
 	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	UObject* NewAsset = AssetToolsModule.Get().CreateAsset(Name, PackagePath, TAsset::StaticClass(), Factory);
+	UObject* NewAsset = AssetToolsModule.Get().CreateAsset(Name, PackagePath, AssetClass, Factory);
 	if (!NewAsset)
 	{
 		Out.EarlyReturn = MCPError(FString::Printf(TEXT("Failed to create %s asset"), *AssetTypeLabel));
@@ -59,6 +66,18 @@ inline FMCPAssetCreate<TAsset> MCPCreateAssetIdempotent(
 		return Out;
 	}
 	return Out;
+}
+
+/** Overload for the common case where TAsset's class is statically known. */
+template <typename TAsset>
+inline FMCPAssetCreate<TAsset> MCPCreateAssetIdempotent(
+	const FString& Name,
+	const FString& PackagePath,
+	const FString& OnConflict,
+	const FString& AssetTypeLabel,
+	UFactory* Factory)
+{
+	return MCPCreateAssetIdempotent<TAsset>(Name, PackagePath, OnConflict, AssetTypeLabel, TAsset::StaticClass(), Factory);
 }
 
 // (Rollback emission lives in HandlerUtils.h as MCPSetDeleteAssetRollback;
