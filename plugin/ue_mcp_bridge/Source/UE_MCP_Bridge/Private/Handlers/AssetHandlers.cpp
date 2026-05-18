@@ -2,6 +2,7 @@
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 #include "HandlerJsonProperty.h"
+#include "HandlerAssetCreate.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "Subsystems/AssetEditorSubsystem.h"
@@ -1543,18 +1544,10 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateDataAsset(const TSharedPtr<FJsonObj
 
 	const FString FullPath = FString::Printf(TEXT("%s/%s.%s"), *PackagePath, *Name, *Name);
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
-	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("DataAsset")))
-	{
-		return Existing;
-	}
 
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, DataClass, nullptr);
-	if (!NewAsset)
-	{
-		return MCPError(FString::Printf(TEXT("Failed to create DataAsset %s of class %s"), *Name, *DataClass->GetName()));
-	}
+	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, TEXT("DataAsset"), DataClass, nullptr);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
+	UObject* NewAsset = Created.Asset;
 
 	// Optional properties object — use recursive JSON-to-property setter so that
 	// TArray<FStruct> with nested UObject refs, FGameplayTag, etc. all work (#196, #199).
@@ -2265,23 +2258,15 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateInterchangePipeline(const TSharedPt
 	const FString MeshType = OptionalString(Params, TEXT("meshType"), TEXT("skeletal")).ToLower();
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("InterchangePipeline")))
-	{
-		return Existing;
-	}
-
 	UClass* PipelineClass = FindObject<UClass>(nullptr, TEXT("/Script/InterchangePipelines.InterchangeGenericAssetsPipeline"));
 	if (!PipelineClass)
 	{
 		return MCPError(TEXT("InterchangeGenericAssetsPipeline class not found. Enable the Interchange Editor plugin."));
 	}
 
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	UObject* NewAsset = AssetToolsModule.Get().CreateAsset(Name, PackagePath, PipelineClass, nullptr);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create InterchangePipeline asset"));
-	}
+	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, TEXT("InterchangePipeline"), PipelineClass, nullptr);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
+	UObject* NewAsset = Created.Asset;
 
 	// Default mesh-pipeline settings. We write through SetJsonOnProperty so
 	// every field stays in sync with the asset's UPROPERTY layout.

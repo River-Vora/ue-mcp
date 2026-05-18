@@ -1,6 +1,7 @@
 #include "PCGHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+#include "HandlerAssetCreate.h"
 #include "VolumeHelpers_Internal.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
@@ -356,27 +357,16 @@ TSharedPtr<FJsonValue> FPCGHandlers::CreatePCGGraph(const TSharedPtr<FJsonObject
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/PCG"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Existing = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("PCGGraph")))
-	{
-		return Existing;
-	}
+	auto Created = MCPCreateAssetIdempotent<UPCGGraph>(Name, PackagePath, OnConflict, TEXT("PCGGraph"), nullptr);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
 
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
-
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, UPCGGraph::StaticClass(), nullptr);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create PCGGraph"));
-	}
-
-	UEditorAssetLibrary::SaveLoadedAsset(NewAsset, /*bOnlyIfIsDirty=*/false);
+	UEditorAssetLibrary::SaveLoadedAsset(Created.Asset, /*bOnlyIfIsDirty=*/false);
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), NewAsset->GetPathName());
+	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
 	Result->SetStringField(TEXT("name"), Name);
-	MCPSetDeleteAssetRollback(Result, NewAsset->GetPathName());
+	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
 	return MCPResult(Result);
 }
 

@@ -1,6 +1,7 @@
 #include "ReflectionHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+#include "HandlerAssetCreate.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/Class.h"
 #include "UObject/UnrealType.h"
@@ -469,9 +470,6 @@ TSharedPtr<FJsonValue> FReflectionHandlers::CreateEnum(const TSharedPtr<FJsonObj
 	const FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	if (auto Hit = MCPCheckAssetExists(PackagePath, Name, OnConflict, TEXT("UserDefinedEnum"))) return Hit;
-
-	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
 	UClass* FactoryClass = FindObject<UClass>(nullptr, TEXT("/Script/UnrealEd.EnumFactory"));
 	if (!FactoryClass)
 	{
@@ -483,16 +481,10 @@ TSharedPtr<FJsonValue> FReflectionHandlers::CreateEnum(const TSharedPtr<FJsonObj
 		return MCPError(TEXT("EnumFactory not found in /Script/UnrealEd"));
 	}
 	UFactory* Factory = NewObject<UFactory>(GetTransientPackage(), FactoryClass);
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, UUserDefinedEnum::StaticClass(), Factory);
-	if (!NewAsset)
-	{
-		return MCPError(TEXT("Failed to create UserDefinedEnum"));
-	}
-	UUserDefinedEnum* Enum = Cast<UUserDefinedEnum>(NewAsset);
-	if (!Enum)
-	{
-		return MCPError(TEXT("CreateAsset returned non-UUserDefinedEnum"));
-	}
+
+	auto Created = MCPCreateAssetIdempotent<UUserDefinedEnum>(Name, PackagePath, OnConflict, TEXT("UserDefinedEnum"), Factory);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
+	UUserDefinedEnum* Enum = Created.Asset;
 
 	// Optional entries[] — array of strings or {name, displayName?}.
 	const TArray<TSharedPtr<FJsonValue>>* EntriesArr = nullptr;
