@@ -2,6 +2,12 @@
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 
+// StateTree authoring depends on UStateTreeEditingSubsystem (compile +
+// validate entry points) and the generic FPropertyBindingPath system, both
+// introduced in UE 5.5. On 5.4 we register no handlers and emit a one-line
+// log so the rest of the plugin still loads.
+#if UE_MCP_HAS_5_5_API
+
 #include "StateTree.h"
 #include "StateTreeEditorData.h"
 #include "StateTreeState.h"
@@ -23,8 +29,14 @@
 #include "StateTreeTaskBase.h"
 #include "StateTreeEditorTypes.h"
 
+#endif // UE_MCP_HAS_5_5_API
+
 void FStateTreeHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 {
+#if !UE_MCP_HAS_5_5_API
+	UE_LOG(LogTemp, Warning, TEXT("[UE_MCP_Bridge] StateTree handlers require UE 5.5+; skipped on this engine version."));
+	return;
+#else
 	Registry.RegisterHandler(TEXT("read_state_tree"), &ReadStateTree);
 	Registry.RegisterHandler(TEXT("list_state_tree_states"), &ListStates);
 	Registry.RegisterHandler(TEXT("add_state_tree_state"), &AddState);
@@ -60,7 +72,10 @@ void FStateTreeHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("set_state_tree_root_parameters"), &SetRootParameters);
 	Registry.RegisterHandler(TEXT("compile_state_tree"), &CompileStateTree);
 	Registry.RegisterHandler(TEXT("validate_state_tree"), &ValidateStateTree);
+#endif // UE_MCP_HAS_5_5_API
 }
+
+#if UE_MCP_HAS_5_5_API
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -2219,3 +2234,5 @@ TSharedPtr<FJsonValue> FStateTreeHandlers::ValidateStateTree(const TSharedPtr<FJ
 	Result->SetBoolField(TEXT("validated"), true);
 	return MCPResult(Result);
 }
+
+#endif // UE_MCP_HAS_5_5_API
