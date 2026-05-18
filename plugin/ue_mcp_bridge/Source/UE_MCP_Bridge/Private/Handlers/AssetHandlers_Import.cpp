@@ -6,6 +6,7 @@
 #include "AssetHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+#include "HandlerAssetCreate.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
 #include "AssetImportTask.h"
@@ -742,34 +743,11 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateDataTable(const TSharedPtr<FJsonObj
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/DataTables"));
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
-	// Idempotency: check if the DataTable already exists at the target path.
-	const FString ProbePath = PackagePath + TEXT("/") + Name + TEXT(".") + Name;
-	if (UDataTable* Existing = LoadObject<UDataTable>(nullptr, *ProbePath))
-	{
-		if (OnConflict == TEXT("error"))
-		{
-			return MCPError(FString::Printf(TEXT("DataTable '%s' already exists"), *ProbePath));
-		}
-		auto ExistingResult = MCPSuccess();
-		MCPSetExisted(ExistingResult);
-		ExistingResult->SetStringField(TEXT("name"), Name);
-		ExistingResult->SetStringField(TEXT("packagePath"), PackagePath);
-		ExistingResult->SetStringField(TEXT("assetPath"), Existing->GetPathName());
-		ExistingResult->SetStringField(TEXT("rowStruct"), Existing->RowStruct ? Existing->RowStruct->GetName() : TEXT(""));
-		ExistingResult->SetNumberField(TEXT("rowCount"), Existing->GetRowMap().Num());
-		return MCPResult(ExistingResult);
-	}
-
 	// Find the row struct type
 	UScriptStruct* ScriptStruct = nullptr;
-
-	// First try as a full path
 	ScriptStruct = LoadObject<UScriptStruct>(nullptr, *RowStruct);
-
-	// If not found, try finding by short name
 	if (!ScriptStruct)
 	{
-		// Try common patterns: search for the struct by name in all packages
 		for (TObjectIterator<UScriptStruct> It; It; ++It)
 		{
 			if (It->GetName() == RowStruct)
@@ -779,27 +757,37 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateDataTable(const TSharedPtr<FJsonObj
 			}
 		}
 	}
-
 	if (!ScriptStruct)
 	{
 		return MCPError(FString::Printf(TEXT("Row struct not found: %s"), *RowStruct));
 	}
 
-	// Create the DataTable asset
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-	IAssetTools& AssetTools = AssetToolsModule.Get();
-
 	UDataTableFactory* Factory = NewObject<UDataTableFactory>();
 	Factory->Struct = ScriptStruct;
 
-	UObject* NewAsset = AssetTools.CreateAsset(Name, PackagePath, UDataTable::StaticClass(), Factory);
-	if (!NewAsset)
+	auto Created = MCPCreateAssetIdempotent<UDataTable>(Name, PackagePath, OnConflict, TEXT("DataTable"), Factory);
+	if (Created.EarlyReturn)
 	{
-		return MCPError(FString::Printf(TEXT("Failed to create DataTable: %s/%s"), *PackagePath, *Name));
+		// Augment the Existed payload with DataTable-specific fields if it was an idempotency hit.
+		if (TSharedPtr<FJsonObject> ExistingObj = Created.EarlyReturn->AsObject())
+		{
+			bool bExisted = false;
+			if (ExistingObj->TryGetBoolField(TEXT("existed"), bExisted) && bExisted)
+			{
+				FString ExistingAssetPath;
+				ExistingObj->TryGetStringField(TEXT("path"), ExistingAssetPath);
+				if (UDataTable* Existing = LoadObject<UDataTable>(nullptr, *ExistingAssetPath))
+				{
+					ExistingObj->SetStringField(TEXT("assetPath"), Existing->GetPathName());
+					ExistingObj->SetStringField(TEXT("rowStruct"), Existing->RowStruct ? Existing->RowStruct->GetName() : TEXT(""));
+					ExistingObj->SetNumberField(TEXT("rowCount"), Existing->GetRowMap().Num());
+				}
+			}
+		}
+		return Created.EarlyReturn;
 	}
-
-	UDataTable* DataTable = Cast<UDataTable>(NewAsset);
-	const FString AssetPath = NewAsset->GetPathName();
+	UDataTable* DataTable = Created.Asset;
+	const FString AssetPath = DataTable->GetPathName();
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
