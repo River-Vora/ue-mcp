@@ -63,20 +63,18 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          # Node 24 LTS ships npm 11.x natively. Trusted publishing (OIDC)
+          # requires npm >= 11.5.1. Bumping the node version here is the
+          # cleanest path — corepack on Node 22 downloads npm 11.x but its
+          # shim is shadowed by setup-node's pinned binary, so `npm` keeps
+          # resolving to 10.x and OIDC never engages.
+          node-version: "24"
           cache: "npm"
 
-      - name: Activate npm 11.5.2 via corepack
-        # npm trusted publishing (OIDC) requires npm CLI >= 11.5.1. Node 22
-        # LTS ships with npm 10.x and its bundled corepack's `npm@latest`
-        # pointer is stale (resolves to 10.9.8). Pin an explicit version
-        # corepack will fetch from the registry. Direct `npm install -g
-        # npm@latest` is unreliable because it corrupts the running install
-        # when crossing the 10 -> 11 major boundary on hosted runners.
+      - name: Verify npm >= 11.5.1
         run: |
-          corepack enable
-          corepack prepare npm@11.5.2 --activate
           npm --version
+          node -e "const v=require('child_process').execSync('npm --version').toString().trim();const [maj,min,pat]=v.split('.').map(Number);if (maj < 11 || (maj===11 && min<5) || (maj===11 && min===5 && pat<1)) { console.error('npm '+v+' is below the 11.5.1 minimum for trusted publishing'); process.exit(1); }"
 
       - name: Configure git identity
         run: |
