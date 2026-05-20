@@ -64,8 +64,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          registry-url: "https://registry.npmjs.org"
           cache: "npm"
+
+      - name: Upgrade npm for trusted publishing
+        # npm trusted publishing (OIDC) requires npm CLI >= 11.5.1. Node 22
+        # LTS ships with npm 10.x, so upgrade in-place before any publish.
+        # Without this, `npm publish --provenance` falls back to legacy token
+        # auth and 404s because there is no NPM_TOKEN secret anymore.
+        run: npm install -g npm@latest
 
       - name: Configure git identity
         run: |
@@ -165,10 +171,12 @@ jobs:
           git push origin "$TAG"
 
       - name: Publish to npm
+        # Trusted publishing: no NPM_TOKEN secret. The npm CLI claims the
+        # GitHub Actions OIDC token from the runner and exchanges it with
+        # npmjs.org under the trusted-publisher config bound to this repo
+        # and workflow. `id-token: write` on the job is required (set above).
         if: steps.version.outputs.changed == 'true'
         run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Package tarball
         if: steps.version.outputs.changed == 'true'
