@@ -2,6 +2,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import yaml from "js-yaml";
 import { ProjectContext } from "./project.js";
 import { deploy } from "./deployer.js";
 import { installSkills, uninstallSkills } from "./skills.js";
@@ -140,36 +141,85 @@ function writeMcpConfig(configPath: string, uprojectPath: string): void {
 }
 
 /* ------------------------------------------------------------------ */
-/*  .ue-mcp.json config                                                */
+/*  ue-mcp.yml config writer                                            */
 /* ------------------------------------------------------------------ */
 
-interface UeMcpInitConfig {
-  contentRoots?: string[];
-  disable?: string[];
-}
-
+/**
+ * Merge tool-category + content-root selections into ue-mcp.yml's `ue-mcp:`
+ * block. Preserves anything already in the file (version, plugins, tasks,
+ * flows, http, feedback, etc.).
+ */
 function writeProjectConfig(projectDir: string, disabled: string[]): void {
-  const configPath = path.join(projectDir, ".ue-mcp.json");
-  let existing: UeMcpInitConfig = {};
+  const configPath = path.join(projectDir, "ue-mcp.yml");
+  let existing: Record<string, unknown> = {};
   if (fs.existsSync(configPath)) {
     try {
-      existing = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      existing = (yaml.load(fs.readFileSync(configPath, "utf-8")) as Record<string, unknown>) ?? {};
     } catch (e) {
-      logWarn("init", `.ue-mcp.json was not valid JSON - overwriting`, e);
+      logWarn("init", `ue-mcp.yml was not valid YAML - overwriting`, e);
+      existing = {};
     }
   }
 
+  const block = ((existing["ue-mcp"] as Record<string, unknown>) ?? {});
+  if (typeof block.version !== "number") block.version = 1;
+
   if (disabled.length > 0) {
-    existing.disable = disabled;
+    block.disable = disabled;
   } else {
-    delete existing.disable;
+    delete block.disable;
   }
 
-  if (!existing.contentRoots) {
-    existing.contentRoots = ["/Game/"];
+  if (!Array.isArray(block.contentRoots) || (block.contentRoots as unknown[]).length === 0) {
+    block.contentRoots = ["/Game/"];
   }
 
-  fs.writeFileSync(configPath, JSON.stringify(existing, null, 2));
+  existing["ue-mcp"] = block;
+
+  // Ensure tasks/flows blocks exist so the scaffold matches the version
+  // ue-mcp init creates from scratch. Other top-level keys are preserved.
+  if (!("tasks" in existing)) existing.tasks = {};
+  if (!("flows" in existing)) existing.flows = {};
+
+  fs.writeFileSync(configPath, yaml.dump(existing, { indent: 2 }), "utf-8");
+}
+
+/**
+ * Make sure ue-mcp.local.yml is gitignored on a best-effort basis. Only
+ * touches .gitignore if the project is inside a git repo (we check for
+ * a .git directory walking up). Idempotent: if the entry is already
+ * present, no-op.
+ */
+function ensureLocalYmlGitignored(projectDir: string): void {
+  // Find the enclosing git repo by walking up; ignore if none found.
+  let gitRoot: string | null = null;
+  let dir = projectDir;
+  for (let i = 0; i < 32; i++) {
+    if (fs.existsSync(path.join(dir, ".git"))) { gitRoot = dir; break; }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  if (!gitRoot) return;
+
+  // Choose the closest .gitignore: prefer one at the project root, fall back
+  // to the git root.
+  const candidates = [path.join(projectDir, ".gitignore"), path.join(gitRoot, ".gitignore")];
+  const target = candidates.find((c) => fs.existsSync(c)) ?? candidates[0];
+
+  let content = "";
+  if (fs.existsSync(target)) content = fs.readFileSync(target, "utf-8");
+
+  // Match either bare "ue-mcp.local.yml" or with a leading "/" path anchor.
+  const present = /^\s*\/?ue-mcp\.local\.ya?ml\s*$/m.test(content);
+  if (present) return;
+
+  const needsLeadingNewline = content.length > 0 && !content.endsWith("\n");
+  fs.writeFileSync(
+    target,
+    `${content}${needsLeadingNewline ? "\n" : ""}ue-mcp.local.yml\n`,
+    "utf-8",
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -267,9 +317,10 @@ async function init() {
   );
   console.log("");
 
-  // On re-init, respect prior opt-outs in .ue-mcp.json so the user doesn't
+  // On re-init, respect prior opt-outs in ue-mcp.yml so the user doesn't
   // have to re-uncheck categories they already disabled. project.config is
-  // populated by ProjectContext.setProject above.
+  // populated by ProjectContext.setProject above (which also migrates any
+  // legacy .ue-mcp.json into the YAML files on first run).
   const existingDisabled = new Set(project.config.disable ?? []);
 
   // 2. Tool category selection — interactive checkboxes with descriptions
@@ -334,7 +385,7 @@ async function init() {
     ok("Required plugins already enabled");
   }
 
-  // .ue-mcp.json is written at the end of init() once all decisions
+  // ue-mcp.yml is written at the end of init() once all decisions
   // (categories, MCP clients, agent behavior) are settled — see step 10.
 
   // 7. Scaffold ue-mcp.yml if it doesn't exist
@@ -438,20 +489,21 @@ async function init() {
   // Every checkbox in this section defaults OFF on a fresh install. A user
   // who blasts through with Enter gets nothing added — no tool registered,
   // no hook installed, no skill files copied. Re-init preserves prior
-  // choices by reading state from .ue-mcp.json (categories, installed
-  // hooks) and the filesystem (skills directory).
+  // choices by reading state from ue-mcp.yml (categories) +
+  // ue-mcp.local.yml (installedHooks) and the filesystem (skills directory).
   const configuredClaudeCode = detected.some(
     (c, i) => c.name.startsWith("Claude Code") && clientStates[i],
   );
 
   console.log("");
 
-  // .ue-mcp.json existing means init has been run before in this project.
-  // We use that as the "this is a re-init" signal: prior choices should be
-  // honored. On a fresh install (no config file yet), default all Agent
-  // behavior off regardless of what the eventual disable[] would look like.
-  const ueMcpJsonPathForSeed = path.join(project.projectDir!, ".ue-mcp.json");
-  const isReInit = fs.existsSync(ueMcpJsonPathForSeed);
+  // ue-mcp.yml existing means init has been run before in this project
+  // (or a legacy .ue-mcp.json was migrated into it). We use that as the
+  // "this is a re-init" signal: prior choices should be honored. On a
+  // fresh install (no config file yet), default all Agent behavior off
+  // regardless of what the eventual disable[] would look like.
+  const ueMcpYmlPathForSeed = path.join(project.projectDir!, "ue-mcp.yml");
+  const isReInit = fs.existsSync(ueMcpYmlPathForSeed);
 
   const behaviorItems: CheckboxItem[] = [
     {
@@ -566,13 +618,18 @@ async function init() {
     }
   }
 
-  // 10. Write .ue-mcp.json with the final disable[] — done last so the
+  // 10. Write ue-mcp.yml with the final disable[] — done last so the
   // feedback toggle from step 9 is captured. contentRoots seeding lives
   // inside writeProjectConfig.
-  const ueMcpJsonPath = path.join(project.projectDir!, ".ue-mcp.json");
+  const ueMcpYmlPath = path.join(project.projectDir!, "ue-mcp.yml");
   writeProjectConfig(project.projectDir!, disabled);
-  ok(".ue-mcp.json written");
-  wrote.push({ what: "tool surface + content roots", where: ueMcpJsonPath });
+  ok("ue-mcp.yml written");
+  wrote.push({ what: "tool surface + content roots", where: ueMcpYmlPath });
+
+  // Best-effort: add ue-mcp.local.yml to .gitignore if this project lives
+  // in a git repo. The local file holds user-machine-specific state
+  // (installed hook paths) and shouldn't be tracked.
+  ensureLocalYmlGitignored(project.projectDir!);
 
   // 11. Done — recap what landed where so the user can find / undo anything.
   console.log("");

@@ -2,9 +2,9 @@
 /**
  * `npx ue-mcp uninstall-hooks` — manual escape hatch.
  *
- * Reads `installedHooks[]` from .ue-mcp.json in cwd (or a path passed as
- * argv[2]), removes the ue-mcp PostToolUse matcher from each, and clears the
- * registry.
+ * Reads `installedHooks[]` from ue-mcp.local.yml in cwd (or a path passed
+ * as argv[2]), removes the ue-mcp PostToolUse matcher from each, and clears
+ * the registry.
  */
 
 import * as fs from "node:fs";
@@ -23,10 +23,16 @@ function resolveProjectDir(): string | null {
     }
     return path.resolve(arg);
   }
-  // Walk up from cwd to find a .ue-mcp.json.
+  // Walk up from cwd looking for a ue-mcp project (either YAML file is a
+  // signal that we're in a configured project root).
   let dir = process.cwd();
   for (let i = 0; i < 32; i++) {
-    if (fs.existsSync(path.join(dir, ".ue-mcp.json"))) return dir;
+    if (
+      fs.existsSync(path.join(dir, "ue-mcp.yml")) ||
+      fs.existsSync(path.join(dir, "ue-mcp.local.yml"))
+    ) {
+      return dir;
+    }
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
@@ -41,7 +47,7 @@ function main(): void {
 
   const projectDir = resolveProjectDir();
   if (!projectDir) {
-    fail("Could not locate a .ue-mcp.json. Pass the project directory as an argument:");
+    fail("Could not locate a ue-mcp project. Pass the project directory as an argument:");
     console.log(`    ${DIM}npx ue-mcp uninstall-hooks <path-to-ue-project-dir>${RESET}`);
     process.exit(1);
   }
@@ -49,7 +55,7 @@ function main(): void {
   const result = uninstallAllRegisteredHooks(projectDir);
 
   if (result.removed.length === 0 && result.skipped.length === 0) {
-    info("No installed hooks found in .ue-mcp.json. Nothing to remove.");
+    info("No installed hooks found in ue-mcp.local.yml. Nothing to remove.");
   }
   for (const p of result.removed) {
     ok(`Removed hook from ${p}`);

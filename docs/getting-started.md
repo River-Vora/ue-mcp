@@ -23,14 +23,14 @@ UE-MCP lets you tell an AI assistant what you want done in Unreal. It can place 
 The wizard then:
 
 1. Auto-detects your `.uproject`.
-2. Asks which **tool categories** to enable (`level`, `blueprint`, `material`, `niagara`, etc.), with one-line descriptions. Pre-checked on a fresh install; on re-init, prior opt-outs in `.ue-mcp.json disable[]` are remembered.
+2. Asks which **tool categories** to enable (`level`, `blueprint`, `material`, `niagara`, etc.), with one-line descriptions. Pre-checked on a fresh install; on re-init, prior opt-outs in `ue-mcp.yml`'s `ue-mcp.disable[]` are remembered.
 3. Copies the C++ bridge plugin into `<YourProject>/Plugins/UE_MCP_Bridge/`.
 4. Enables the plugins it needs in your `.uproject`: `UE_MCP_Bridge`, `PythonScriptPlugin`, plus any of `Niagara`, `PCG`, `GameplayAbilities`, `EnhancedInput` required by the categories you kept.
 5. Scaffolds an empty `ue-mcp.yml` (for custom flows) if missing.
 6. Detects installed MCP clients (Claude Code project + global, Claude Desktop, Cursor) and writes the config for each you confirm. Global/Desktop configs default unchecked since opting them in affects every project on the machine.
 7. Asks about **agent behavior** (all default off on fresh installs — blasting through with Enter adds no surprises): enable the `feedback(submit)` tool, install the Claude-Code-only PostToolUse hook that nudges the agent to offer feedback after `execute_python`, install bundled Claude Code workflow skills.
 8. If you opted into the feedback prompt hook, optionally runs the **GitHub OAuth device flow** so `feedback(submit)` can author issues as your real GitHub user (default `author="user"`). The token is cached at `~/.ue-mcp/auth.json` (mode 600) and reused. Skip if you don't want it now — you can run `npx ue-mcp auth` later, or call `feedback(submit)` with `author="bot"` to post anonymously instead.
-9. Writes the final `.ue-mcp.json` and prints a recap of every file or directory init touched.
+9. Writes the final `ue-mcp.yml` (and `ue-mcp.local.yml` if any user-local state needs tracking) and prints a recap of every file or directory init touched. If your project is inside a git repo, init also adds `ue-mcp.local.yml` to `.gitignore`.
 
 ## 2. Open the Editor
 
@@ -107,12 +107,13 @@ npx ue-mcp update
 
 ## Unattended agent sessions
 
-If you set up the feedback prompt hook and then leave a long-running agent working, the elicitation approval prompt on `feedback(submit)` will stall the session waiting for you. For unattended runs, set a non-interactive feedback mode in `.ue-mcp.json`:
+If you set up the feedback prompt hook and then leave a long-running agent working, the elicitation approval prompt on `feedback(submit)` will stall the session waiting for you. For unattended runs, set a non-interactive feedback mode in `ue-mcp.yml`:
 
-```json
-{
-  "feedback": { "mode": "defer" }
-}
+```yaml
+ue-mcp:
+  version: 1
+  feedback:
+    mode: defer
 ```
 
 `defer` writes submissions to `~/.ue-mcp/pending-feedback/` for later review with `npx ue-mcp feedback list/show/approve/discard`. `auto-approve` posts directly without prompting. Both still run the credential and privacy scrubs. See [Feedback → modes](feedback.md#feedback-modes).
@@ -183,6 +184,6 @@ The first run auto-deploys the C++ plugin. To deploy explicitly: `npx ue-mcp upd
 - **[Tool Reference](tool-reference.md)** - every tool and every action
 - **[Flows](flows.md)** - chain actions into reusable YAML workflows with rollback and retries
 - **[Architecture](architecture.md)** - what's actually happening when you call a tool
-- **[Configuration](configuration.md)** - `.ue-mcp.json` options and per-client config
+- **[Configuration](configuration.md)** - `ue-mcp.yml` options and per-client config
 - **[Neon Shrine Demo](neon-shrine-demo.md)** - guided 19-step procedural scene build
 - **[Troubleshooting](troubleshooting.md)** - connection errors, build errors, asset path errors

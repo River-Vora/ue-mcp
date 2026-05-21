@@ -93,9 +93,13 @@ UE-MCP expects Unreal-style asset paths:
 
 If `asset(action="search")` misses assets in plugin directories:
 
-1. Add the content root to `.ue-mcp.json`:
-   ```json
-   { "contentRoots": ["/Game/", "/MyPlugin/"] }
+1. Add the content root to `ue-mcp.yml`:
+   ```yaml
+   ue-mcp:
+     version: 1
+     contentRoots:
+       - /Game/
+       - /MyPlugin/
    ```
 2. Wildcards work in search queries: `asset(action="search", query="/Game/Characters/*")`
 

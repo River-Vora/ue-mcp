@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import yaml from "js-yaml";
 import { warn as logWarn } from "./log.js";
 
 /**
@@ -8,9 +9,10 @@ import { warn as logWarn } from "./log.js";
  * workaround.
  *
  * Two invariants:
- *   1. Every install records the settings path in .ue-mcp.json
- *      `installedHooks[]`, so uninstall can reach every site even after
- *      the user moves their MCP client config.
+ *   1. Every install records the settings path in ue-mcp.local.yml's
+ *      `ue-mcp.installedHooks[]`, so uninstall can reach every site even
+ *      after the user moves their MCP client config. The local file is
+ *      gitignored — these paths are user-machine-specific.
  *   2. Uninstall is idempotent — calling it against a settings file that
  *      doesn't have our matcher is a no-op, not an error.
  */
@@ -53,43 +55,76 @@ function writeSettings(settingsPath: string, settings: ClaudeSettings): void {
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
 }
 
-interface ProjectConfig {
-  installedHooks?: string[];
+/**
+ * Read/write the `ue-mcp:` block of ue-mcp.local.yml. The local file is
+ * gitignored and holds user-machine-specific state — installed hook paths
+ * are absolute paths in the user's filesystem and have no business in
+ * tracked config.
+ */
+
+interface LocalYaml {
+  "ue-mcp"?: {
+    installedHooks?: string[];
+    [key: string]: unknown;
+  };
   [key: string]: unknown;
 }
 
-function readProjectConfig(projectDir: string): {
-  configPath: string;
-  config: ProjectConfig;
-} {
-  const configPath = path.join(projectDir, ".ue-mcp.json");
-  if (!fs.existsSync(configPath)) return { configPath, config: {} };
+function localPath(projectDir: string): string {
+  return path.join(projectDir, "ue-mcp.local.yml");
+}
+
+function readLocal(projectDir: string): LocalYaml {
+  const file = localPath(projectDir);
+  if (!fs.existsSync(file)) return {};
   try {
-    return {
-      configPath,
-      config: JSON.parse(fs.readFileSync(configPath, "utf-8")),
-    };
+    return (yaml.load(fs.readFileSync(file, "utf-8")) as LocalYaml | null) ?? {};
   } catch (e) {
     logWarn(
       "hook-installer",
-      `.ue-mcp.json at ${configPath} was not valid JSON — registry will be rewritten`,
+      `ue-mcp.local.yml at ${file} did not parse — installedHooks registry will be rewritten`,
       e,
     );
-    return { configPath, config: {} };
+    return {};
   }
 }
 
-function writeProjectConfig(configPath: string, config: ProjectConfig): void {
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+function writeLocal(projectDir: string, doc: LocalYaml): void {
+  const file = localPath(projectDir);
+  // Empty doc → remove the file rather than leaving a stub behind.
+  const block = doc["ue-mcp"];
+  if (
+    !block ||
+    Object.keys(block).filter((k) => block[k] !== undefined).length === 0
+  ) {
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+    return;
+  }
+  fs.writeFileSync(file, yaml.dump(doc, { indent: 2 }), "utf-8");
+}
+
+function getInstalledHooks(projectDir: string): string[] {
+  const local = readLocal(projectDir);
+  const hooks = local["ue-mcp"]?.installedHooks;
+  return Array.isArray(hooks) ? hooks : [];
+}
+
+function setInstalledHooks(projectDir: string, hooks: string[]): void {
+  const local = readLocal(projectDir);
+  const block = (local["ue-mcp"] ??= {});
+  if (hooks.length > 0) {
+    block.installedHooks = hooks;
+  } else {
+    delete block.installedHooks;
+  }
+  writeLocal(projectDir, local);
 }
 
 function registerInstalledHook(projectDir: string, settingsPath: string): void {
   const abs = path.resolve(settingsPath);
-  const { configPath, config } = readProjectConfig(projectDir);
-  const installed = new Set(config.installedHooks ?? []);
+  const installed = new Set(getInstalledHooks(projectDir));
   installed.add(abs);
-  config.installedHooks = [...installed].sort();
-  writeProjectConfig(configPath, config);
+  setInstalledHooks(projectDir, [...installed].sort());
 }
 
 function unregisterInstalledHook(
@@ -97,19 +132,18 @@ function unregisterInstalledHook(
   settingsPath: string,
 ): void {
   const abs = path.resolve(settingsPath);
-  const { configPath, config } = readProjectConfig(projectDir);
-  if (!config.installedHooks || config.installedHooks.length === 0) return;
-  config.installedHooks = config.installedHooks.filter(
-    (p) => path.resolve(p) !== abs,
+  const existing = getInstalledHooks(projectDir);
+  if (existing.length === 0) return;
+  setInstalledHooks(
+    projectDir,
+    existing.filter((p) => path.resolve(p) !== abs),
   );
-  if (config.installedHooks.length === 0) delete config.installedHooks;
-  writeProjectConfig(configPath, config);
 }
 
 /**
  * Install the ue-mcp PostToolUse hook into a Claude Code settings.json. If
  * `projectDir` is supplied, the settings path is also recorded in the
- * project's .ue-mcp.json installedHooks registry.
+ * project's ue-mcp.local.yml installedHooks registry.
  */
 export function installClaudeHooks(
   settingsPath: string,
@@ -168,16 +202,15 @@ export function uninstallClaudeHooks(
 }
 
 /**
- * Uninstall the hook from every path recorded in .ue-mcp.json
- * `installedHooks[]`. Used by `npx ue-mcp uninstall-hooks` and by init when
- * the user disables feedback or opts out of the prompt checkbox.
+ * Uninstall the hook from every path recorded in ue-mcp.local.yml's
+ * `ue-mcp.installedHooks[]`. Used by `npx ue-mcp uninstall-hooks` and by
+ * init when the user disables feedback or opts out of the prompt checkbox.
  */
 export function uninstallAllRegisteredHooks(projectDir: string): {
   removed: string[];
   skipped: string[];
 } {
-  const { configPath, config } = readProjectConfig(projectDir);
-  const paths = config.installedHooks ?? [];
+  const paths = getInstalledHooks(projectDir);
   const removed: string[] = [];
   const skipped: string[] = [];
   for (const p of paths) {
@@ -185,7 +218,6 @@ export function uninstallAllRegisteredHooks(projectDir: string): {
     if (didRemove) removed.push(p);
     else skipped.push(p);
   }
-  delete config.installedHooks;
-  writeProjectConfig(configPath, config);
+  setInstalledHooks(projectDir, []);
   return { removed, skipped };
 }

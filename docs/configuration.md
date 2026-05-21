@@ -29,26 +29,45 @@ The easiest way to configure UE-MCP is to run `npx ue-mcp init` — it detects y
 
 You can start the server without a `.uproject` argument. It will run in a limited mode — you can then use `project(action="set_project", projectPath="...")` at runtime to attach to a project.
 
-## Project Configuration (`.ue-mcp.json`)
+## Project Configuration (`ue-mcp.yml`)
 
-Place a `.ue-mcp.json` file in your UE project root (next to the `.uproject`) to customize behavior. `npx ue-mcp init` creates this for you.
+Project-level config lives under the `ue-mcp:` block at the top of `ue-mcp.yml` (next to your `.uproject`). User-machine-specific state lives in `ue-mcp.local.yml`. Both files share the same schema; the loader deep-merges local on top of the tracked one. `npx ue-mcp init` creates and maintains them for you.
 
-```json
-{
-  "contentRoots": ["/Game/", "/MyPlugin/"],
-  "disable": ["gas", "networking"]
-}
+```yaml
+ue-mcp:
+  version: 1
+  contentRoots:
+    - /Game/
+    - /MyPlugin/
+  disable:
+    - gas
+    - networking
+  http:
+    enabled: false
+  feedback:
+    mode: interactive
+
+tasks: {}
+flows: {}
+plugins: []
 ```
 
-### Options
+!!! info "Tracked vs untracked"
+    `ue-mcp.yml` is meant to live in git so every collaborator sees the same project surface. `ue-mcp.local.yml` is gitignored by `npx ue-mcp init` (when run inside a git repo) and holds user-machine-specific state — currently just `installedHooks`, which lists absolute paths to your Claude Code settings files. Don't put project policy in the local file or shared things will silently drop on other machines.
+
+!!! tip "Migrating from `.ue-mcp.json`"
+    Earlier versions used `.ue-mcp.json` for the project config. On first run after upgrade, the server detects that file and migrates its contents (tracked fields → `ue-mcp.yml`, `installedHooks` → `ue-mcp.local.yml`) automatically, then deletes the JSON. You don't need to do anything.
+
+### `ue-mcp:` block options
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| `version` | `1` | `1` | Schema version; required. Set automatically by init. |
 | `contentRoots` | `string[]` | `["/Game/"]` | Content paths to search when using `asset(action="search")`. Add plugin content roots here if your project uses plugins with their own assets. |
 | `disable` | `string[]` | `[]` | Tool categories to disable. Disabled categories are not registered with the MCP server, reducing context noise for the AI. Use `"feedback"` here to opt out of the feedback tool entirely. |
 | `http` | `object` | `undefined` (HTTP server off) | Optional REST surface for the flow engine. Object with `enabled` (bool), `port` (default `7723`), `host` (default `127.0.0.1`). When `enabled: true`, the MCP server also serves `GET /flows`, `GET /flows/<name>/plan`, `POST /flows/<name>/run` over HTTP so external tools can drive flows without an MCP client. |
-| `installedHooks` | `string[]` | `[]` | Maintained by `npx ue-mcp init` / `npx ue-mcp uninstall-hooks`. Lists the absolute paths of every Claude Code `settings.json` where ue-mcp installed its feedback PostToolUse hook, so uninstall can find and remove them cleanly. Don't hand-edit. |
 | `feedback.mode` | `"interactive" \| "auto-approve" \| "defer"` | `"interactive"` | How `feedback(submit)` handles the consent gate. `interactive` blocks on the MCP elicitation prompt. `auto-approve` posts to GitHub immediately without prompting (scrubs still apply). `defer` writes the scrubbed payload to `~/.ue-mcp/pending-feedback/` for later review via `npx ue-mcp feedback list/approve/discard`. Override at runtime with `UE_MCP_FEEDBACK_MODE`. See [Feedback → modes](feedback.md#feedback-modes). |
+| `installedHooks` | `string[]` | `[]` | **Lives in `ue-mcp.local.yml`, not `ue-mcp.yml`.** Maintained by `npx ue-mcp init` / `npx ue-mcp uninstall-hooks`. Lists the absolute paths of every Claude Code `settings.json` where ue-mcp installed its feedback PostToolUse hook, so uninstall can find and remove them cleanly. Don't hand-edit. |
 
 ## Plugins
 
@@ -118,10 +137,10 @@ The C++ bridge plugin enables these UE plugins (adding them to `.uproject` if mi
 
 | Command | Description |
 |---------|-------------|
-| `npx ue-mcp init` | Interactive setup wizard. Deploys the C++ bridge plugin, writes MCP client configs, scaffolds `.ue-mcp.json` / `ue-mcp.yml`, optionally installs Claude Code skills + feedback prompt hook, optionally runs the GitHub OAuth device flow. |
+| `npx ue-mcp init` | Interactive setup wizard. Deploys the C++ bridge plugin, writes MCP client configs, scaffolds `ue-mcp.yml` (and adds `ue-mcp.local.yml` to `.gitignore` if the project's in git), optionally installs Claude Code skills + feedback prompt hook, optionally runs the GitHub OAuth device flow. Migrates any legacy `.ue-mcp.json` it finds. |
 | `npx ue-mcp update` | Re-deploy the C++ bridge plugin to the project. Use after a ue-mcp version bump. |
 | `npx ue-mcp auth` | Run the GitHub device flow standalone so `feedback(submit)` can author issues as your real GitHub user. Same step that lives inside `init`; use this if you skipped it at init time. |
-| `npx ue-mcp uninstall-hooks` | Remove the feedback PostToolUse hook from every Claude Code settings file recorded in `.ue-mcp.json installedHooks[]`. |
+| `npx ue-mcp uninstall-hooks` | Remove the feedback PostToolUse hook from every Claude Code settings file recorded in `ue-mcp.local.yml`'s `ue-mcp.installedHooks[]`. |
 | `npx ue-mcp feedback list \| show \| approve \| discard` | Manage submissions queued by `feedback.mode = "defer"`. See [Feedback → Reviewing deferred submissions](feedback.md#reviewing-deferred-submissions). |
 | `npx ue-mcp resolve <issue>` | Fetch a feedback issue, branch, hand it to Claude Code to implement, open a PR. See [Feedback](feedback.md#resolving-feedback-issues). |
 | `npx ue-mcp plugin install <name>` | Install a ue-mcp plugin from npm and register it in `ue-mcp.yml`. See [Configuration → Plugins](#plugins). |

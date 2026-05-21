@@ -235,7 +235,7 @@ async function main() {
   });
 
   // ── Optional HTTP surface for flow.run (#144) ───────────────────
-  // Off by default; opt-in via ".ue-mcp.json" { "http": { "enabled": true, "port": 7723 } }.
+  // Off by default; opt-in via ue-mcp.yml `ue-mcp.http: { enabled: true, port: 7723 }`.
   // Binds to 127.0.0.1 only — do NOT expose to the network without adding auth.
   if (project.config.http?.enabled) {
     try {

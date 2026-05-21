@@ -22,7 +22,7 @@ flowchart LR
 
 ## Feedback modes
 
-The default is **interactive** — every `feedback(submit)` blocks on the MCP elicitation approval prompt. Two other modes exist for autonomous / long-running agent sessions where waiting for human input on every submission isn't acceptable. Set the mode in `.ue-mcp.json` or via the `UE_MCP_FEEDBACK_MODE` env var (env wins). The agent has no surface to change the mode — it's set by the human running the server.
+The default is **interactive** — every `feedback(submit)` blocks on the MCP elicitation approval prompt. Two other modes exist for autonomous / long-running agent sessions where waiting for human input on every submission isn't acceptable. Set the mode under `ue-mcp.feedback.mode` in `ue-mcp.yml`, or via the `UE_MCP_FEEDBACK_MODE` env var (env wins). The agent has no surface to change the mode — it's set by the human running the server.
 
 | Mode | What happens on `feedback(submit)` | When to use it |
 |---|---|---|
@@ -30,12 +30,13 @@ The default is **interactive** — every `feedback(submit)` blocks on the MCP el
 | `auto-approve` | Server scrubs + posts directly to GitHub. No prompt. | Long-running unattended agent sessions where you trust the agent's title/summary judgment. **Still applies the credential and privacy scrubs.** |
 | `defer` | Server scrubs + writes the payload to `~/.ue-mcp/pending-feedback/<id>.json` instead of posting. No prompt, no network call. | Long-running unattended agent sessions where you want to review what would have been filed before any of it leaves the machine. Use `npx ue-mcp feedback list/show/approve/discard` to act on the queue afterward. |
 
-Example `.ue-mcp.json`:
+Example `ue-mcp.yml`:
 
-```json
-{
-  "feedback": { "mode": "defer" }
-}
+```yaml
+ue-mcp:
+  version: 1
+  feedback:
+    mode: defer
 ```
 
 Or for a one-off agent run:
@@ -162,20 +163,20 @@ The agent makes the call; you see the approval prompt; you click Accept (with or
 
 `npx ue-mcp init` offers (opt-in, default off) to install a Claude Code PostToolUse hook that fires after every `execute_python` call. The hook injects a system message asking the agent to surface the workaround to you and offer `feedback(submit)`. Without the hook, the agent will only file feedback if you ask for it directly.
 
-The hook lives in `<project>/.claude/settings.json`. Its path is also recorded in `<project>/.ue-mcp.json` under `installedHooks[]` so re-running init can find and remove it cleanly. Remove all installed hooks manually with:
+The hook lives in `<project>/.claude/settings.json`. Its path is also recorded in `<project>/ue-mcp.local.yml` under `ue-mcp.installedHooks[]` (the local file is gitignored — those absolute paths are user-machine-specific) so re-running init can find and remove it cleanly. Remove all installed hooks manually with:
 
 ```bash
 npx ue-mcp uninstall-hooks
 ```
 
-The hook handler self-gates: if `feedback` is in `.ue-mcp.json` `disable[]` (or no `.ue-mcp.json` is reachable from the cwd), the hook silently no-ops even if the matcher is still in `settings.json`.
+The hook handler self-gates: if `feedback` is in the merged `ue-mcp.disable[]` (across `ue-mcp.yml` + `ue-mcp.local.yml`), or no ue-mcp YAML is reachable from the cwd, the hook silently no-ops even if the matcher is still in `settings.json`.
 
 ## Security model
 
 - **The agent is the adversary for the consent step.** The MCP elicitation prompt is rendered by your client, and the response comes back to the server over the protocol — the agent has no IPC to forge an approval.
 - **The redaction passes are non-bypassable.** They run before the body reaches the elicitation prompt or `submitFeedback`, and the agent never sees the pre-scrubbed bytes.
 - **`author="bot"` uses an embedded GitHub App key.** The published npm package contains the `ue-mcp-feedback` App's installation credential as an XOR-encoded asset (not a literal source string), so a casual `grep` over the source tree finds nothing of interest. This is not a security boundary — the cycle constant lives next to the blob — but it removes the affordance that lets an agent stumble on the key during routine source inspection. The App's permissions are scoped to `issues: write` on `db-lyon/ue-mcp`; the realistic blast radius of a leak is bot impersonation on this one repo (`ue-mcp-feedback[bot]` posting noise), not RCE or exfil. Server-side bot signing is the long-term fix, tracked in [#461](https://github.com/db-lyon/ue-mcp/issues/461).
-- **Disable the category if you don't want it available.** Add `"feedback"` to `.ue-mcp.json`'s `disable[]` and the tool is not registered with the MCP server. The category checkbox lives in the **Agent behavior** section of `npx ue-mcp init` (default unchecked on fresh installs).
+- **Disable the category if you don't want it available.** Add `"feedback"` to `ue-mcp.yml`'s `ue-mcp.disable[]` and the tool is not registered with the MCP server. The category checkbox lives in the **Agent behavior** section of `npx ue-mcp init` (default unchecked on fresh installs).
 
 ## For maintainers
 

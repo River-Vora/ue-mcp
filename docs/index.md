@@ -54,7 +54,7 @@ And a **plugin system** that lets npm packages inject new actions into the exist
 - **[Tool Reference](tool-reference.md)** - All <!-- count:tools -->21<!-- /count --> tools with every action and its parameters
 - **[Flows](flows.md)** - Multi-step YAML workflows, custom tasks, hooks, rollback
 - **[Plugins](plugins.md)** - npm packages that inject new actions into existing categories
-- **[Configuration](configuration.md)** - `.ue-mcp.json` and MCP client config
+- **[Configuration](configuration.md)** - `ue-mcp.yml` and MCP client config
 - **[Neon Shrine Demo](neon-shrine-demo.md)** - 19-step procedural scene walkthrough
 - **[Feedback](feedback.md)** - Agent feedback system for improving UE-MCP
 - **[Troubleshooting](troubleshooting.md)** - Connection issues, build issues, asset path issues
