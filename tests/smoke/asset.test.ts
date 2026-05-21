@@ -77,4 +77,39 @@ describe("asset — write (with cleanup)", () => {
     // May fail if no dirty assets; we're testing the method exists
     expect(r.method).toBe("save_asset");
   });
+
+  it("create_folder + delete_folder round-trip", async () => {
+    const folder = `${TEST_PREFIX}/FolderRoundTrip_${Date.now()}`;
+    const created = await callBridge(bridge, "create_folder", { path: folder });
+    expect(created.ok, created.error).toBe(true);
+    const deleted = await callBridge(bridge, "delete_folder", { path: folder });
+    expect(deleted.ok, deleted.error).toBe(true);
+    const entries = (deleted.result as { entries?: Array<{ status?: string }> })?.entries ?? [];
+    expect(entries[0]?.status).toBe("deleted");
+  });
+
+  it("delete_folder refuses non-empty without force", async () => {
+    const folder = `${TEST_PREFIX}/FolderNonEmpty_${Date.now()}`;
+    await callBridge(bridge, "create_folder", { path: folder });
+    // Drop one asset inside so the folder is non-empty.
+    const search = await callBridge(bridge, "search_assets", { query: "*", maxResults: 1 });
+    const assets = resultArray(search.result, "assets");
+    if (!search.ok || !assets || assets.length === 0) {
+      await callBridge(bridge, "delete_folder", { path: folder });
+      return;
+    }
+    const src = ((assets[0] as Record<string, unknown>).path ?? (assets[0] as Record<string, unknown>).objectPath) as string;
+    const dup = `${folder}/RefuseProbe`;
+    await callBridge(bridge, "duplicate_asset", { sourcePath: src, destinationPath: dup });
+
+    const refused = await callBridge(bridge, "delete_folder", { path: folder });
+    expect(refused.ok, refused.error).toBe(true);
+    const refusedEntries = (refused.result as { entries?: Array<{ status?: string; reason?: string }> })?.entries ?? [];
+    expect(refusedEntries[0]?.status).toBe("failed");
+    expect(refusedEntries[0]?.reason).toBe("not_empty");
+
+    // Clean up with force.
+    const forced = await callBridge(bridge, "delete_folder", { path: folder, force: true });
+    expect(forced.ok, forced.error).toBe(true);
+  });
 });

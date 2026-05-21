@@ -222,6 +222,7 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("set_mesh_nav"), &SetMeshNav);
 	Registry.RegisterHandler(TEXT("move_folder"), &MoveFolder);
 	Registry.RegisterHandler(TEXT("create_folder"), &CreateFolder);
+	Registry.RegisterHandler(TEXT("delete_folder"), &DeleteFolder);
 }
 
 // ---------------------------------------------------------------------------
@@ -1985,6 +1986,115 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateFolder(const TSharedPtr<FJsonObject
 	Result->SetNumberField(TEXT("existedCount"), Existed.Num());
 	Result->SetNumberField(TEXT("failedCount"), Failed.Num());
 	Result->SetBoolField(TEXT("allSucceeded"), Failed.Num() == 0);
+	return MCPResult(Result);
+}
+
+// ---------------------------------------------------------------------------
+// Delete content browser folder(s). Counterpart to create_folder + delete_asset
+// - the bare delete_asset leaves the parent directory entry behind, producing
+// orphan dirs in the content browser. Default is safe (empty-folder only);
+// pass force=true for the Content Browser "Delete folder" behaviour that
+// removes any assets still inside it.
+// ---------------------------------------------------------------------------
+TSharedPtr<FJsonValue> FAssetHandlers::DeleteFolder(const TSharedPtr<FJsonObject>& Params)
+{
+	TArray<FString> Paths;
+	const TArray<TSharedPtr<FJsonValue>>* PathsArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("paths"), PathsArr) && PathsArr)
+	{
+		for (const TSharedPtr<FJsonValue>& V : *PathsArr)
+		{
+			FString S; if (V.IsValid() && V->TryGetString(S) && !S.IsEmpty()) Paths.Add(S);
+		}
+	}
+	FString SinglePath;
+	if (Params->TryGetStringField(TEXT("path"), SinglePath) && !SinglePath.IsEmpty())
+	{
+		Paths.AddUnique(SinglePath);
+	}
+	if (Paths.Num() == 0)
+	{
+		return MCPError(TEXT("Provide either 'path' or 'paths' (array of /Game/... directories)."));
+	}
+
+	const bool bForce = OptionalBool(Params, TEXT("force"), false);
+
+	TArray<TSharedPtr<FJsonValue>> Entries;
+	int32 Deleted = 0, Absent = 0, Failed = 0;
+
+	for (const FString& P : Paths)
+	{
+		FString Norm = P;
+		Norm.TrimStartAndEndInline();
+		Norm.RemoveFromEnd(TEXT("/"));
+
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("path"), Norm);
+
+		if (!Norm.StartsWith(TEXT("/")))
+		{
+			Entry->SetStringField(TEXT("status"), TEXT("failed"));
+			Entry->SetStringField(TEXT("reason"), TEXT("invalid_path"));
+			Failed++;
+			Entries.Add(MakeShared<FJsonValueObject>(Entry));
+			continue;
+		}
+
+		if (IsProtectedAssetPath(Norm))
+		{
+			Entry->SetStringField(TEXT("status"), TEXT("failed"));
+			Entry->SetStringField(TEXT("reason"), TEXT("protected_path"));
+			Failed++;
+			Entries.Add(MakeShared<FJsonValueObject>(Entry));
+			continue;
+		}
+
+		if (!UEditorAssetLibrary::DoesDirectoryExist(Norm))
+		{
+			Entry->SetStringField(TEXT("status"), TEXT("absent"));
+			Absent++;
+			Entries.Add(MakeShared<FJsonValueObject>(Entry));
+			continue;
+		}
+
+		TArray<FString> Contained = UEditorAssetLibrary::ListAssets(Norm, /*Recursive=*/true);
+		Entry->SetNumberField(TEXT("assetCount"), Contained.Num());
+
+		if (Contained.Num() > 0 && !bForce)
+		{
+			Entry->SetStringField(TEXT("status"), TEXT("failed"));
+			Entry->SetStringField(TEXT("reason"), TEXT("not_empty"));
+			TArray<TSharedPtr<FJsonValue>> Sample;
+			const int32 N = FMath::Min(Contained.Num(), 25);
+			for (int32 i = 0; i < N; ++i) Sample.Add(MakeShared<FJsonValueString>(Contained[i]));
+			Entry->SetArrayField(TEXT("assets"), Sample);
+			Failed++;
+			Entries.Add(MakeShared<FJsonValueObject>(Entry));
+			continue;
+		}
+
+		const bool bOk = UEditorAssetLibrary::DeleteDirectory(Norm);
+		if (bOk)
+		{
+			Entry->SetStringField(TEXT("status"), TEXT("deleted"));
+			if (Contained.Num() > 0) Entry->SetNumberField(TEXT("assetsDeleted"), Contained.Num());
+			Deleted++;
+		}
+		else
+		{
+			Entry->SetStringField(TEXT("status"), TEXT("failed"));
+			Entry->SetStringField(TEXT("reason"), TEXT("delete_failed"));
+			Failed++;
+		}
+		Entries.Add(MakeShared<FJsonValueObject>(Entry));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetArrayField(TEXT("entries"), Entries);
+	Result->SetNumberField(TEXT("deletedCount"), Deleted);
+	Result->SetNumberField(TEXT("absentCount"), Absent);
+	Result->SetNumberField(TEXT("failedCount"), Failed);
+	Result->SetBoolField(TEXT("allSucceeded"), Failed == 0);
 	return MCPResult(Result);
 }
 

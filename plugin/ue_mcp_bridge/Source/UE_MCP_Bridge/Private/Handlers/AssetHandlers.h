@@ -93,6 +93,8 @@ private:
 	static TSharedPtr<FJsonValue> SetMeshNav(const TSharedPtr<FJsonObject>& Params);
 	// #212: create empty content browser folders
 	static TSharedPtr<FJsonValue> CreateFolder(const TSharedPtr<FJsonObject>& Params);
+	// Delete content browser folder(s) - empty by default; force=true also removes contained assets.
+	static TSharedPtr<FJsonValue> DeleteFolder(const TSharedPtr<FJsonObject>& Params);
 	// #270: read AssetImportData source filenames from imported assets
 	static TSharedPtr<FJsonValue> ReadImportSources(const TSharedPtr<FJsonObject>& Params);
 
