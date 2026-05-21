@@ -44,8 +44,6 @@ ue-mcp:
     - networking
   http:
     enabled: false
-  feedback:
-    mode: interactive
 
 tasks: {}
 flows: {}
@@ -69,7 +67,8 @@ plugins: []
 | `contentRoots` | `string[]` | `["/Game/"]` | Content paths to search when using `asset(action="search")`. Add plugin content roots here if your project uses plugins with their own assets. |
 | `disable` | `string[]` | `[]` | Tool categories to disable. Disabled categories are not registered with the MCP server, reducing context noise for the AI. Use `"feedback"` here to opt out of the feedback tool entirely. |
 | `http` | `object` | `undefined` (HTTP server off) | Optional REST surface for the flow engine. Object with `enabled` (bool), `port` (default `7723`), `host` (default `127.0.0.1`). When `enabled: true`, the MCP server also serves `GET /flows`, `GET /flows/<name>/plan`, `POST /flows/<name>/run` over HTTP so external tools can drive flows without an MCP client. |
-| `feedback.mode` | `"interactive" \| "auto-approve" \| "defer"` | `"interactive"` | How `feedback(submit)` handles the consent gate. `interactive` blocks on the MCP elicitation prompt. `auto-approve` posts to GitHub immediately without prompting (scrubs still apply). `defer` writes the scrubbed payload to `~/.ue-mcp/pending-feedback/` for later review via `npx ue-mcp feedback list/approve/discard`. Override at runtime with `UE_MCP_FEEDBACK_MODE`. See [Feedback → modes](feedback.md#feedback-modes). |
+
+The feedback approval mode (`interactive` / `auto-approve` / `defer`) is intentionally **not** in `ue-mcp.yml` — it varies per developer and per machine, so it lives in `~/.ue-mcp/state.json` and is managed with `npx ue-mcp feedback mode ...` or the `UE_MCP_FEEDBACK_MODE` env var. See [Feedback → modes](feedback.md#feedback-modes).
 
 ### User-machine state (`~/.ue-mcp/`)
 
@@ -77,9 +76,9 @@ Machine-specific state that ue-mcp commands write but you wouldn't hand-edit liv
 
 | Path | What |
 |------|------|
-| `~/.ue-mcp/state.json` | Per-project `installedHooks` — the absolute paths of every Claude Code `settings.json` where ue-mcp installed the feedback PostToolUse hook. Maintained by `npx ue-mcp init` / `npx ue-mcp uninstall-hooks`. Keyed by absolute project root. |
+| `~/.ue-mcp/state.json` | Two things: (a) per-project `installedHooks` — absolute paths of every Claude Code `settings.json` where ue-mcp installed the feedback PostToolUse hook, keyed by absolute project root; (b) `preferences.feedback.mode` — your personal default for the feedback approval mode (`interactive` / `auto-approve` / `defer`). Maintained by `npx ue-mcp init`, `npx ue-mcp uninstall-hooks`, and `npx ue-mcp feedback mode`. |
 | `~/.ue-mcp/auth.json` | Cached GitHub OAuth token for `feedback(submit)` author=user mode. Mode 600. Written by `npx ue-mcp auth`. |
-| `~/.ue-mcp/pending-feedback/<id>.json` | Submissions captured by `feedback.mode = "defer"`. Acted on with `npx ue-mcp feedback list/approve/discard`. |
+| `~/.ue-mcp/pending-feedback/<id>.json` | Submissions captured while `feedback mode` is `defer`. Acted on with `npx ue-mcp feedback list/approve/discard`. |
 
 These files never need to be in your project tree or in version control.
 
@@ -155,7 +154,8 @@ The C++ bridge plugin enables these UE plugins (adding them to `.uproject` if mi
 | `npx ue-mcp update` | Re-deploy the C++ bridge plugin to the project. Use after a ue-mcp version bump. |
 | `npx ue-mcp auth` | Run the GitHub device flow standalone so `feedback(submit)` can author issues as your real GitHub user. Same step that lives inside `init`; use this if you skipped it at init time. |
 | `npx ue-mcp uninstall-hooks` | Remove the feedback PostToolUse hook from every Claude Code settings file recorded for this project in `~/.ue-mcp/state.json`. |
-| `npx ue-mcp feedback list \| show \| approve \| discard` | Manage submissions queued by `feedback.mode = "defer"`. See [Feedback → Reviewing deferred submissions](feedback.md#reviewing-deferred-submissions). |
+| `npx ue-mcp feedback mode [<mode>]` | Read or set your personal feedback approval mode (`interactive`, `auto-approve`, or `defer`). Stored in `~/.ue-mcp/state.json`. See [Feedback → modes](feedback.md#feedback-modes). |
+| `npx ue-mcp feedback list \| show \| approve \| discard` | Manage submissions queued while feedback mode is `defer`. See [Feedback → Reviewing deferred submissions](feedback.md#reviewing-deferred-submissions). |
 | `npx ue-mcp resolve <issue>` | Fetch a feedback issue, branch, hand it to Claude Code to implement, open a PR. See [Feedback](feedback.md#resolving-feedback-issues). |
 | `npx ue-mcp plugin install <name>` | Install a ue-mcp plugin from npm and register it in `ue-mcp.yml`. See [Configuration → Plugins](#plugins). |
 | `npx ue-mcp plugin uninstall <name>` | Inverse of install. |

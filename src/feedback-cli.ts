@@ -18,6 +18,12 @@ import {
 } from "./feedback-deferred.js";
 import { submitFeedback } from "./github-app.js";
 import {
+  getFeedbackMode,
+  setFeedbackMode,
+  getUserStatePath,
+  type FeedbackMode,
+} from "./user-state.js";
+import {
   BOLD,
   CYAN,
   DIM,
@@ -38,11 +44,53 @@ function printHelp(): void {
   console.log(`  Review submissions deferred while \`feedback.mode = "defer"\` was active.`);
   console.log(`  Pending submissions are stored in: ${DIM}${getPendingDir()}${RESET}`);
   console.log("");
+  console.log(`  ${BOLD}mode${RESET}              Print the current feedback approval mode`);
+  console.log(`  ${BOLD}mode${RESET} <mode>       Set the mode (interactive | auto-approve | defer)`);
   console.log(`  ${BOLD}list${RESET}              List every pending submission (id, project, title)`);
   console.log(`  ${BOLD}show${RESET} <id>         Print the full body and metadata for one entry`);
   console.log(`  ${BOLD}approve${RESET} <id>      POST the entry to GitHub, then delete it locally`);
   console.log(`  ${BOLD}discard${RESET} <id>      Delete the entry without posting`);
   console.log("");
+}
+
+function cmdMode(arg: string | undefined): void {
+  if (arg === undefined) {
+    const env = (process.env.UE_MCP_FEEDBACK_MODE ?? "").trim().toLowerCase();
+    const pref = getFeedbackMode();
+    const effective: FeedbackMode =
+      env === "interactive" || env === "auto-approve" || env === "defer"
+        ? env
+        : pref ?? "interactive";
+
+    console.log("");
+    console.log(`  ${BOLD}effective:${RESET} ${effective}`);
+    console.log(`  ${DIM}preference (~/.ue-mcp/state.json): ${pref ?? "(not set; default interactive)"}${RESET}`);
+    if (env === "interactive" || env === "auto-approve" || env === "defer") {
+      console.log(`  ${DIM}UE_MCP_FEEDBACK_MODE env override: ${env}${RESET}`);
+    }
+    console.log("");
+    console.log(`  ${DIM}Set with: npx ue-mcp feedback mode <interactive|auto-approve|defer>${RESET}`);
+    console.log(`  ${DIM}Clear preference: npx ue-mcp feedback mode default${RESET}`);
+    console.log("");
+    return;
+  }
+
+  if (arg === "default" || arg === "clear" || arg === "unset") {
+    setFeedbackMode(undefined);
+    ok(`Cleared mode preference. Effective mode will default to "interactive" until set again or overridden by UE_MCP_FEEDBACK_MODE.`);
+    info(getUserStatePath());
+    return;
+  }
+
+  if (arg !== "interactive" && arg !== "auto-approve" && arg !== "defer") {
+    fail(`Unknown mode "${arg}". Allowed: interactive, auto-approve, defer, default.`);
+    process.exit(1);
+  }
+  setFeedbackMode(arg);
+  ok(`Feedback mode set to "${arg}" (per-user, stored in ~/.ue-mcp/state.json).`);
+  if (process.env.UE_MCP_FEEDBACK_MODE) {
+    warn(`UE_MCP_FEEDBACK_MODE=${process.env.UE_MCP_FEEDBACK_MODE} is set in your env and will override this preference for processes started from that shell.`);
+  }
 }
 
 function cmdList(): void {
@@ -146,6 +194,9 @@ async function main(): Promise<void> {
   const id = process.argv[3];
 
   switch (sub) {
+    case "mode":
+      cmdMode(id);
+      return;
     case "list":
       cmdList();
       return;

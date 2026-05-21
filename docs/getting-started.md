@@ -107,16 +107,21 @@ npx ue-mcp update
 
 ## Unattended agent sessions
 
-If you set up the feedback prompt hook and then leave a long-running agent working, the elicitation approval prompt on `feedback(submit)` will stall the session waiting for you. For unattended runs, set a non-interactive feedback mode in `ue-mcp.yml`:
+If you set up the feedback prompt hook and then leave a long-running agent working, the elicitation approval prompt on `feedback(submit)` will stall the session waiting for you. For unattended runs, switch your personal feedback mode:
 
-```yaml
-ue-mcp:
-  version: 1
-  feedback:
-    mode: defer
+```bash
+npx ue-mcp feedback mode defer          # or: auto-approve
 ```
 
-`defer` writes submissions to `~/.ue-mcp/pending-feedback/` for later review with `npx ue-mcp feedback list/show/approve/discard`. `auto-approve` posts directly without prompting. Both still run the credential and privacy scrubs. See [Feedback → modes](feedback.md#feedback-modes).
+This writes the preference to `~/.ue-mcp/state.json` (per-user, per-machine — it is not committed to the project). `defer` writes submissions to `~/.ue-mcp/pending-feedback/` for later review with `npx ue-mcp feedback list/show/approve/discard`. `auto-approve` posts directly without prompting. Both still run the credential and privacy scrubs.
+
+For a one-off agent run without changing the persisted preference, use the env var instead:
+
+```bash
+UE_MCP_FEEDBACK_MODE=defer npx ue-mcp ./MyGame.uproject
+```
+
+See [Feedback → modes](feedback.md#feedback-modes).
 
 ## Switching projects
 

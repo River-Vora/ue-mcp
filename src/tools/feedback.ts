@@ -6,21 +6,27 @@ import { getWorkarounds, clearWorkarounds } from "../workaround-tracker.js";
 import { scrubSecrets } from "../secret-scrub.js";
 import { privacyScrub } from "../privacy-scrub.js";
 import { deferSubmission } from "../feedback-deferred.js";
+import { getFeedbackMode, type FeedbackMode } from "../user-state.js";
 import { warn } from "../log.js";
 
-type FeedbackMode = "interactive" | "auto-approve" | "defer";
-
 /**
- * Resolve the active feedback mode. Env var UE_MCP_FEEDBACK_MODE wins over
- * ue-mcp.yml `ue-mcp.feedback.mode`; default is "interactive" so the consent gate
- * stays on unless the user explicitly opts out. The agent has no surface to
- * change this — it is set by the human running the server.
+ * Resolve the active feedback mode. Precedence (highest wins):
+ *
+ *   1. UE_MCP_FEEDBACK_MODE env var       — per-process override
+ *   2. ~/.ue-mcp/state.json preference    — per-user-per-device, set via
+ *                                            `npx ue-mcp feedback mode`
+ *   3. default "interactive"
+ *
+ * Mode is NOT read from ue-mcp.yml. It's a per-user preference that varies
+ * across machines and developers (am I at the keyboard, is this an
+ * unattended run, etc.) — not project policy. The agent has no surface to
+ * change this; it's set by the human running the server.
  */
-function resolveFeedbackMode(ctx: ToolContext): FeedbackMode {
+function resolveFeedbackMode(_ctx: ToolContext): FeedbackMode {
   const env = (process.env.UE_MCP_FEEDBACK_MODE ?? "").trim().toLowerCase();
   if (env === "auto-approve" || env === "defer" || env === "interactive") return env;
-  const cfg = ctx.project?.config?.feedback?.mode;
-  if (cfg === "auto-approve" || cfg === "defer" || cfg === "interactive") return cfg;
+  const pref = getFeedbackMode();
+  if (pref) return pref;
   return "interactive";
 }
 
@@ -320,9 +326,9 @@ export const feedbackTool: ToolDef = categoryTool(
               `so the server has no deterministic way to obtain the user's approval`,
               `for posting an issue to a public tracker.`,
               ``,
-              `Upgrade your client (Claude Code >= 2.1.76) or set ue-mcp.feedback.mode`,
-              `in ue-mcp.yml (or UE_MCP_FEEDBACK_MODE env) to "auto-approve" or "defer"`,
-              `to skip the prompt.`,
+              `Upgrade your client (Claude Code >= 2.1.76), or run`,
+              `\`npx ue-mcp feedback mode auto-approve|defer\` (or set the`,
+              `UE_MCP_FEEDBACK_MODE env var) to skip the prompt for this session.`,
             ].join("\n"),
             {
               submitted: false,
@@ -383,7 +389,7 @@ export const feedbackTool: ToolDef = categoryTool(
 
         // ── Defer mode ─────────────────────────────────────────────
         // User has explicitly opted out of the elicitation gate via
-        // `ue-mcp.yml ue-mcp.feedback.mode = "defer"` (or the env override).
+        // `npx ue-mcp feedback mode defer` (or the env override).
         // Write the scrubbed payload to ~/.ue-mcp/pending-feedback/ for
         // later review via `npx ue-mcp feedback list/approve/discard`.
         if (mode === "defer") {

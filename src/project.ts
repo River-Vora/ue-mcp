@@ -6,7 +6,7 @@ import { McpError, ErrorCode } from "./errors.js";
 import { info, warn } from "./log.js";
 import { UProjectSchema, UeMcpConfigSchema } from "./schemas.js";
 import { findEngineInstall } from "./deployer.js";
-import { setInstalledHooks } from "./user-state.js";
+import { setInstalledHooks, setFeedbackMode, type FeedbackMode } from "./user-state.js";
 
 export interface PluginInfo {
   name: string;
@@ -26,10 +26,6 @@ export interface UeMcpConfig {
     port?: number;
     /** Override bind host. Defaults to 127.0.0.1 — do not expose externally. */
     host?: string;
-  };
-  /** Feedback flow behavior. */
-  feedback?: {
-    mode?: "interactive" | "auto-approve" | "defer";
   };
 }
 
@@ -222,9 +218,11 @@ export class ProjectContext {
     // One-time migrations:
     //   - .ue-mcp.json (pre-1.0.29) → ue-mcp.yml + ~/.ue-mcp/state.json
     //   - ue-mcp.local.yml (1.0.29 only) → ~/.ue-mcp/state.json
-    // Both are idempotent no-ops once migrated.
+    //   - ue-mcp.feedback.mode in ue-mcp.yml (1.0.28-1.0.31) → user state
+    // All idempotent no-ops once migrated.
     migrateLegacyJsonConfig(this.projectDir);
     migrateLegacyLocalYaml(this.projectDir);
+    migrateLegacyFeedbackModeInYaml(this.projectDir);
 
     const block = readUeMcpBlock(path.join(this.projectDir, "ue-mcp.yml"));
     const parsed = UeMcpConfigSchema.safeParse(block);
@@ -317,6 +315,41 @@ function migrateLegacyJsonConfig(projectDir: string): void {
   } catch (e) {
     warn("project", `migration wrote new files but couldn't delete .ue-mcp.json - remove it manually`, e);
   }
+}
+
+/**
+ * Migrate a `ue-mcp.feedback.mode` entry from ue-mcp.yml (used 1.0.28-1.0.31)
+ * into the user-state preferences. Feedback mode is a per-user-per-device
+ * preference that doesn't belong in tracked project config. Strips the key
+ * from the YAML after copying it. Idempotent.
+ */
+function migrateLegacyFeedbackModeInYaml(projectDir: string): void {
+  const ymlPath = path.join(projectDir, "ue-mcp.yml");
+  if (!fs.existsSync(ymlPath)) return;
+
+  let doc: Record<string, unknown> = {};
+  try {
+    doc = (yaml.load(fs.readFileSync(ymlPath, "utf-8")) as Record<string, unknown>) ?? {};
+  } catch {
+    return;
+  }
+  const block = (doc["ue-mcp"] as Record<string, unknown> | undefined) ?? {};
+  const feedback = block.feedback as { mode?: unknown } | undefined;
+  if (!feedback || typeof feedback.mode !== "string") return;
+  const mode = feedback.mode;
+  if (mode !== "interactive" && mode !== "auto-approve" && mode !== "defer") return;
+
+  setFeedbackMode(mode as FeedbackMode);
+
+  // Strip from yaml.
+  delete (block as Record<string, unknown>).feedback;
+  doc["ue-mcp"] = block;
+  fs.writeFileSync(ymlPath, dumpYaml(doc), "utf-8");
+
+  info(
+    "project",
+    `migrated ue-mcp.feedback.mode="${mode}" from ue-mcp.yml → ~/.ue-mcp/state.json (preferences). Mode is now a per-user setting; run \`npx ue-mcp feedback mode\` to change it.`,
+  );
 }
 
 /**

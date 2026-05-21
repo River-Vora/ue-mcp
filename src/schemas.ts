@@ -39,17 +39,6 @@ export const UeMcpConfigSchema = z
         host: z.string().optional(),
       })
       .optional(),
-    /** Feedback flow behavior. Default "interactive" runs the MCP
-     *  elicitation approval prompt. "auto-approve" posts immediately
-     *  without prompting (still scrubbed). "defer" writes the scrubbed
-     *  payload to ~/.ue-mcp/pending-feedback/ for later review via
-     *  `npx ue-mcp feedback list/approve/discard`. Env var
-     *  UE_MCP_FEEDBACK_MODE overrides this at runtime. */
-    feedback: z
-      .object({
-        mode: z.enum(["interactive", "auto-approve", "defer"]).optional(),
-      })
-      .optional(),
   })
   .passthrough();
 export type UeMcpConfigFile = z.infer<typeof UeMcpConfigSchema>;

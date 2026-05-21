@@ -22,7 +22,9 @@ flowchart LR
 
 ## Feedback modes
 
-The default is **interactive** — every `feedback(submit)` blocks on the MCP elicitation approval prompt. Two other modes exist for autonomous / long-running agent sessions where waiting for human input on every submission isn't acceptable. Set the mode under `ue-mcp.feedback.mode` in `ue-mcp.yml`, or via the `UE_MCP_FEEDBACK_MODE` env var (env wins). The agent has no surface to change the mode — it's set by the human running the server.
+The default is **interactive** — every `feedback(submit)` blocks on the MCP elicitation approval prompt. Two other modes exist for autonomous / long-running agent sessions where waiting for human input on every submission isn't acceptable.
+
+The mode is a **per-user, per-device** preference, not a project policy — it's stored in `~/.ue-mcp/state.json`, not in the tracked `ue-mcp.yml`. The agent has no surface to change it.
 
 | Mode | What happens on `feedback(submit)` | When to use it |
 |---|---|---|
@@ -30,20 +32,23 @@ The default is **interactive** — every `feedback(submit)` blocks on the MCP el
 | `auto-approve` | Server scrubs + posts directly to GitHub. No prompt. | Long-running unattended agent sessions where you trust the agent's title/summary judgment. **Still applies the credential and privacy scrubs.** |
 | `defer` | Server scrubs + writes the payload to `~/.ue-mcp/pending-feedback/<id>.json` instead of posting. No prompt, no network call. | Long-running unattended agent sessions where you want to review what would have been filed before any of it leaves the machine. Use `npx ue-mcp feedback list/show/approve/discard` to act on the queue afterward. |
 
-Example `ue-mcp.yml`:
+Set or inspect the mode with:
 
-```yaml
-ue-mcp:
-  version: 1
-  feedback:
-    mode: defer
+```bash
+npx ue-mcp feedback mode                 # show the effective mode and where it came from
+npx ue-mcp feedback mode defer           # persist the mode in ~/.ue-mcp/state.json
+npx ue-mcp feedback mode auto-approve
+npx ue-mcp feedback mode interactive
+npx ue-mcp feedback mode default         # clear the preference (back to "interactive")
 ```
 
-Or for a one-off agent run:
+For a one-off agent run, set the env var instead — it overrides the persisted preference and is not written to disk:
 
 ```bash
 UE_MCP_FEEDBACK_MODE=defer npx ue-mcp ./MyGame.uproject
 ```
+
+Precedence: `UE_MCP_FEEDBACK_MODE` env > `~/.ue-mcp/state.json` preference > default `interactive`.
 
 ### Reviewing deferred submissions
 

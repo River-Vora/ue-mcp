@@ -26,7 +26,18 @@ interface ProjectState {
   installedHooks?: string[];
 }
 
+export type FeedbackMode = "interactive" | "auto-approve" | "defer";
+
+interface Preferences {
+  /** Per-user, per-device feedback approval mode. Set via
+   *  `npx ue-mcp feedback mode <value>`. NOT in project yaml because the
+   *  preference varies per developer / per machine (am I at the keyboard,
+   *  is this a long unattended run, etc.). */
+  feedback?: { mode?: FeedbackMode };
+}
+
 interface UserState {
+  preferences?: Preferences;
   projects?: Record<string, ProjectState>;
 }
 
@@ -67,6 +78,13 @@ function writeState(state: UserState): void {
       delete state.projects;
     }
   }
+  if (state.preferences) {
+    const fb = state.preferences.feedback;
+    if (fb && fb.mode === undefined) delete state.preferences.feedback;
+    if (Object.keys(state.preferences).length === 0) {
+      delete state.preferences;
+    }
+  }
 
   // No state at all → delete the file rather than leave an empty stub.
   if (Object.keys(state).length === 0) {
@@ -97,6 +115,26 @@ export function setInstalledHooks(projectRoot: string, hooks: string[]): void {
     state.projects[key].installedHooks = hooks;
   } else {
     delete state.projects[key].installedHooks;
+  }
+  writeState(state);
+}
+
+export function getFeedbackMode(): FeedbackMode | undefined {
+  const mode = readState().preferences?.feedback?.mode;
+  return mode === "interactive" || mode === "auto-approve" || mode === "defer"
+    ? mode
+    : undefined;
+}
+
+/** Set or clear the feedback mode preference. Pass undefined to clear. */
+export function setFeedbackMode(mode: FeedbackMode | undefined): void {
+  const state = readState();
+  if (!state.preferences) state.preferences = {};
+  if (!state.preferences.feedback) state.preferences.feedback = {};
+  if (mode === undefined) {
+    delete state.preferences.feedback.mode;
+  } else {
+    state.preferences.feedback.mode = mode;
   }
   writeState(state);
 }

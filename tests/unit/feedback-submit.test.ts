@@ -25,16 +25,19 @@ const realSummary =
   "blueprint.set_class_default marks the asset dirty but never saves it, forcing python flushes via execute_python on a separate call.";
 const realPy = "import unreal\nfoo = unreal.do_thing()";
 
+// Tests set feedback mode via the UE_MCP_FEEDBACK_MODE env var rather than
+// the user-state file because env wins over preference and doesn't require
+// writing to ~/.ue-mcp/. Tests that need the env should restore it in
+// afterEach; the non-interactive-modes describe block already does.
 function makeCtx(
   elicit?: ElicitFn,
   projectName?: string,
   projectDir?: string,
-  feedbackMode?: "interactive" | "auto-approve" | "defer",
 ): ToolContext {
   const project = {
     projectName: projectName ?? null,
     projectDir: projectDir ?? null,
-    config: { feedback: feedbackMode ? { mode: feedbackMode } : undefined },
+    config: {},
   } as never;
   return { bridge: {} as never, project, elicit };
 }
@@ -349,8 +352,9 @@ describe("feedback(submit) elicitation gate", () => {
         authoredBy: "tester",
         authoredAs: "user",
       });
+      process.env.UE_MCP_FEEDBACK_MODE = "auto-approve";
       const elicit = vi.fn<ElicitFn>();
-      const ctx = makeCtx(elicit, "Vale", undefined, "auto-approve");
+      const ctx = makeCtx(elicit, "Vale");
 
       const r = await call(ctx, {
         title: realTitle,
@@ -372,7 +376,8 @@ describe("feedback(submit) elicitation gate", () => {
         authoredBy: "tester",
         authoredAs: "user",
       });
-      const ctx = makeCtx(undefined, "Vale", "C:/Users/david/Projects/UE/Vale", "auto-approve");
+      process.env.UE_MCP_FEEDBACK_MODE = "auto-approve";
+      const ctx = makeCtx(undefined, "Vale", "C:/Users/david/Projects/UE/Vale");
 
       await call(ctx, {
         title: "Vale: editor.foo missing",
@@ -388,8 +393,9 @@ describe("feedback(submit) elicitation gate", () => {
     });
 
     it("defer mode skips elicitation, writes to disk, does not post", async () => {
+      process.env.UE_MCP_FEEDBACK_MODE = "defer";
       const elicit = vi.fn<ElicitFn>();
-      const ctx = makeCtx(elicit, "Vale", undefined, "defer");
+      const ctx = makeCtx(elicit, "Vale");
 
       const r = await call(ctx, {
         title: realTitle,
@@ -416,7 +422,10 @@ describe("feedback(submit) elicitation gate", () => {
       expect(entry.author).toBe("user");
     });
 
-    it("env var UE_MCP_FEEDBACK_MODE overrides config", async () => {
+    it("env var UE_MCP_FEEDBACK_MODE wins over the user-state preference", async () => {
+      // Resolver precedence is env > preference > default. We exercise the
+      // env path directly here; the preference path is covered by the
+      // user-state unit tests.
       mockSubmitFeedback.mockResolvedValue({
         kind: "submitted",
         url: "https://github.com/x/y/issues/42",
@@ -426,8 +435,7 @@ describe("feedback(submit) elicitation gate", () => {
       });
       process.env.UE_MCP_FEEDBACK_MODE = "auto-approve";
       const elicit = vi.fn<ElicitFn>();
-      // config says "defer" but env overrides to "auto-approve"
-      const ctx = makeCtx(elicit, "Vale", undefined, "defer");
+      const ctx = makeCtx(elicit, "Vale");
 
       await call(ctx, {
         title: realTitle,
@@ -441,8 +449,9 @@ describe("feedback(submit) elicitation gate", () => {
 
     it("auto-approve still hits the auth check (author=user, no cached token)", async () => {
       mockReadUserAuth.mockResolvedValue(null);
+      process.env.UE_MCP_FEEDBACK_MODE = "auto-approve";
       const elicit = vi.fn<ElicitFn>();
-      const ctx = makeCtx(elicit, "Vale", undefined, "auto-approve");
+      const ctx = makeCtx(elicit, "Vale");
 
       const r = await call(ctx, {
         title: realTitle,

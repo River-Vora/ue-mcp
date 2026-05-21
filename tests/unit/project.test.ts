@@ -152,28 +152,30 @@ describe("ProjectContext config loading", () => {
       // Legacy JSON file is gone.
       expect(fs.existsSync(jsonPath)).toBe(false);
 
-      // Tracked fields moved to ue-mcp.yml.
+      // Tracked fields (other than feedback.mode) moved to ue-mcp.yml.
+      // feedback.mode is a per-user preference, so it goes to user state.
       const yml = yaml.load(
         fs.readFileSync(path.join(projectDir, "ue-mcp.yml"), "utf-8"),
       ) as { "ue-mcp": Record<string, unknown> };
       expect(yml["ue-mcp"].disable).toEqual(["gas"]);
       expect(yml["ue-mcp"].contentRoots).toEqual(["/Game/", "/MyPlugin/"]);
-      expect(yml["ue-mcp"].feedback).toEqual({ mode: "defer" });
+      expect(yml["ue-mcp"].feedback).toBeUndefined();
       expect(yml["ue-mcp"].installedHooks).toBeUndefined();
 
-      // installedHooks moved to ~/.ue-mcp/state.json under this project's key.
+      // installedHooks + feedback.mode both moved to ~/.ue-mcp/state.json.
       const state = JSON.parse(fs.readFileSync(userState, "utf-8")) as {
-        projects: Record<string, { installedHooks: string[] }>;
+        projects?: Record<string, { installedHooks: string[] }>;
+        preferences?: { feedback?: { mode?: string } };
       };
-      expect(Object.values(state.projects)[0].installedHooks).toEqual([
+      expect(Object.values(state.projects ?? {})[0].installedHooks).toEqual([
         "C:/some/settings.json",
       ]);
+      expect(state.preferences?.feedback?.mode).toBe("defer");
 
       // The config that the context exposes is project-tracked only.
-      // installedHooks is no longer in the project schema.
+      // No feedback / installedHooks fields on UeMcpConfig anymore.
       expect(ctx.config.disable).toEqual(["gas"]);
-      expect(ctx.config.feedback?.mode).toBe("defer");
-      // No installedHooks field on UeMcpConfig anymore.
+      expect((ctx.config as { feedback?: unknown }).feedback).toBeUndefined();
       expect((ctx.config as { installedHooks?: unknown }).installedHooks).toBeUndefined();
     } finally {
       delete process.env.UE_MCP_USER_STATE;
