@@ -134,6 +134,11 @@ void FGameplayHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("get_pie_subsystem_state"), &GetPieSubsystemState);
 	Registry.RegisterHandler(TEXT("get_navmesh_details"), &GetNavmeshDetails);
 	Registry.RegisterHandler(TEXT("apply_damage_in_pie"), &ApplyDamageInPie);
+	Registry.RegisterHandler(TEXT("inject_input"), &InjectInput);
+	Registry.RegisterHandler(TEXT("inject_input_start"), &InjectInputStart);
+	Registry.RegisterHandler(TEXT("inject_input_update"), &InjectInputUpdate);
+	Registry.RegisterHandler(TEXT("inject_input_stop"), &InjectInputStop);
+	Registry.RegisterHandler(TEXT("inject_input_tape"), &InjectInputTape);
 }
 
 TSharedPtr<FJsonValue> FGameplayHandlers::CreateSmartObjectDefinition(const TSharedPtr<FJsonObject>& Params)

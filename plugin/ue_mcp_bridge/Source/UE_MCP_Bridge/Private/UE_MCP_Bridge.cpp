@@ -2,6 +2,8 @@
 #include "Modules/ModuleManager.h"
 #include "BridgeServer.h"
 #include "Handlers/DialogHandlers.h"
+#include "PIE/PIEInputInjector.h"
+#include "Editor.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/CoreDelegates.h"
 #include "Containers/Ticker.h"
@@ -16,6 +18,13 @@ void FUE_MCP_BridgeModule::StartupModule()
 	// Create and start bridge server
 	G_BridgeServer = MakeShared<FMCPBridgeServer>(9877);
 	FDialogHandlers::InstallDialogHook();
+	UEMCPPIE::FPIEInputInjector::Init();
+	// Clear any leftover injections from a previous PIE session so a fresh
+	// EndPIE→BeginPIE pair starts with no ghost holds in the queue.
+	FEditorDelegates::EndPIE.AddLambda([](bool /*bIsSimulating*/)
+	{
+		UEMCPPIE::FPIEInputInjector::OnPIEEnded();
+	});
 	// Safety net: auto-decline overwrite dialogs to prevent game thread blocking.
 	// Handlers should check for existing assets before creating, but if a dialog
 	// slips through, decline it rather than blocking the game thread forever.
@@ -82,6 +91,7 @@ void FUE_MCP_BridgeModule::ShutdownModule()
 {
 	// Stop bridge server
 	FDialogHandlers::RemoveDialogHook();
+	UEMCPPIE::FPIEInputInjector::Shutdown();
 
 	if (G_BridgeServer.IsValid())
 	{

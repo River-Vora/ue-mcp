@@ -81,4 +81,11 @@ private:
 
 	// #186 — apply damage to PIE actor
 	static TSharedPtr<FJsonValue> ApplyDamageInPie(const TSharedPtr<FJsonObject>& Params);
+
+	// PIE input injection (inject_input + continuous + tape).
+	static TSharedPtr<FJsonValue> InjectInput(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> InjectInputStart(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> InjectInputUpdate(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> InjectInputStop(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> InjectInputTape(const TSharedPtr<FJsonObject>& Params);
 };
