@@ -234,5 +234,3 @@ tasks:
       pieAction: start
     needs: [arm]
 ```
-
-For a full example see `plans/pie-record-replay.md` in the repo (gitignored design doc).
