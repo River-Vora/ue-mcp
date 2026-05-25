@@ -26,18 +26,6 @@ namespace
 		return TEXT("idle");
 	}
 
-	TArray<FString> JsonArrayToStringList(const TArray<TSharedPtr<FJsonValue>>* Arr)
-	{
-		TArray<FString> Out;
-		if (!Arr) return Out;
-		for (const TSharedPtr<FJsonValue>& V : *Arr)
-		{
-			FString S;
-			if (V.IsValid() && V->TryGetString(S)) Out.Add(S);
-		}
-		return Out;
-	}
-
 	void WriteStatusFields(TSharedPtr<FJsonObject> R, const FRecorderStatus& S)
 	{
 		R->SetStringField(TEXT("state"), StateToString(S.State));

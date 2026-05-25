@@ -333,9 +333,6 @@ namespace UEMCPPIE
 		SC.AxisThreshold = 0.15f;
 		SC.bCapturePawnState = true;
 		SC.bCaptureMontage = true;
-		// Replay drift compares tracked-value columns recovered from the
-		// source CSV header. Telling the sampler about those paths makes
-		// Row.TrackedValues populated on each sampled frame.
 		SC.TrackedValuePaths = SourceTrackedPaths;
 		SC.ClientIndex = Pending.ClientId;
 		Sampler.Reset();

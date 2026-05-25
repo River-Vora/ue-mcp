@@ -301,6 +301,19 @@ inline bool OptionalBool(
 	return Params->TryGetBoolField(Key, Value) ? Value : DefaultValue;
 }
 
+/** Extract a JSON array of strings into a TArray<FString>. */
+inline TArray<FString> JsonArrayToStringList(const TArray<TSharedPtr<FJsonValue>>* Arr)
+{
+	TArray<FString> Out;
+	if (!Arr) return Out;
+	for (const TSharedPtr<FJsonValue>& V : *Arr)
+	{
+		FString S;
+		if (V.IsValid() && V->TryGetString(S)) Out.Add(S);
+	}
+	return Out;
+}
+
 // ── Vector/Rotator/Color/Transform extraction ────────────────────────────────
 //
 // Wire shape contract (matches src/schemas.ts):
