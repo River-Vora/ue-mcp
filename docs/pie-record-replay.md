@@ -14,9 +14,9 @@ Per frame, into `<ProjectSavedDir>/MCPRecordings/<id>/`:
 
 | Field | Source |
 |-------|--------|
-| `pos_x/y/z`, `rot_yaw/pitch/roll`, `vel_x/y/z`, `speed2d` | First player pawn |
+| `pos_x/y/z`, `rot_yaw/pitch/roll`, `vel_x/y/z`, `speed2d` | First player pawn. Velocity falls back through `UCharacterMovementComponent::Velocity`, `AActor::GetVelocity()`, physics linear velocity, then position-delta-over-dt for pawns without a movement component. |
 | `montage` (`Name:Section`) | `AnimInstance::GetCurrentActiveMontage` |
-| Per-`UInputAction` value | `UEnhancedPlayerInput::GetActionValue` |
+| Per-`UInputAction` value | `UEnhancedPlayerInput::GetActionValue`. Actions from IMCs added after the initial pawn attach (e.g. deferred input setup) are discovered automatically on subsequent frames. |
 | `<action>_pressed` / `_released` edge events | Computed against `axis_threshold` |
 | Dotted reflection paths you ask for | `track_values=["Hero.AbilitySystem.Health"]` |
 | Tracked world actors (pos/rot/vel) | `track_actors=["BP_Hero_C", ...]`; writes `tracked.jsonl` |
