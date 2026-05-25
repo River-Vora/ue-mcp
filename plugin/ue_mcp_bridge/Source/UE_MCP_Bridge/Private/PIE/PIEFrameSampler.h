@@ -86,6 +86,8 @@ namespace UEMCPPIE
 			bool bWasActive = false;
 		};
 
+		void DiscoverActions(APlayerController* PC, APawn* Pawn);
+
 		FConfig Config;
 		bool bAttached = false;
 		FString PawnClassPath;

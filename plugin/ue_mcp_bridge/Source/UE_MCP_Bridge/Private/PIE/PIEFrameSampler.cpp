@@ -157,31 +157,21 @@ namespace UEMCPPIE
 		}
 	}
 
-	bool FPIEFrameSampler::AttachToPIE(UWorld* PIEWorld)
+	void FPIEFrameSampler::DiscoverActions(APlayerController* PC, APawn* Pawn)
 	{
-		if (bAttached) return true;
-		if (!PIEWorld) return false;
-		APlayerController* PC = (Config.ClientIndex > 0)
-			? UGameplayStatics::GetPlayerController(PIEWorld, Config.ClientIndex)
-			: PIEWorld->GetFirstPlayerController();
-		if (!PC) return false;
-		APawn* Pawn = PC->GetPawn();
-		if (!Pawn || !Pawn->InputComponent) return false;
-		UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(Pawn->InputComponent);
-		if (!EIC) return false;
-
-		PawnClassPath = Pawn->GetClass()->GetPathName();
-		PIEWorldPath = PIEWorld->GetPathName();
-
 		TSet<const UInputAction*> Seen;
+		for (const FTrackedAction& T : Tracked)
+		{
+			if (T.Action.IsValid()) Seen.Add(T.Action.Get());
+		}
+
 		TSet<FString> Whitelist;
 		for (const FString& P : Config.ActionPaths) Whitelist.Add(P);
 
-		for (const TUniquePtr<FEnhancedInputActionEventBinding>& Bind : EIC->GetActionEventBindings())
+		auto TryAdd = [&](const UInputAction* Action)
 		{
-			const UInputAction* Action = Bind->GetAction();
-			if (!Action || Seen.Contains(Action)) continue;
-			if (!Whitelist.IsEmpty() && !Whitelist.Contains(Action->GetPathName())) continue;
+			if (!Action || Seen.Contains(Action)) return;
+			if (!Whitelist.IsEmpty() && !Whitelist.Contains(Action->GetPathName())) return;
 			Seen.Add(Action);
 
 			FTrackedAction T;
@@ -196,7 +186,45 @@ namespace UEMCPPIE
 			Spec.Path = T.Path;
 			Spec.ValueType = T.ValueType;
 			Actions.Add(Spec);
+		};
+
+		// Event bindings (BindAction calls on the pawn's EIC).
+		if (UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(Pawn->InputComponent))
+		{
+			for (const TUniquePtr<FEnhancedInputActionEventBinding>& Bind : EIC->GetActionEventBindings())
+			{
+				TryAdd(Bind->GetAction());
+			}
 		}
+
+		// IMC mappings: actions polled via GetActionValue() without BindAction.
+		ULocalPlayer* LP = PC->GetLocalPlayer();
+		UEnhancedInputLocalPlayerSubsystem* Sub = LP ? LP->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>() : nullptr;
+		UEnhancedPlayerInput* PlayerInput = Sub ? Sub->GetPlayerInput() : nullptr;
+		if (PlayerInput)
+		{
+			for (const FEnhancedActionKeyMapping& Mapping : PlayerInput->GetEnhancedActionMappings())
+			{
+				TryAdd(Mapping.Action);
+			}
+		}
+	}
+
+	bool FPIEFrameSampler::AttachToPIE(UWorld* PIEWorld)
+	{
+		if (bAttached) return true;
+		if (!PIEWorld) return false;
+		APlayerController* PC = (Config.ClientIndex > 0)
+			? UGameplayStatics::GetPlayerController(PIEWorld, Config.ClientIndex)
+			: PIEWorld->GetFirstPlayerController();
+		if (!PC) return false;
+		APawn* Pawn = PC->GetPawn();
+		if (!Pawn || !Pawn->InputComponent) return false;
+
+		PawnClassPath = Pawn->GetClass()->GetPathName();
+		PIEWorldPath = PIEWorld->GetPathName();
+
+		DiscoverActions(PC, Pawn);
 
 		bAttached = true;
 		UE_LOG(LogMCPBridge, Log, TEXT("[PIE-SAMPLER] Attached: %d actions, %d tracked values, pawn=%s"),
@@ -220,37 +248,13 @@ namespace UEMCPPIE
 		if (!Pawn) return Row;
 
 		// Rescan for late-bound actions (IMCs added after initial attach).
-		if (UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(Pawn->InputComponent))
 		{
-			TSet<FString> Known;
-			for (const FTrackedAction& T : Tracked) Known.Add(T.Path);
-
-			TSet<FString> Whitelist;
-			for (const FString& P : Config.ActionPaths) Whitelist.Add(P);
-
-			for (const TUniquePtr<FEnhancedInputActionEventBinding>& Bind : EIC->GetActionEventBindings())
+			const int32 Before = Tracked.Num();
+			DiscoverActions(PC, Pawn);
+			for (int32 i = Before; i < Tracked.Num(); ++i)
 			{
-				const UInputAction* Action = Bind->GetAction();
-				if (!Action) continue;
-				const FString Path = Action->GetPathName();
-				if (Known.Contains(Path)) continue;
-				if (!Whitelist.IsEmpty() && !Whitelist.Contains(Path)) continue;
-				Known.Add(Path);
-
-				FTrackedAction T;
-				T.Action = Action;
-				T.Name = Action->GetName();
-				T.Path = Path;
-				T.ValueType = ConvertValueType(Action->ValueType);
-				Tracked.Add(T);
-
-				FActionSpec Spec;
-				Spec.Name = T.Name;
-				Spec.Path = Path;
-				Spec.ValueType = T.ValueType;
-				Actions.Add(Spec);
 				UE_LOG(LogMCPBridge, Log, TEXT("[PIE-SAMPLER] Late-discovered action: %s (%s)"),
-					*T.Name, *Path);
+					*Tracked[i].Name, *Tracked[i].Path);
 			}
 		}
 
