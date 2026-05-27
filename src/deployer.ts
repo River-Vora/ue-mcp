@@ -132,9 +132,13 @@ export function attachSummary(r: AttachResult): string {
   return "Bridge attach: " + notes.join("; ");
 }
 
+function selfDir(): string {
+  return import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+}
+
 function packagedUpluginPath(): string {
   return path.resolve(
-    import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname),
+    selfDir(),
     "..",
     "plugin",
     "ue_mcp_bridge",
@@ -185,7 +189,7 @@ function deployCppPlugin(uprojectPath: string): boolean {
   const pluginsDir = path.join(projectDir, "Plugins");
 
   const sourcePluginDir = path.resolve(
-    import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname),
+    selfDir(),
     "..",
     "plugin",
     "ue_mcp_bridge",
