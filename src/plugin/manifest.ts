@@ -73,12 +73,11 @@ const FlowEntrySchema = z.object({
  * MCPHandlerRegistration.h shipped under the bridge's Public/).
  *
  *   nativeModule:
- *     uePluginName: VoxelPCGBridge
+ *     uePluginName: UE_MCP_Replay
  *     minBridgeApi: 1
- *     source: ue/Plugins/VoxelPCGBridge
- *     supportedEngineVersions: ["5.5", "5.6"]
+ *     source: ue/Plugins/UE_MCP_Replay
  *     handlers:
- *       voxel.sample_density: { description: "..." }
+ *       inject_input: { description: "..." }
  */
 const NativeModuleSchema = z.object({
   uePluginName: z.string().min(1),

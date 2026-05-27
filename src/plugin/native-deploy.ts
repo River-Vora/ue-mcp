@@ -13,10 +13,10 @@ import * as path from "node:path";
  *
  *   {
  *     "<npm-package-name>": {
- *       "uePluginName": "VoxelPCGBridge",
- *       "pluginVersion": "0.1.0",
- *       "installedAt": "2026-05-22T17:30:00.000Z",
- *       "files": ["Plugins/VoxelPCGBridge/...", ...]   // relative to projectDir
+ *       "uePluginName": "UE_MCP_Replay",
+ *       "pluginVersion": "0.0.2",
+ *       "installedAt": "2026-05-26T00:00:00.000Z",
+ *       "files": ["Plugins/UE_MCP_Replay/...", ...]   // relative to projectDir
  *     }
  *   }
  */

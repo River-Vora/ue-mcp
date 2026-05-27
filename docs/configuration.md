@@ -88,8 +88,8 @@ The `plugins:` array in **`ue-mcp.yml`** declares npm packages that inject new a
 
 ```yaml
 plugins:
-  - name: ue-mcp-voxel
-  - name: ue-mcp-my-other-thing
+  - name: pie-transport
+  - name: some-other-plugin
     version: "0.2.x"        # optional - npm semver range
 ```
 
@@ -108,7 +108,7 @@ Order matters: earlier entries win on inter-plugin action-name collisions. A plu
 
 A plugin can declare `uePluginDependency: <PluginName>` in its `ue-mcp.plugin.yml`. The MCP server checks the project's `.uproject` for `Plugins[].Name == "<PluginName>"` and exposes the result as `uePluginPresent` in `plugins(action="list")`. The npm side loads regardless — the flag is a signal that the host UE plugin needs to be enabled before the injected actions will actually run.
 
-For example, `ue-mcp-plugin-voxel-plugin` declares `uePluginDependency: Voxel`. Until `Voxel` is added to `<Project>.uproject`'s `Plugins` array (and the C++ modules are built), `voxel_build_scatter_graph` is loaded but will fail at execute time.
+For example, a plugin that declares `uePluginDependency: SomePlugin` will report `uePluginPresent: false` until `SomePlugin` is added to `<Project>.uproject`'s `Plugins` array and the C++ modules are built.
 
 ## Bridge Connection
 

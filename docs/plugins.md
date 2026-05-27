@@ -6,20 +6,20 @@ ue-mcp's plugin system lets npm packages extend the server in three ways:
 - **Provide** entirely new top-level categories that the plugin owns end-to-end.
 - **Ship native C++** that registers handlers directly with the editor bridge, opening up engine APIs that have no built-in coverage.
 
-Most plugins use only the first shape; the other two are available when injection is the wrong fit. This page covers both sides: installing and managing plugins (consumer), and writing and publishing one (author). The author section starts at [Authoring a plugin](#authoring-a-plugin) — if you're just trying to use a plugin somebody else wrote, you can stop after [Using plugins](#using-plugins).
+Most plugins use only the first shape; the other two are available when injection is the wrong fit. This page covers both sides: installing and managing plugins (consumer), and writing and publishing one (author). The author section starts at [Authoring a plugin](#authoring-a-plugin) - if you're just trying to use a plugin somebody else wrote, you can stop after [Using plugins](#using-plugins).
 
 !!! info "Live reference"
-    [`ue-mcp-plugin-voxel-plugin`](https://github.com/db-lyon/ue-mcp-plugin-voxel-plugin) ([npm](https://www.npmjs.com/package/ue-mcp-plugin-voxel-plugin)) is the canonical reference. It ships one injected `pcg` action over the [Voxel Plugin](https://voxelplugin.com) — `voxel_build_scatter_graph` — with more tracked in its `TODO.md`. The examples below mirror its real source.
+    [`pie-transport`](https://github.com/db-lyon/pie-transport) ([npm](https://www.npmjs.com/package/pie-transport)) is the canonical reference. It ships 33 native C++ handlers for PIE recording, replay, observation, and input injection - all injected into the `gameplay` category. The examples below mirror its real source.
 
 ## Quick start
 
 In your Unreal project directory:
 
 ```bash
-ue-mcp plugin install ue-mcp-plugin-voxel-plugin
+ue-mcp plugin install pie-transport
 ```
 
-That runs `npm install --save`, validates the plugin's manifest, and adds an entry to your `ue-mcp.yml`. Restart your MCP client (in Claude Code, `/mcp` reconnects); the next time the server boots it will load the plugin, inject its actions into the host categories, and merge its knowledge into the AI-facing docs.
+That runs `npm install --save`, validates the plugin's manifest, deploys the native C++ module, and adds an entry to your `ue-mcp.yml`. Rebuild the UE project so the native module compiles in, then restart your MCP client (in Claude Code, `/mcp` reconnects).
 
 Verify with the introspection tool:
 
@@ -33,21 +33,20 @@ plugins(action="list")
   "active": 1,
   "plugins": [
     {
-      "name": "ue-mcp-plugin-voxel-plugin",
-      "version": "0.2.0",
-      "actionPrefix": "voxel",
+      "name": "pie-transport",
+      "version": "0.0.2",
+      "actionPrefix": "",
       "status": "active",
-      "categories": ["pcg"],
-      "injectedActions": 1,
+      "categories": ["gameplay"],
+      "injectedActions": 33,
       "flows": 0,
-      "uePluginDependency": "Voxel",
-      "uePluginPresent": true
+      "nativeModule": "UE_MCP_Replay"
     }
   ]
 }
 ```
 
-Once `status: "active"` and `uePluginPresent: true`, the injected action (e.g. `pcg(action="voxel_build_scatter_graph", ...)`) is callable end-to-end.
+Once `status: "active"`, the injected actions (e.g. `gameplay(action="pie_record_arm", ...)`) are callable end-to-end.
 
 ## How plugins work
 
@@ -64,10 +63,10 @@ At server start, ue-mcp:
 2. Resolves each entry against `<project>/node_modules/`.
 3. Loads and validates each plugin's `ue-mcp.plugin.yml`.
 4. Imports its task classes and registers them with the flow runtime.
-5. Merges the injected actions into the host category tools — the action shows up as `<category>(action="<prefix>_<bare>", ...)`.
+5. Merges the injected actions into the host category tools - the action shows up as `<category>(action="<prefix>_<bare>", ...)`.
 6. Concatenates the plugin's knowledge files into the host categories' AI-facing docs.
 
-The injection happens before any tool is registered with the MCP client, so by the time the agent sees the `pcg` tool's action list, the plugin's actions are already there alongside the built-ins.
+The injection happens before any tool is registered with the MCP client, so by the time the agent sees the `gameplay` tool's action list, the plugin's actions are already there alongside the built-ins.
 
 ### Three shapes a plugin can take
 
@@ -77,11 +76,11 @@ The injection happens before any tool is registered with the MCP client, so by t
 | **B. Provide a new category** | `provides:` (with or without `inject:`) | The plugin opens a whole new domain - audio middleware, build pipelines, networking layers - that doesn't fit inside any built-in category. |
 | **C. Ship native C++** | `nativeModule:` (plus `inject:` or `provides:`) | The plugin needs engine APIs ue-mcp's built-in handlers don't expose. The plugin ships a UE C++ module that registers handlers on the editor bridge. |
 
-Shape A is overwhelmingly the right answer. A standalone "voxel" tool would be opaque to an agent that has no reason to open a category called `voxel` while working on terrain; injecting into `pcg` puts the action at the point of need.
+Shape A is overwhelmingly the right answer. An action that belongs inside an existing category is best discovered where agents are already working.
 
 Shape B is for genuinely new domains. If your plugin's actions don't fit anywhere in the built-in category list, owning a new top-level category is cleaner than forcing a misfit injection.
 
-Shape C is for capability that can't be expressed through orchestration of existing actions. The plugin ships C++ source that compiles into the user's project alongside the bridge, and registers handlers via `UEMCP::RegisterExternalHandler` from its `StartupModule`. Native handlers participate in the same dispatch path as built-in ones.
+Shape C is for capability that can't be expressed through orchestration of existing actions. The plugin ships C++ source that compiles into the user's project alongside the bridge, and registers handlers via `UEMCP::RegisterExternalHandler` from its `StartupModule`. Native handlers participate in the same dispatch path as built-in ones. `pie-transport` is a Shape C plugin.
 
 ## Using plugins
 
@@ -96,11 +95,11 @@ ue-mcp plugin install <package-name>
 It's a thin wrapper that:
 
 1. Runs `npm install --save <package-name>` so the package lands in `node_modules/` and is recorded in your `package.json`.
-2. Validates the plugin's `ue-mcp.plugin.yml` — checks that `actionPrefix` is a legal identifier, every `inject:` target is a real registered category, every `class_path` resolves, and `minServerVersion` is satisfied.
+2. Validates the plugin's `ue-mcp.plugin.yml` - checks that `actionPrefix` is a legal identifier, every `inject:` target is a real registered category, every `class_path` resolves, and `minServerVersion` is satisfied.
 3. Appends a `- name: <package-name>` entry to your `ue-mcp.yml`'s `plugins:` array (creating the array if needed).
 4. Prints the restart instruction.
 
-You can also install manually — `npm install --save <package-name>` and edit `ue-mcp.yml` yourself. The end state is identical.
+You can also install manually - `npm install --save <package-name>` and edit `ue-mcp.yml` yourself. The end state is identical.
 
 ### The `plugins:` array
 
@@ -108,12 +107,12 @@ The consumer surface is a single block in `ue-mcp.yml`:
 
 ```yaml
 plugins:
-  - name: ue-mcp-plugin-voxel-plugin
-  - name: ue-mcp-plugin-some-other-thing
+  - name: pie-transport
+  - name: some-other-plugin
     version: "^0.2.0"     # optional; npm semver range against package.json
 ```
 
-Each entry resolves against the project's `node_modules/`. If `version` is omitted, whatever is currently installed loads. Order matters — see [Ordering and collisions](#ordering-and-collisions).
+Each entry resolves against the project's `node_modules/`. If `version` is omitted, whatever is currently installed loads. Order matters - see [Ordering and collisions](#ordering-and-collisions).
 
 ### Introspection
 
@@ -124,50 +123,52 @@ Two read-only actions on the `plugins` category:
 | `plugins(action="list")` | Every plugin: name, version, prefix, status, count of injected actions and flows, host UE plugin dependency check. |
 | `plugins(action="describe", name="<package>")` | Full detail for one plugin: the same fields as `list`, plus the actual injected action names, knowledge file paths, flows, and the resolved package + manifest paths on disk. |
 
-Both reflect the live state of the server, so they're the right tool when something looks wrong — see [Troubleshooting](#troubleshooting).
+Both reflect the live state of the server, so they're the right tool when something looks wrong - see [Troubleshooting](#troubleshooting).
 
 ### Host UE plugin dependencies
 
 A plugin can declare a single Unreal-side dependency in its manifest:
 
 ```yaml
-uePluginDependency: Voxel
+uePluginDependency: SomePlugin
 ```
 
-This is the **`.uplugin` filename** — the same string that appears as `Plugins[].Name` in your `.uproject`. ue-mcp checks for it at server start and reports the result as `uePluginPresent` in `plugins(action="list")`.
+This is the **`.uplugin` filename** - the same string that appears as `Plugins[].Name` in your `.uproject`. ue-mcp checks for it at server start and reports the result as `uePluginPresent` in `plugins(action="list")`.
 
 The check is informational, not gating: the npm-side plugin loads regardless, and its injected actions appear in the host category tools. But until the UE plugin is enabled in `.uproject` and its C++ modules are built, the actions will fail at execute time with a clear error.
 
 To enable a host UE plugin:
 
 1. Add `{ "Name": "<DepName>", "Enabled": true }` to your `.uproject`'s `Plugins` array.
-2. Build the project (e.g. `npm run build` from a Vale-style project, or `editor(action="build_all")`).
+2. Build the project (e.g. `npm run build` or `editor(action="build_all")`).
 3. Restart the editor.
 4. Run `plugins(action="list")` to confirm `uePluginPresent: true`.
 
-For source-distributed UE plugins (like Voxel Plugin), drop the source under `Plugins/<DepName>/` — either as a git submodule (recommended for size) or as a vendored copy. The `.uplugin` file inside that directory is what UE's plugin discovery walks.
+For source-distributed UE plugins, drop the source under `Plugins/<DepName>/` - either as a git submodule (recommended for size) or as a vendored copy. The `.uplugin` file inside that directory is what UE's plugin discovery walks.
 
 ### Ordering and collisions
 
 - **Plugin vs built-in:** A plugin action can never override a built-in. Collisions are hard-skipped at load time with a warning in the server log; the built-in stays.
-- **Plugin vs plugin:** First entry in `plugins:` wins. If two plugins both inject `pcg.foo_bar`, only the earlier-listed one's version is registered. The order is intentionally stable — your `ue-mcp.yml` is the source of truth for resolution.
+- **Plugin vs plugin:** First entry in `plugins:` wins. If two plugins both inject `gameplay.foo_bar`, only the earlier-listed one's version is registered. The order is intentionally stable - your `ue-mcp.yml` is the source of truth for resolution.
 - **Failed plugins are skipped, not partially loaded.** If a plugin fails validation (bad manifest, missing class_path, server-version mismatch, etc.), it is dropped entirely with a loud warning. Other plugins keep loading. The host tools are never partially mutated.
 
 ### Removing a plugin
 
-There is no separate uninstall command — `npm uninstall <package-name>` and delete the entry from `ue-mcp.yml`. On next restart, the actions are gone.
+There is no separate uninstall command - `npm uninstall <package-name>` and delete the entry from `ue-mcp.yml`. On next restart, the actions are gone.
 
 ## Available plugins
 
-The reference plugin is `ue-mcp-plugin-voxel-plugin` ([source](https://github.com/db-lyon/ue-mcp-plugin-voxel-plugin), [npm](https://www.npmjs.com/package/ue-mcp-plugin-voxel-plugin)). Search npm for [`ue-mcp-plugin`](https://www.npmjs.com/search?q=keywords%3Aue-mcp-plugin) (the convention keyword) to discover others as the ecosystem grows.
+| Plugin | What it does |
+|--------|-------------|
+| [`pie-transport`](https://github.com/db-lyon/pie-transport) | PIE recording, replay, observation, and input injection. 33 native C++ handlers injected into `gameplay`. |
 
 ## Authoring a plugin
 
 ### Quick scaffolder
 
 ```bash
-ue-mcp plugin create ue-mcp-my-thing
-cd ue-mcp-my-thing
+ue-mcp plugin create my-thing
+cd my-thing
 npm install
 npm run build
 ```
@@ -177,7 +178,7 @@ That stamps a working package with `ue-mcp.plugin.yml`, `tsconfig.json`, an exam
 ### Package layout
 
 ```
-ue-mcp-<your-name>/
+my-plugin/
   package.json
   tsconfig.json
   ue-mcp.plugin.yml          # author declaration: actionPrefix, inject, knowledge, tasks, flows
@@ -189,7 +190,7 @@ ue-mcp-<your-name>/
     tasks/
       MyAction.js
   knowledge/
-    pcg.md                   # one markdown file per target category
+    gameplay.md              # one markdown file per target category
   README.md
 ```
 
@@ -199,21 +200,20 @@ Conventions:
 - `class_path` in the declaration is resolved against the plugin's `dist/` (the loader tries `dist/<path>.js` then `dist/tasks/<path>.js`).
 - `src/shared/` holds helpers; never reference it from the declaration.
 - Compile to `dist/` with `tsc` so users need no TypeScript toolchain.
-- The npm package name should start with `ue-mcp-` so it's discoverable on the registry.
 
 ### `package.json`
 
 ```json
 {
-  "name": "ue-mcp-plugin-voxel-plugin",
+  "name": "my-plugin",
   "version": "0.1.0",
-  "description": "Voxel Plugin actions for ue-mcp",
+  "description": "My custom actions for ue-mcp",
   "type": "module",
   "main": "dist/index.js",
   "files": ["dist", "ue-mcp.plugin.yml", "knowledge", "README.md"],
-  "keywords": ["ue-mcp-plugin", "unreal-engine", "voxel"],
+  "keywords": ["unreal-engine"],
   "peerDependencies": {
-    "@db-lyon/flowkit": "~0.5.2"
+    "@db-lyon/flowkit": ">=0.5.0"
   },
   "devDependencies": {
     "@db-lyon/flowkit": "~0.5.2",
@@ -225,37 +225,35 @@ Conventions:
 }
 ```
 
-The `ue-mcp-plugin` keyword is the registry signal. The peer-dep on `@db-lyon/flowkit` is what gives `BaseTask` its shape — your tasks must extend the same class the server uses, so a peer dep (not a regular dep) is what keeps the two copies in sync.
+The peer-dep on `@db-lyon/flowkit` is what gives `BaseTask` its shape - your tasks must extend the same class the server uses, so a peer dep (not a regular dep) is what keeps the two copies in sync.
 
 ### `ue-mcp.plugin.yml`
 
 This is the only file ue-mcp reads from your package. Authored once; never edited by users.
 
 ```yaml
-actionPrefix: voxel              # mandatory, lowercase, must match /^[a-z][a-z0-9_]*$/
-minServerVersion: 1.0.15         # optional - the server enforces this at install and load
-uePluginDependency: Voxel        # optional - .uplugin filename to check in .uproject
+actionPrefix: mypfx             # mandatory, lowercase, must match /^[a-z][a-z0-9_]*$/
+minServerVersion: 1.0.15        # optional - the server enforces this at install and load
+uePluginDependency: SomePlugin  # optional - .uplugin filename to check in .uproject
 
 inject:
-  pcg:
-    build_scatter_graph:         # → pcg(action="voxel_build_scatter_graph")
-      task: voxel.build_scatter_graph
-      description: "Build a PCG graph that scatters weighted static meshes on a voxel terrain. Wraps UPCGVoxelSamplerSettings + the stock PCGStaticMeshSpawner."
+  gameplay:
+    inspect_something:           # -> gameplay(action="mypfx_inspect_something")
+      task: mypfx.inspect_something
+      description: "Inspect some game state during a PIE session."
       schema:
-        assetPath:             { type: string, required: true }
-        meshes:                { type: array,  required: true }
-        pointsPerSquaredMeter: { type: number }
-        seed:                  { type: number }
+        actorLabel:            { type: string, required: true }
+        includeComponents:     { type: boolean }
 
 tasks:
-  voxel.build_scatter_graph:
-    class_path: tasks/BuildScatterGraph
-    description: "Build a Voxel-Sampler-driven PCG mesh scatter graph"
+  mypfx.inspect_something:
+    class_path: tasks/InspectSomething
+    description: "Inspect game state for a given actor"
 ```
 
-The key under each category is the **bare** action name. The loader prepends your `actionPrefix` to compute the injected name: `voxel` + `build_scatter_graph` → `voxel_build_scatter_graph`. The user always sees the prefixed form.
+The key under each category is the **bare** action name. The loader prepends your `actionPrefix` to compute the injected name: `mypfx` + `inspect_something` -> `mypfx_inspect_something`. The user always sees the prefixed form.
 
-`knowledge:` and `flows:` are optional — omit them when you have nothing to attach. A plugin can ship a single action and nothing else.
+`knowledge:` and `flows:` are optional - omit them when you have nothing to attach. A plugin can ship a single action and nothing else.
 
 Param schemas under `schema:` accept these types: `string`, `number`, `boolean`, `object`, `array`. Non-required params become optional at the top level of the host category tool's schema.
 
@@ -264,22 +262,22 @@ Param schemas under `schema:` accept these types: `string`, `number`, `boolean`,
 When the plugin's actions don't belong inside any built-in category, declare a `provides:` block. Each entry registers a brand-new top-level MCP category that the plugin owns. Action names are NOT prefixed inside provided categories - the category itself is the namespace.
 
 ```yaml
-actionPrefix: voxel              # still required (used for any inject: entries)
+actionPrefix: terrain            # still required (used for any inject: entries)
 
 provides:
-  voxel_terrain:                 # → voxel_terrain(action="sample_density", ...)
-    description: "Voxel terrain authoring operations"
+  terrain_sculpt:                # -> terrain_sculpt(action="sample_density", ...)
+    description: "Terrain sculpting operations"
     actions:
       sample_density:
-        task: voxel_terrain.sample_density
-        description: "Sample density values along a curve through the voxel world"
+        task: terrain_sculpt.sample_density
+        description: "Sample density values along a curve through the terrain"
         schema:
           start: { type: array, required: true }
           end:   { type: array, required: true }
           steps: { type: number }
 
 tasks:
-  voxel_terrain.sample_density:
+  terrain_sculpt.sample_density:
     class_path: tasks/SampleDensity
 ```
 
@@ -287,8 +285,8 @@ Rules:
 
 - Provided category names must match `/^[a-z][a-z0-9_]*$/`.
 - A provided name may not collide with a built-in category. The CLI fails install with the offending name; the runtime loader skips the plugin with a clear status reason.
-- Inter-plugin collisions resolve first-writer-wins. If two installed plugins both `provides: voxel_terrain`, the one earlier in your `plugins:` array claims the name; the other is skipped with a warning visible in `plugins(list)`.
-- Knowledge files keyed by a provided category name (`knowledge/voxel_terrain.md`) attach to that category's AI-facing docs the same way they do for injected categories.
+- Inter-plugin collisions resolve first-writer-wins. If two installed plugins both `provides: terrain_sculpt`, the one earlier in your `plugins:` array claims the name; the other is skipped with a warning visible in `plugins(list)`.
+- Knowledge files keyed by a provided category name (`knowledge/terrain_sculpt.md`) attach to that category's AI-facing docs the same way they do for injected categories.
 
 A plugin can mix `inject:` and `provides:` freely - whatever fits each action best.
 
@@ -296,35 +294,37 @@ A plugin can mix `inject:` and `provides:` freely - whatever fits each action be
 
 When the plugin needs engine APIs ue-mcp's bridge doesn't already expose, ship a UE C++ module alongside the npm package. The module compiles into the user's project at install time and registers handlers on the bridge via `UEMCP::RegisterExternalHandler`.
 
+`pie-transport` is a real-world example of this shape. Its manifest:
+
 ```yaml
 nativeModule:
-  uePluginName: VoxelPCGBridge          # name of the .uplugin that gets deployed
+  uePluginName: UE_MCP_Replay           # name of the .uplugin that gets deployed
   minBridgeApi: 1                       # gate against UEMCP_BRIDGE_API_VERSION
-  source: ue/Plugins/VoxelPCGBridge     # path inside your npm tarball
-  supportedEngineVersions: ["5.5", "5.6"]
+  source: ue/Plugins/UE_MCP_Replay      # path inside your npm tarball
   handlers:
-    voxel.sample_density:
-      description: "Sample voxel density via the native handler"
+    inject_input:     { description: "Single-frame Enhanced Input inject" }
+    pie_record_arm:   { description: "Arm the PIE input recorder" }
+    pie_replay_arm:   { description: "Arm the PIE input replayer" }
+    # ... 30 more handlers
 ```
 
 #### Layout inside the npm tarball
 
 ```
-ue-mcp-<name>/
+pie-transport/
   ue-mcp.plugin.yml
-  dist/                              # tsc output (TypeScript tasks)
-  ue/                                # NEW: native source ships here
+  dist/                              # tsc output (TypeScript tasks, if any)
+  ue/                                # native source ships here
     Plugins/
-      VoxelPCGBridge/
-        VoxelPCGBridge.uplugin
+      UE_MCP_Replay/
+        UE_MCP_Replay.uplugin
         Source/
-          VoxelPCGBridge/
-            VoxelPCGBridge.Build.cs
-            Public/
-              VoxelPCGBridgeModule.h
+          UE_MCP_Replay/
+            UE_MCP_Replay.Build.cs
             Private/
-              VoxelPCGBridgeModule.cpp     # calls UEMCP::RegisterExternalHandler
-              SampleDensity.cpp
+              Handlers/              # handler .cpp files
+              PIE/                   # engine subsystem wrappers
+              UI/                    # editor UI panels
 ```
 
 Update `package.json` `files:` so the `ue/` directory ships with the published tarball:
@@ -338,9 +338,9 @@ Update `package.json` `files:` so the `ue/` directory ships with the published t
 Add `UE_MCP_Bridge` to `PrivateDependencyModuleNames` in your `.Build.cs`:
 
 ```csharp
-public class VoxelPCGBridge : ModuleRules
+public class UE_MCP_Replay : ModuleRules
 {
-    public VoxelPCGBridge(ReadOnlyTargetRules Target) : base(Target)
+    public UE_MCP_Replay(ReadOnlyTargetRules Target) : base(Target)
     {
         PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "Json" });
         PrivateDependencyModuleNames.AddRange(new string[] { "UE_MCP_Bridge" });
@@ -351,13 +351,12 @@ public class VoxelPCGBridge : ModuleRules
 Register handlers from `StartupModule`:
 
 ```cpp
-#include "VoxelPCGBridgeModule.h"
 #include "MCPHandlerRegistration.h"
 
-void FVoxelPCGBridgeModule::StartupModule()
+void FUE_MCP_ReplayModule::StartupModule()
 {
     UEMCP::RegisterExternalHandler(
-        TEXT("voxel.sample_density"),
+        TEXT("inject_input"),
         [](const TSharedPtr<FJsonObject>& Params) -> TSharedPtr<FJsonValue>
         {
             // ... do the work, return a JSON value
@@ -367,18 +366,18 @@ void FVoxelPCGBridgeModule::StartupModule()
         });
 }
 
-void FVoxelPCGBridgeModule::ShutdownModule()
+void FUE_MCP_ReplayModule::ShutdownModule()
 {
-    UEMCP::UnregisterExternalHandler(TEXT("voxel.sample_density"));
+    UEMCP::UnregisterExternalHandler(TEXT("inject_input"));
 }
 ```
 
-The handler's method name (`voxel.sample_density`) is what the plugin's TypeScript task addresses through `this.call("voxel.sample_density", ...)` or what the bridge looks up when an MCP action dispatches.
+The handler's method name (`inject_input`) is what the plugin's TypeScript task addresses through `this.call("inject_input", ...)` or what the bridge looks up when an MCP action dispatches.
 
 #### Install flow
 
 ```bash
-ue-mcp plugin install ue-mcp-plugin-voxel-pro
+ue-mcp plugin install pie-transport
 ```
 
 The CLI now also:
@@ -401,55 +400,36 @@ The response includes `bridgeApiVersion` when a bridge is deployed.
 ### Writing tasks
 
 ```ts
-// src/tasks/BuildScatterGraph.ts
+// src/tasks/InspectSomething.ts
 import { BaseTask, type TaskResult } from "@db-lyon/flowkit";
 
-interface MeshEntry { mesh: string; weight?: number; }
-
 interface Options {
-  assetPath: string;
-  meshes: MeshEntry[];
-  pointsPerSquaredMeter?: number;
-  seed?: number;
+  actorLabel: string;
+  includeComponents?: boolean;
 }
 
-export default class BuildScatterGraph extends BaseTask<Options> {
-  get taskName() { return "voxel.build_scatter_graph"; }
+export default class InspectSomething extends BaseTask<Options> {
+  get taskName() { return "mypfx.inspect_something"; }
 
   async execute(): Promise<TaskResult> {
-    const { assetPath, meshes, pointsPerSquaredMeter = 0.1, seed = 1 } = this.options;
-    const slash = assetPath.lastIndexOf("/");
-    const packagePath = assetPath.slice(0, slash);
-    const name = assetPath.slice(slash + 1);
+    const { actorLabel, includeComponents = false } = this.options;
 
-    // Compose existing MCP actions via this.call('<category>.<action>', ...).
-    const created = await this.call("pcg.create_graph", { name, packagePath });
-    if (!created.success && !/exist|already/i.test(created.error?.message ?? "")) return created;
-
-    // The bridge's nodeType resolver falls back to /Script/PCG.* only — for
-    // VoxelPCG nodes, pass the absolute object path so the first FindObject hits.
-    const sampler = await this.call("pcg.add_node", {
-      assetPath,
-      nodeType: "/Script/VoxelPCG.PCGVoxelSamplerSettings",
+    const details = await this.call("level.get_actor_details", {
+      actorLabel,
+      includeComponents,
     });
-    if (!sampler.success) return sampler;
+    if (!details.success) return details;
 
-    const spawner = await this.call("pcg.add_node", {
-      assetPath,
-      nodeType: "/Script/PCG.PCGStaticMeshSpawnerSettings",
-    });
-    if (!spawner.success) return spawner;
-
-    // ... set_node_settings, connect_nodes, set_static_mesh_spawner_meshes ...
-    return { success: true, data: { assetPath, meshCount: meshes.length } };
+    // ... process the result ...
+    return { success: true, data: details.data };
   }
 }
 ```
 
 Notes:
 
-- Compose existing actions through `this.call('<category>.<action>', params)`. Don't reach into the bridge directly unless you have to — composition gives you free observability and rollback hooks.
-- Use the **real** parameter names of the host task you're calling. `pcg.add_node` takes `assetPath` (not `graphPath`) and `nodeType` (which the bridge resolves via `FindObject<UClass>` — bare class names only resolve when the bridge's fallback paths cover the module, so for plugin modules pass the absolute `/Script/<Module>.<UCLASS>` path).
+- Compose existing actions through `this.call('<category>.<action>', params)`. Don't reach into the bridge directly unless you have to - composition gives you free observability and rollback hooks.
+- Use the **real** parameter names of the host task you're calling. Param name drift between TS and C++ is how silent failures start.
 - If your task makes multi-step mutations, return a `rollback` record so users can opt into `rollback_on_failure: true` on the wrapping flow.
 - Throw, don't return success-with-error-data. The runtime catches throws and turns them into structured failures.
 
@@ -457,33 +437,30 @@ Notes:
 
 For each category your plugin injects into, ship a short markdown file under `knowledge/`. The server attaches it to that category's AI-facing docs at boot, so the agent sees plugin-specific guidance the moment it looks at that category.
 
-Keep it terse — one screenful per category. Concrete examples beat prose. The agent already knows how the category works; the knowledge file is just the delta the plugin introduces.
+Keep it terse - one screenful per category. Concrete examples beat prose. The agent already knows how the category works; the knowledge file is just the delta the plugin introduces.
 
 ```markdown
-# Voxel Plugin - PCG actions
+# PIE Transport - gameplay actions
 
-`voxel_build_scatter_graph` creates a UPCGGraph asset that wires a
-Voxel Sampler into a Static Mesh Spawner. Use it when the user wants
-weighted meshes scattered on a voxel terrain rather than the standard
-landscape.
+33 actions for PIE input recording, replay, observation, and injection.
 
-Typical sequence:
-1. `pcg(action="voxel_build_scatter_graph", assetPath="/Game/PCG/MyScatter", meshes=[{mesh:".../Rock.Rock"}])`
-2. Attach the resulting graph to a PCG component near your `AVoxelWorld`.
-3. `pcg(action="execute", actorLabel="MyPCGActor")` to materialise the result.
+Quick start:
+1. `gameplay(action="pie_record_arm", sample_hz=60)` - arm the recorder
+2. Press Play, do your thing, stop PIE
+3. `gameplay(action="pie_replay_arm", recording_id="<id>", eject=true, time_scale=0.1)` - replay at 10%
 ```
 
 ### Publishing
 
 ```bash
-npm run build      # tsc → dist/
+npm run build      # tsc -> dist/
 npm publish        # public registry
 ```
 
-Tag your package with the `ue-mcp-plugin` keyword in `package.json` so it shows up in npm searches for the convention. Users install with:
+Users install with:
 
 ```bash
-ue-mcp plugin install ue-mcp-<your-name>
+ue-mcp plugin install <your-package-name>
 ```
 
 ## Validation rules
@@ -508,15 +485,15 @@ The server didn't find any `plugins:` entries, or every entry failed validation.
 
 1. `ue-mcp.yml` exists in your project root next to the `.uproject` and has a top-level `plugins:` array.
 2. Each `name:` is installed under `node_modules/`. Run `npm install` if the lockfile says it should be there.
-3. The server's stderr log — every validation failure prints a `[ue-mcp] warn plugin: <package>: <reason>` line at boot.
+3. The server's stderr log - every validation failure prints a `[ue-mcp] warn plugin: <package>: <reason>` line at boot.
 
 ### `uePluginPresent: false`
 
-The npm-side plugin loaded fine, but the host Unreal plugin it declares as a dependency is missing from your `.uproject`. See [Host UE plugin dependencies](#host-ue-plugin-dependencies) for the enable steps. The injected actions are still visible in the host category tools — they just won't run end-to-end until the UE plugin is enabled and built.
+The npm-side plugin loaded fine, but the host Unreal plugin it declares as a dependency is missing from your `.uproject`. See [Host UE plugin dependencies](#host-ue-plugin-dependencies) for the enable steps. The injected actions are still visible in the host category tools - they just won't run end-to-end until the UE plugin is enabled and built.
 
 ### `class_path '<path>' could not be resolved`
 
-The plugin's `ue-mcp.plugin.yml` declared a task whose compiled JS file is missing from `dist/`. If you're authoring: run `npm run build` and confirm `dist/<path>.js` exists. If you're consuming: the package was published without its `dist/` directory — open an issue on the plugin's repo.
+The plugin's `ue-mcp.plugin.yml` declared a task whose compiled JS file is missing from `dist/`. If you're authoring: run `npm run build` and confirm `dist/<path>.js` exists. If you're consuming: the package was published without its `dist/` directory - open an issue on the plugin's repo.
 
 ### `requires server >= <version>`
 
@@ -530,7 +507,7 @@ Then restart your MCP client.
 
 ### Injected action appears in `plugins.describe` but not in the host category tool's action list
 
-You restarted the editor but not the MCP server. They're separate processes — the editor restart doesn't respawn the npx-launched ue-mcp server. Reconnect MCP in your client (in Claude Code, `/mcp`).
+You restarted the editor but not the MCP server. They're separate processes - the editor restart doesn't respawn the npx-launched ue-mcp server. Reconnect MCP in your client (in Claude Code, `/mcp`).
 
 ### `nativeModule requires bridge ABI >= N`
 

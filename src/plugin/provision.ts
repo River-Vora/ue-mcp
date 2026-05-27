@@ -12,7 +12,7 @@ import {
  * plugin's namespace.
  */
 export interface ProvisionPlan {
-  /** Provided category name (e.g. `voxel_terrain`). */
+  /** Provided category name (e.g. `terrain_sculpt`). */
   category: string;
   /** Plugin name for diagnostics. */
   pluginName: string;

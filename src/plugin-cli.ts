@@ -367,10 +367,6 @@ function cmdUpdate(): void {
 function cmdCreate(): void {
   const name = args.shift();
   if (!name) fail("usage: ue-mcp plugin create <name> [--dir path]");
-  if (!/^ue-mcp-/.test(name)) {
-    note(`WARNING: package name does not start with 'ue-mcp-' - registry discoverability will suffer.`);
-  }
-
   let targetDir = path.resolve(process.cwd(), name);
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--dir") targetDir = path.resolve(args[i + 1]);
@@ -394,11 +390,9 @@ function cmdCreate(): void {
 }
 
 function deriveDefaultPrefix(pkgName: string): string {
-  const stripped = pkgName.replace(/^ue-mcp-(?:plugin-)?/, "");
-  const lowered = stripped.replace(/[^a-z0-9]+/gi, "_").toLowerCase();
-  // Take the first 1-3 alphanumeric chars as an action prefix.
-  const compact = lowered.split("_").filter(Boolean);
-  const seed = compact.length > 0 ? compact.map((s) => s[0]).join("").slice(0, 4) : "plg";
+  const normalized = pkgName.replace(/[^a-z0-9]+/gi, "_").toLowerCase();
+  const parts = normalized.split("_").filter(Boolean);
+  const seed = parts.length > 0 ? parts.map((s) => s[0]).join("").slice(0, 4) : "plg";
   return /^[a-z]/.test(seed) ? seed : `p${seed}`;
 }
 
@@ -411,7 +405,7 @@ function writeScaffold(dir: string, pkgName: string, prefix: string): void {
     type: "module",
     main: "dist/index.js",
     files: ["dist", "ue-mcp.plugin.yml", "knowledge", "README.md"],
-    keywords: ["ue-mcp-plugin", "unreal-engine"],
+    keywords: ["unreal-engine"],
     peerDependencies: {
       "@db-lyon/flowkit": "~0.5.2",
     },
