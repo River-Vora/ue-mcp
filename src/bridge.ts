@@ -1,6 +1,34 @@
 import WebSocket from "ws";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { McpError, ErrorCode } from "./errors.js";
 import { debug, warn } from "./log.js";
+
+// #492: per-project port lockfile published by the bridge plugin. When the
+// default port (9877) is taken by another editor, the plugin walks up and
+// publishes the actual bound port here. The client reads this before
+// falling back to the default port so a second editor finds the right one.
+export function readBridgeLockfile(
+  uprojectPath: string | null,
+): { port: number; pid: number; startedAt?: string; apiVersion?: number } | null {
+  if (!uprojectPath) return null;
+  const lockfile = path.join(
+    path.dirname(uprojectPath),
+    "Saved",
+    "UE_MCP_Bridge",
+    "port.json",
+  );
+  try {
+    const raw = fs.readFileSync(lockfile, "utf8");
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.port === "number" && parsed.port > 0 && parsed.port < 65536) {
+      return parsed;
+    }
+  } catch {
+    // Missing or unreadable - fall back to default.
+  }
+  return null;
+}
 
 export interface BridgeResponse {
   id: string;
@@ -54,10 +82,27 @@ export class EditorBridge implements IBridge {
     await this.connectInFlight;
   }
 
+  /**
+   * #492: project context for resolving the per-project port lockfile. Set
+   * by index.ts after the user's .uproject is loaded. Leaving this null
+   * keeps the default-port-only behaviour for callers that don't have a
+   * project context (CLI tools, tests).
+   */
+  public projectPathForLockfile: string | null = null;
+
   async connect(timeoutMs = 3000): Promise<void> {
     if (this.isConnected) return;
 
     this.ws?.terminate();
+
+    // #492: if a per-project lockfile exists for this .uproject, prefer the
+    // port it advertises over the default. Lets multiple editors run side-
+    // by-side without their npm clients colliding on 9877.
+    const lockfile = readBridgeLockfile(this.projectPathForLockfile);
+    if (lockfile && lockfile.port !== this.port) {
+      debug("bridge", `lockfile points at port ${lockfile.port}, using it instead of default ${this.port}`);
+      this.port = lockfile.port;
+    }
 
     const url = `ws://${this.host}:${this.port}`;
 

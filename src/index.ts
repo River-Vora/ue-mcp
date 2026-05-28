@@ -51,6 +51,11 @@ async function main() {
       project.setProject(projectArg);
       console.error(`[ue-mcp] Project loaded: ${project.projectName} (engine ${project.engineAssociation ?? "unknown"})`);
 
+      // #492: pass the .uproject path to the bridge so it can read the
+      // per-project port lockfile when connecting (lets multiple editors
+      // coexist on adjacent ports).
+      bridge.projectPathForLockfile = project.projectPath;
+
       // Non-destructive attach — never overwrites local bridge source.
       // Source deployment is reserved for `ue-mcp init` / `ue-mcp deploy`.
       const result = attach(project);

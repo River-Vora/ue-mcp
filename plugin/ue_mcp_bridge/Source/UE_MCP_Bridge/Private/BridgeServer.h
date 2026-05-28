@@ -34,6 +34,11 @@ public:
 	// Public stop method (calls FRunnable::Stop)
 	void Shutdown();
 
+	// #492: per-project port lockfile so multiple editors can coexist.
+	static FString GetPortLockfilePath();
+	static void WritePortLockfile(int32 PortValue);
+	static void DeletePortLockfile();
+
 	// Get handler registry
 	FMCPHandlerRegistry& GetHandlerRegistry() { return HandlerRegistry; }
 

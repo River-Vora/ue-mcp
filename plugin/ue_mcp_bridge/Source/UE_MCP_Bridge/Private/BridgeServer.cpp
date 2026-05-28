@@ -5,6 +5,9 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "HAL/PlatformProcess.h"
+#include "HAL/FileManager.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "Misc/DateTime.h"
 #include "Misc/Timespan.h"
 #include "Async/Async.h"
@@ -172,22 +175,45 @@ uint32 FMCPBridgeServer::Run()
 	// Bind socket to loopback only. The bridge has no authentication on the
 	// WebSocket upgrade, so binding to 0.0.0.0 (INADDR_ANY) would expose every
 	// editor-side handler (including execute_python) to any client on the LAN.
-	sockaddr_in ServerAddr;
-	FMemory::Memset(&ServerAddr, 0, sizeof(ServerAddr));
-	ServerAddr.sin_family = AF_INET;
-	ServerAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	ServerAddr.sin_port = htons(ServerPort);
+	//
+	// #492: when more than one editor is open locally, the default port is
+	// already taken. Walk up to ServerPort+kMaxPortProbe so a second editor
+	// can boot side-by-side; the actual bound port is published via a per-
+	// project lockfile (see WritePortLockfile below).
+	const int32 RequestedPort = ServerPort;
+	constexpr int32 kMaxPortProbe = 50;
+	int32 BoundPort = 0;
+	bool bBound = false;
+	for (int32 Offset = 0; Offset <= kMaxPortProbe; ++Offset)
+	{
+		sockaddr_in ServerAddr;
+		FMemory::Memset(&ServerAddr, 0, sizeof(ServerAddr));
+		ServerAddr.sin_family = AF_INET;
+		ServerAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		ServerAddr.sin_port = htons((uint16)(RequestedPort + Offset));
 
-	if (bind(ServerSocketFD, (sockaddr*)&ServerAddr, sizeof(ServerAddr)) < 0)
+		if (bind(ServerSocketFD, (sockaddr*)&ServerAddr, sizeof(ServerAddr)) == 0)
+		{
+			BoundPort = RequestedPort + Offset;
+			ServerPort = BoundPort;
+			bBound = true;
+			if (Offset > 0)
+			{
+				UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Default port %d in use; bound to %d instead (#492)"), RequestedPort, BoundPort);
+			}
+			break;
+		}
+	}
+	if (!bBound)
 	{
 		int32 ErrorCode = 0;
 #if PLATFORM_WINDOWS
 		ErrorCode = WSAGetLastError();
-		UE_LOG(LogMCPBridge, Error, TEXT("[UE-MCP] Failed to bind socket to port %d, error: %d"), ServerPort, ErrorCode);
+		UE_LOG(LogMCPBridge, Error, TEXT("[UE-MCP] Failed to bind to any port in [%d, %d], last error: %d"), RequestedPort, RequestedPort + kMaxPortProbe, ErrorCode);
 		closesocket(ServerSocketFD);
 		WSACleanup();
 #else
-		UE_LOG(LogMCPBridge, Error, TEXT("[UE-MCP] Failed to bind socket to port %d"), ServerPort);
+		UE_LOG(LogMCPBridge, Error, TEXT("[UE-MCP] Failed to bind to any port in [%d, %d]"), RequestedPort, RequestedPort + kMaxPortProbe);
 		close(ServerSocketFD);
 #endif
 		return 1;
@@ -211,6 +237,11 @@ uint32 FMCPBridgeServer::Run()
 
 	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Bridge listening on ws://127.0.0.1:%d (loopback only)"), ServerPort);
 	bIsRunning = true;
+
+	// #492: publish the bound port to <Project>/Saved/UE_MCP_Bridge/port.json
+	// so the npm client (which was started against this project's .uproject)
+	// can find us even when the default port was already taken by another editor.
+	WritePortLockfile(ServerPort);
 
 	// Accept connections
 	while (!bShouldStop)
@@ -274,6 +305,53 @@ void FMCPBridgeServer::Stop()
 void FMCPBridgeServer::Exit()
 {
 	bIsRunning = false;
+	// #492: remove the lockfile on graceful shutdown so the next editor boot
+	// doesn't see a stale entry. A hard-crash leaves the file, but the next
+	// startup overwrites it with the live PID.
+	DeletePortLockfile();
+}
+
+// #492: per-project port lockfile. Multiple editors can run side-by-side as
+// long as each one's npm client can find the right bridge. Publishing the
+// bound port in <Project>/Saved/UE_MCP_Bridge/port.json (resolved from the
+// .uproject path the client was given) is the cheapest way to do that.
+FString FMCPBridgeServer::GetPortLockfilePath()
+{
+	const FString Dir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UE_MCP_Bridge"));
+	return FPaths::Combine(Dir, TEXT("port.json"));
+}
+
+void FMCPBridgeServer::WritePortLockfile(int32 PortValue)
+{
+	const FString FilePath = GetPortLockfilePath();
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(FilePath), /*Tree*/ true);
+
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetNumberField(TEXT("port"), PortValue);
+	Obj->SetNumberField(TEXT("pid"), (double)FPlatformProcess::GetCurrentProcessId());
+	Obj->SetStringField(TEXT("startedAt"), FDateTime::UtcNow().ToIso8601());
+	Obj->SetNumberField(TEXT("apiVersion"), 1.0);
+
+	FString Serialized;
+	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Serialized);
+	FJsonSerializer::Serialize(Obj.ToSharedRef(), Writer);
+
+	if (!FFileHelper::SaveStringToFile(Serialized, *FilePath))
+	{
+		UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Failed to write port lockfile: %s"), *FilePath);
+		return;
+	}
+	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Port lockfile published: %s (port=%d)"), *FilePath, PortValue);
+}
+
+void FMCPBridgeServer::DeletePortLockfile()
+{
+	const FString FilePath = GetPortLockfilePath();
+	if (!FPaths::FileExists(FilePath)) return;
+	if (IFileManager::Get().Delete(*FilePath))
+	{
+		UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Port lockfile removed: %s"), *FilePath);
+	}
 }
 
 TSharedPtr<FJsonObject> FMCPBridgeServer::ParseJsonRpcRequest(const FString& Message)
