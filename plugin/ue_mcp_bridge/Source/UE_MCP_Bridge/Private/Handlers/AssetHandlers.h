@@ -32,6 +32,9 @@ private:
 	static TSharedPtr<FJsonValue> CreateDataTable(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadDataTable(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReimportDataTable(const TSharedPtr<FJsonObject>& Params);
+	// #437: single-row append/update without re-serializing the whole table.
+	static TSharedPtr<FJsonValue> SetDataTableRow(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> RemoveDataTableRow(const TSharedPtr<FJsonObject>& Params);
 
 	// FBX import handlers
 	static TSharedPtr<FJsonValue> ImportStaticMesh(const TSharedPtr<FJsonObject>& Params);

@@ -198,6 +198,13 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("create_datatable"), &CreateDataTable);
 	Registry.RegisterHandler(TEXT("read_datatable"), &ReadDataTable);
 	Registry.RegisterHandler(TEXT("reimport_datatable"), &ReimportDataTable);
+	// #437: single-row mutation. Append a new row or overwrite an existing one
+	// without exporting and re-importing the whole table.
+	Registry.RegisterHandler(TEXT("set_datatable_row"), &SetDataTableRow);
+	Registry.RegisterHandler(TEXT("add_datatable_row"), &SetDataTableRow);
+	Registry.RegisterHandler(TEXT("update_datatable_row"), &SetDataTableRow);
+	Registry.RegisterHandler(TEXT("remove_datatable_row"), &RemoveDataTableRow);
+	Registry.RegisterHandler(TEXT("delete_datatable_row"), &RemoveDataTableRow);
 
 	// Generic reimport / export
 	Registry.RegisterHandler(TEXT("reimport_asset"), &ReimportAsset);
