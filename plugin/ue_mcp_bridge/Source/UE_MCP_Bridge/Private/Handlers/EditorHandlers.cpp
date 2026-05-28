@@ -9,6 +9,7 @@
 #include "Editor.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Kismet/GameplayStatics.h"
+#include "Kismet/BlueprintFunctionLibrary.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "EditorScriptingUtilities/Public/EditorAssetLibrary.h"
 #include "Dom/JsonObject.h"
@@ -115,6 +116,10 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("invoke_function"), &InvokeFunction);
 	Registry.RegisterHandler(TEXT("configure_pie"), &ConfigurePie);
 	Registry.RegisterHandler(TEXT("get_pie_config"), &GetPieConfig);
+	// #455: discover UBlueprintFunctionLibrary classes (GeometryScript,
+	// Kismet, anything user-defined). Pair with editor.invoke_function to
+	// drive GeometryScript ops from MCP without hand-writing each handler.
+	Registry.RegisterHandler(TEXT("list_function_libraries"), &ListFunctionLibraries);
 }
 
 TSharedPtr<FJsonValue> FEditorHandlers::ExecuteCommand(const TSharedPtr<FJsonObject>& Params)
@@ -1513,5 +1518,65 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScenePng(const TSharedPtr<FJsonOb
 	Result->SetNumberField(TEXT("height"), Height);
 	Result->SetNumberField(TEXT("sizeBytes"), (double)Size);
 	Result->SetStringField(TEXT("actorLabel"), CaptureLabel);
+	return MCPResult(Result);
+}
+
+// #455: enumerate UBlueprintFunctionLibrary subclasses. Filters by pattern
+// (case-insensitive substring) so callers can find UGeometryScriptLibrary_*,
+// UKismetMathLibrary, UAnimationLibrary, etc. Each entry includes function
+// names so editor.invoke_function can target an op directly. Pair with
+// invoke_function to drive GeometryScript / any function library from MCP
+// without authoring per-op C++ wrappers.
+//
+// Params: pattern? (substring filter), includeFunctions? (default true)
+TSharedPtr<FJsonValue> FEditorHandlers::ListFunctionLibraries(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString Pattern = OptionalString(Params, TEXT("pattern"), TEXT("")).ToLower();
+	const bool bIncludeFunctions = OptionalBool(Params, TEXT("includeFunctions"), true);
+
+	TArray<TSharedPtr<FJsonValue>> Libraries;
+	for (TObjectIterator<UClass> It; It; ++It)
+	{
+		UClass* C = *It;
+		if (!C || !C->IsChildOf(UBlueprintFunctionLibrary::StaticClass())) continue;
+		if (C == UBlueprintFunctionLibrary::StaticClass()) continue;
+		if (C->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists)) continue;
+
+		const FString ClassName = C->GetName();
+		if (!Pattern.IsEmpty() && !ClassName.ToLower().Contains(Pattern)) continue;
+
+		TSharedPtr<FJsonObject> LibObj = MakeShared<FJsonObject>();
+		LibObj->SetStringField(TEXT("name"), ClassName);
+		LibObj->SetStringField(TEXT("path"), C->GetPathName());
+		if (UPackage* Pkg = C->GetOuterUPackage())
+		{
+			LibObj->SetStringField(TEXT("module"), Pkg->GetName());
+		}
+
+		if (bIncludeFunctions)
+		{
+			TArray<TSharedPtr<FJsonValue>> Funcs;
+			for (TFieldIterator<UFunction> FIt(C, EFieldIteratorFlags::ExcludeSuper); FIt; ++FIt)
+			{
+				UFunction* Func = *FIt;
+				if (!Func) continue;
+				if (!Func->HasAllFunctionFlags(FUNC_Static | FUNC_BlueprintCallable)) continue;
+				TSharedPtr<FJsonObject> FObj = MakeShared<FJsonObject>();
+				FObj->SetStringField(TEXT("name"), Func->GetName());
+				const FString Tooltip = Func->GetToolTipText().ToString();
+				if (!Tooltip.IsEmpty()) FObj->SetStringField(TEXT("tooltip"), Tooltip.Left(240));
+				Funcs.Add(MakeShared<FJsonValueObject>(FObj));
+			}
+			LibObj->SetArrayField(TEXT("functions"), Funcs);
+			LibObj->SetNumberField(TEXT("functionCount"), Funcs.Num());
+		}
+
+		Libraries.Add(MakeShared<FJsonValueObject>(LibObj));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetArrayField(TEXT("libraries"), Libraries);
+	Result->SetNumberField(TEXT("count"), Libraries.Num());
+	if (!Pattern.IsEmpty()) Result->SetStringField(TEXT("pattern"), Pattern);
 	return MCPResult(Result);
 }
