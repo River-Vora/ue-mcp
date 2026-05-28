@@ -57,8 +57,9 @@ nav:
   - Tool Reference: tool-reference.md
   - Handler Conventions: handler-conventions.md
   - Flows: flows.md
-  - PIE Record / Replay: pie-record-replay.md
-  - Plugins: plugins.md
+  - Plugins:
+    - Plugins: plugins.md
+    - PIE Studio: pie-record-replay.md
   - Configuration: configuration.md
   - Neon Shrine Demo: neon-shrine-demo.md
   - Feedback: feedback.md

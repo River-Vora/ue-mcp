@@ -1,4 +1,4 @@
-# PIE Record / Replay / Observe
+# PIE Studio
 
 !!! note "Plugin required"
     These actions are provided by the [`pie-studio`](https://github.com/db-lyon/pie-studio) plugin. Install with `ue-mcp plugin install pie-studio`, rebuild, and restart.
