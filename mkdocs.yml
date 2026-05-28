@@ -24,7 +24,7 @@ theme:
   features:
     - navigation.instant
     - navigation.tracking
-    - navigation.sections
+    - navigation.indexes
     - navigation.expand
     - navigation.top
     - search.suggest
@@ -58,7 +58,7 @@ nav:
   - Handler Conventions: handler-conventions.md
   - Flows: flows.md
   - Plugins:
-    - Plugins: plugins.md
+    - plugins.md
     - PIE Studio: pie-record-replay.md
   - Configuration: configuration.md
   - Neon Shrine Demo: neon-shrine-demo.md
