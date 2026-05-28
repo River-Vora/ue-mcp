@@ -103,6 +103,10 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("resolve_actor"), &ResolveActor);
 	Registry.RegisterHandler(TEXT("set_actor_property"), &SetActorProperty);
 	Registry.RegisterHandler(TEXT("line_trace"), &LineTrace);
+	// #453: per-actor motion snapshot for telemetry probes. Reads location,
+	// rotation, velocity, angular velocity, scale, and ground state in one
+	// call. Caller is expected to invoke at the desired sample interval.
+	Registry.RegisterHandler(TEXT("read_actor_motion"), &ReadActorMotion);
 	Registry.RegisterHandler(TEXT("snap_actor_to_floor"), &SnapActorToFloor);
 	Registry.RegisterHandler(TEXT("delete_actors"), &DeleteActors);
 	Registry.RegisterHandler(TEXT("add_actor_tag"), &AddActorTag);
@@ -1906,6 +1910,116 @@ WriteDone:
 
 namespace
 {
+}
+
+// #453: per-actor motion snapshot. Reads location, rotation, velocity,
+// angular velocity, scale, and ground state in one call. Works against
+// either the editor world or the PIE world (default: PIE when available).
+// Callers driving a long telemetry probe loop this at their desired
+// sample interval - the bridge stays request/response.
+//
+// Params:
+//   actorLabel? (single) OR actorLabels? (string[])
+//   world?: "pie" | "editor" (default: "pie" with editor fallback)
+TSharedPtr<FJsonValue> FLevelHandlers::ReadActorMotion(const TSharedPtr<FJsonObject>& Params)
+{
+	FString WorldArg = OptionalString(Params, TEXT("world"), TEXT("pie"));
+	UWorld* TargetWorld = nullptr;
+	auto EditorWorld = []() -> UWorld* { return GEditor ? GEditor->GetEditorWorldContext().World() : nullptr; };
+	if (WorldArg.Equals(TEXT("editor"), ESearchCase::IgnoreCase))
+	{
+		TargetWorld = EditorWorld();
+	}
+	else
+	{
+		TargetWorld = GetPIEWorld();
+		if (!TargetWorld) TargetWorld = EditorWorld();
+	}
+	if (!TargetWorld) return MCPError(TEXT("No world available (editor + PIE both null)"));
+
+	TArray<FString> Labels;
+	FString Single;
+	if (Params->TryGetStringField(TEXT("actorLabel"), Single) && !Single.IsEmpty())
+	{
+		Labels.Add(Single);
+	}
+	const TArray<TSharedPtr<FJsonValue>>* LabelsArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("actorLabels"), LabelsArr) && LabelsArr)
+	{
+		for (const TSharedPtr<FJsonValue>& V : *LabelsArr)
+		{
+			FString L; if (V->TryGetString(L) && !L.IsEmpty()) Labels.Add(L);
+		}
+	}
+	if (Labels.Num() == 0)
+	{
+		return MCPError(TEXT("Pass at least one of 'actorLabel' or 'actorLabels'"));
+	}
+
+	auto VecToJson = [](const FVector& V) -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetNumberField(TEXT("x"), V.X); Obj->SetNumberField(TEXT("y"), V.Y); Obj->SetNumberField(TEXT("z"), V.Z);
+		return Obj;
+	};
+	auto RotToJson = [](const FRotator& R) -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetNumberField(TEXT("pitch"), R.Pitch); Obj->SetNumberField(TEXT("yaw"), R.Yaw); Obj->SetNumberField(TEXT("roll"), R.Roll);
+		return Obj;
+	};
+
+	TArray<TSharedPtr<FJsonValue>> Samples;
+	TArray<TSharedPtr<FJsonValue>> Missing;
+	for (const FString& Label : Labels)
+	{
+		AActor* Actor = FindActorByLabel(TargetWorld, Label);
+		if (!Actor)
+		{
+			Missing.Add(MakeShared<FJsonValueString>(Label));
+			continue;
+		}
+		TSharedPtr<FJsonObject> S = MakeShared<FJsonObject>();
+		S->SetStringField(TEXT("actorLabel"), Label);
+		S->SetStringField(TEXT("class"), Actor->GetClass()->GetName());
+		S->SetObjectField(TEXT("location"), VecToJson(Actor->GetActorLocation()));
+		S->SetObjectField(TEXT("rotation"), RotToJson(Actor->GetActorRotation()));
+		S->SetObjectField(TEXT("scale"), VecToJson(Actor->GetActorScale3D()));
+		S->SetObjectField(TEXT("velocity"), VecToJson(Actor->GetVelocity()));
+
+		// Physics: drill into the root primitive for angular velocity + grounded.
+		if (UPrimitiveComponent* Prim = Actor->FindComponentByClass<UPrimitiveComponent>())
+		{
+			if (Prim->IsSimulatingPhysics())
+			{
+				S->SetBoolField(TEXT("simulatingPhysics"), true);
+				S->SetObjectField(TEXT("angularVelocity"), VecToJson(Prim->GetPhysicsAngularVelocityInDegrees()));
+				S->SetNumberField(TEXT("mass"), Prim->GetMass());
+			}
+			else
+			{
+				S->SetBoolField(TEXT("simulatingPhysics"), false);
+			}
+		}
+
+		// CharacterMovement-style grounded check via downward trace from feet.
+		FHitResult Hit;
+		const FVector Start = Actor->GetActorLocation();
+		const FVector End = Start - FVector(0, 0, 200);
+		FCollisionQueryParams Q(SCENE_QUERY_STAT(MCPMotionGround), true, Actor);
+		const bool bGrounded = TargetWorld->LineTraceSingleByChannel(Hit, Start, End, ECC_WorldStatic, Q);
+		S->SetBoolField(TEXT("grounded"), bGrounded);
+		if (bGrounded) S->SetNumberField(TEXT("distanceToGround"), (Start - Hit.ImpactPoint).Size());
+
+		Samples.Add(MakeShared<FJsonValueObject>(S));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("worldType"), TargetWorld->WorldType == EWorldType::PIE ? TEXT("pie") : TEXT("editor"));
+	Result->SetNumberField(TEXT("timeSeconds"), TargetWorld->GetTimeSeconds());
+	Result->SetArrayField(TEXT("samples"), Samples);
+	if (Missing.Num() > 0) Result->SetArrayField(TEXT("missing"), Missing);
+	return MCPResult(Result);
 }
 
 // #220: bulk delete actors matching label prefix / class / tag.
