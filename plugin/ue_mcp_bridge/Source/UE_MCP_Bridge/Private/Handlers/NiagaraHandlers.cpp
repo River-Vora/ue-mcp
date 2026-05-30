@@ -589,12 +589,13 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SetEmitterProperty(const TSharedPtr<FJs
 	bool bSet = false;
 	if (PropName.Equals(TEXT("enabled"), ESearchCase::IgnoreCase))
 	{
-		// Can't directly set enabled on versioned data, but can toggle handle
-		// Use mutable access pattern
+		const bool bEnabled = Value.ToBool();
 		System->Modify();
-		// SetIsEnabled is not const-accessible, note for the user
+		// GetEmitterHandles() is const; the editor mutates via a non-const handle.
+		FNiagaraEmitterHandle& MutableHandle = const_cast<FNiagaraEmitterHandle&>(Handles[TargetIdx]);
+		MutableHandle.SetIsEnabled(bEnabled, *System, /*bRecompileIfChanged*/ true);
 		bSet = true;
-		Result->SetStringField(TEXT("note"), TEXT("Use get_info to check enabled state. For toggling, use execute_python."));
+		Result->SetBoolField(TEXT("enabled"), bEnabled);
 	}
 
 	// Try reflection on the EmitterData's properties

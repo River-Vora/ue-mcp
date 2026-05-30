@@ -1590,19 +1590,112 @@ TSharedPtr<FJsonValue> FGameplayHandlers::ConfigureAiPerceptionSense(const TShar
 	SenseMap.Add(TEXT("Damage"), TEXT("AISenseConfig_Damage"));
 	SenseMap.Add(TEXT("Touch"), TEXT("AISenseConfig_Touch"));
 	SenseMap.Add(TEXT("Team"), TEXT("AISenseConfig_Team"));
+	SenseMap.Add(TEXT("Prediction"), TEXT("AISenseConfig_Prediction"));
+	SenseMap.Add(TEXT("Blueprint"), TEXT("AISenseConfig_Blueprint"));
 
 	FString* SenseClassName = SenseMap.Find(SenseType);
 	if (!SenseClassName)
 	{
-		return MCPError(FString::Printf(TEXT("Unknown sense type: %s. Available: Sight, Hearing, Damage, Touch, Team"), *SenseType));
+		return MCPError(FString::Printf(TEXT("Unknown sense type: %s. Available: Sight, Hearing, Damage, Touch, Team, Prediction, Blueprint"), *SenseType));
 	}
 
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("blueprintPath"), BPPath);
-	Result->SetStringField(TEXT("senseType"), SenseType);
-	Result->SetStringField(TEXT("senseClass"), *SenseClassName);
-	Result->SetStringField(TEXT("note"), FString::Printf(TEXT("Use editor.execute_python to fully configure %s properties."), **SenseClassName));
+	UClass* SenseCfgClass = FindObject<UClass>(nullptr, *FString::Printf(TEXT("/Script/AIModule.%s"), **SenseClassName));
+	if (!SenseCfgClass)
+	{
+		return MCPError(FString::Printf(TEXT("Sense config class not found: %s. Enable AIModule."), **SenseClassName));
+	}
 
+	UBlueprint* BP = Cast<UBlueprint>(UEditorAssetLibrary::LoadAsset(BPPath));
+	if (!BP) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *BPPath));
+
+	// Locate the AIPerceptionComponent template on the construction script.
+	UClass* PercClass = FindObject<UClass>(nullptr, TEXT("/Script/AIModule.AIPerceptionComponent"));
+	const FString CompName = OptionalString(Params, TEXT("componentName"));
+	UObject* PercTemplate = nullptr;
+	FString ResolvedComp;
+	if (BP->SimpleConstructionScript)
+	{
+		for (USCS_Node* N : BP->SimpleConstructionScript->GetAllNodes())
+		{
+			if (!N || !N->ComponentTemplate) continue;
+			const bool bIsPerc = PercClass
+				? N->ComponentTemplate->IsA(PercClass)
+				: N->ComponentTemplate->GetClass()->GetName().Contains(TEXT("AIPerception"));
+			if (!bIsPerc) continue;
+			if (!CompName.IsEmpty() && N->GetVariableName() != FName(*CompName)) continue;
+			PercTemplate = N->ComponentTemplate;
+			ResolvedComp = N->GetVariableName().ToString();
+			break;
+		}
+	}
+	if (!PercTemplate)
+	{
+		return MCPError(TEXT("No AIPerceptionComponent on the blueprint - run add_perception_component first"));
+	}
+
+	// Add the sense config to SensesConfig via reflection (avoids linking AIModule
+	// headers and matches what the editor's '+' button does).
+	FArrayProperty* SensesProp = CastField<FArrayProperty>(PercTemplate->GetClass()->FindPropertyByName(TEXT("SensesConfig")));
+	FObjectPropertyBase* ElemProp = SensesProp ? CastField<FObjectPropertyBase>(SensesProp->Inner) : nullptr;
+	if (!SensesProp || !ElemProp)
+	{
+		return MCPError(TEXT("SensesConfig object-array property not found on AIPerceptionComponent (engine drift)"));
+	}
+
+	FScriptArrayHelper Helper(SensesProp, SensesProp->ContainerPtrToValuePtr<void>(PercTemplate));
+	for (int32 i = 0; i < Helper.Num(); ++i)
+	{
+		UObject* Existing = ElemProp->GetObjectPropertyValue(Helper.GetRawPtr(i));
+		if (Existing && Existing->GetClass() == SenseCfgClass)
+		{
+			auto Ex = MCPSuccess();
+			MCPSetExisted(Ex);
+			Ex->SetStringField(TEXT("blueprintPath"), BPPath);
+			Ex->SetStringField(TEXT("component"), ResolvedComp);
+			Ex->SetStringField(TEXT("senseType"), SenseType);
+			Ex->SetStringField(TEXT("senseConfig"), SenseCfgClass->GetName());
+			return MCPResult(Ex);
+		}
+	}
+
+	UObject* Cfg = NewObject<UObject>(PercTemplate, SenseCfgClass, NAME_None, RF_Transactional);
+	const int32 NewIdx = Helper.AddValue();
+	ElemProp->SetObjectPropertyValue(Helper.GetRawPtr(NewIdx), Cfg);
+
+	// Optional per-sense tuning (e.g. { "SightRadius": 1500 }).
+	TArray<FString> AppliedProps;
+	const TSharedPtr<FJsonObject>* PropsObj = nullptr;
+	if (Params->TryGetObjectField(TEXT("settings"), PropsObj) && PropsObj && (*PropsObj).IsValid())
+	{
+		for (const auto& KV : (*PropsObj)->Values)
+		{
+			FProperty* P = Cfg->GetClass()->FindPropertyByName(FName(*KV.Key));
+			if (!P) continue;
+			FString PErr;
+			if (MCPJsonProperty::SetJsonOnProperty(P, P->ContainerPtrToValuePtr<void>(Cfg), KV.Value, PErr))
+			{
+				AppliedProps.Add(KV.Key);
+			}
+		}
+	}
+
+	FKismetEditorUtilities::CompileBlueprint(BP);
+	SaveAssetPackage(BP);
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetStringField(TEXT("blueprintPath"), BPPath);
+	Result->SetStringField(TEXT("component"), ResolvedComp);
+	Result->SetStringField(TEXT("senseType"), SenseType);
+	Result->SetStringField(TEXT("senseConfig"), Cfg->GetClass()->GetName());
+	if (AppliedProps.Num() > 0)
+	{
+		TArray<TSharedPtr<FJsonValue>> A;
+		for (const FString& S : AppliedProps) A.Add(MakeShared<FJsonValueString>(S));
+		Result->SetArrayField(TEXT("appliedProperties"), A);
+	}
+
+	// Rollback: removing the sense again isn't a first-class action; report intent.
 	return MCPResult(Result);
 }
 

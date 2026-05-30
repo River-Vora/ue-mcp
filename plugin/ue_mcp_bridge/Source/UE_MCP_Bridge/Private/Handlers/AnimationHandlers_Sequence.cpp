@@ -666,19 +666,31 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ListAnimModifiers(const TSharedPtr<FJ
 	if (!Seq) return MCPError(FString::Printf(TEXT("AnimSequence not found: %s"), *AssetPath));
 
 	TArray<TSharedPtr<FJsonValue>> Arr;
-	// AnimationModifiers is an editor-only sub-list stored as AppliedAnimationModifiers
-	// in UE 5.7; surface whatever classes we find via property reflection for portability.
-	FProperty* ModifiersProp = Seq->GetClass()->FindPropertyByName(TEXT("AppliedAnimationModifiers"));
+	// AppliedAnimationModifiers is an editor-only TArray<UAnimationModifier*> on the
+	// AnimSequence. Enumerate it via reflection (portable across module linkage):
+	// each element is an instanced UAnimationModifier subobject.
+	FArrayProperty* ModifiersProp = CastField<FArrayProperty>(
+		Seq->GetClass()->FindPropertyByName(TEXT("AppliedAnimationModifiers")));
 	if (ModifiersProp)
 	{
-		TSharedPtr<FJsonObject> Info = MakeShared<FJsonObject>();
-		Info->SetStringField(TEXT("note"), TEXT("Property reflection used — full modifier enumeration requires AnimationModifiers module linkage"));
-		Arr.Add(MakeShared<FJsonValueObject>(Info));
+		FObjectPropertyBase* ElemProp = CastField<FObjectPropertyBase>(ModifiersProp->Inner);
+		FScriptArrayHelper Helper(ModifiersProp, ModifiersProp->ContainerPtrToValuePtr<void>(Seq));
+		for (int32 i = 0; i < Helper.Num(); ++i)
+		{
+			UObject* Modifier = ElemProp ? ElemProp->GetObjectPropertyValue(Helper.GetRawPtr(i)) : nullptr;
+			if (!Modifier) continue;
+			TSharedPtr<FJsonObject> M = MakeShared<FJsonObject>();
+			M->SetStringField(TEXT("class"), Modifier->GetClass()->GetName());
+			M->SetStringField(TEXT("classPath"), Modifier->GetClass()->GetPathName());
+			M->SetStringField(TEXT("name"), Modifier->GetName());
+			Arr.Add(MakeShared<FJsonValueObject>(M));
+		}
 	}
 
 	TSharedPtr<FJsonObject> Result = MCPSuccess();
 	Result->SetStringField(TEXT("assetPath"), AssetPath);
 	Result->SetArrayField(TEXT("modifiers"), Arr);
+	Result->SetNumberField(TEXT("count"), Arr.Num());
 	return MCPResult(Result);
 }
 
