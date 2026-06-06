@@ -567,6 +567,15 @@ TSharedPtr<FJsonValue> FSequencerHandlers::AddSection(const TSharedPtr<FJsonObje
 	}
 	if (!Track) return MCPError(FString::Printf(TEXT("Failed to resolve/add %s track"), *TrackType));
 
+	// Resolve the camera binding up front so a bad cameraActorLabel fails before
+	// we create an orphan section.
+	const FString CameraActorLabel = OptionalString(Params, TEXT("cameraActorLabel"));
+	FGuid CamGuid;
+	if (!CameraActorLabel.IsEmpty())
+	{
+		if (!ResolveActorBinding(Sequence, MovieScene, CameraActorLabel, CamGuid, Err)) return MCPError(Err);
+	}
+
 	UMovieSceneSection* Section = Track->CreateNewSection();
 	if (!Section) return MCPError(TEXT("Failed to create section"));
 	Track->AddSection(*Section);
@@ -582,14 +591,11 @@ TSharedPtr<FJsonValue> FSequencerHandlers::AddSection(const TSharedPtr<FJsonObje
 		Section->SetRange(TRange<FFrameNumber>(Start, End));
 	}
 
-	// CameraCut: bind to a camera actor's possessable.
-	const FString CameraActorLabel = OptionalString(Params, TEXT("cameraActorLabel"));
+	// CameraCut: bind to the camera actor's possessable resolved above.
 	if (!CameraActorLabel.IsEmpty())
 	{
 		if (UMovieSceneCameraCutSection* CutSection = Cast<UMovieSceneCameraCutSection>(Section))
 		{
-			FGuid CamGuid;
-			if (!ResolveActorBinding(Sequence, MovieScene, CameraActorLabel, CamGuid, Err)) return MCPError(Err);
 			CutSection->SetCameraGuid(CamGuid);
 		}
 	}
