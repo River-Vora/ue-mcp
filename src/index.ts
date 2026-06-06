@@ -361,6 +361,9 @@ if (subcmd === "init") {
 } else if (subcmd === "update") {
   process.argv.splice(2, 1);
   import("./update.js");
+} else if (subcmd === "doctor") {
+  process.argv.splice(2, 1);
+  import("./doctor.js").then((m) => m.runDoctorCli());
 } else if (subcmd === "deploy") {
   process.argv.splice(2, 1);
   import("./deploy-cli.js");

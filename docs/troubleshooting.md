@@ -89,6 +89,27 @@ UE-MCP expects Unreal-style asset paths:
     - Including file extensions (`.uasset`) — omit the extension
     - Missing the leading slash — `/Game/Foo`, not `Game/Foo`
 
+## Updates Don't Take Effect (server stuck on an old version)
+
+If `ue-mcp update` reports "already up to date" but the running server keeps reporting an old version, a project-local `node_modules/ue-mcp` is shadowing the global install:
+
+```bash
+ue-mcp doctor
+```
+
+```
+local shadow:   ./node_modules/ue-mcp @ 1.0.64   <-- WARN npx runs THIS, not global
+effective (npx):1.0.64  (behind latest 1.0.76)
+```
+
+When `ue-mcp` is a dependency in the project's `package.json`, `npx ue-mcp` runs the local copy, so `npm i -g ue-mcp@latest` updates a copy npx never uses. Fixes:
+
+- `ue-mcp update --build` aligns the local copy to latest automatically, or
+- remove `ue-mcp` from the project's `package.json` and delete `node_modules/ue-mcp`, or
+- pin `.mcp.json` to `npx -y ue-mcp@latest` so the server self-heals to latest on every launch.
+
+Then quit and relaunch your MCP client so it spawns the updated server.
+
 ## Search Not Finding Assets
 
 If `asset(action="search")` misses assets in plugin directories:

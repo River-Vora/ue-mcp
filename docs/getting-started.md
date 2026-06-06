@@ -99,18 +99,31 @@ See the [Tool Reference](tool-reference.md) for everything available.
 
 ## Updating
 
-Update to the latest version and deploy the new plugin sources in one step:
+Update, deploy, and rebuild in one command (run from a **plain terminal, not through your MCP client**):
 
 ```bash
-npx ue-mcp update --deploy
+ue-mcp update --build          # update npm package, deploy plugin, rebuild editor, print the doctor table
 ```
 
-Or separately:
+Or do less:
 
 ```bash
-npx ue-mcp update              # pull the latest from npm
-npx ue-mcp deploy              # copy plugin sources into your project
+ue-mcp update --deploy         # update + deploy plugin sources (no rebuild)
+ue-mcp update                  # update the npm package only
+ue-mcp deploy                  # copy plugin sources into your project
 ```
+
+`update` cannot restart the MCP server it was spawned by, so finish with: **quit your MCP client → `ue-mcp update --build` → relaunch the client.**
+
+### `ue-mcp doctor`
+
+If an update "succeeds" but the running server keeps reporting an old version, run:
+
+```bash
+ue-mcp doctor
+```
+
+It prints every version source - registry latest, npm global, the running server(s), the deployed bridge plugin - and, crucially, flags a project-local `node_modules/ue-mcp` that **shadows** the global install. With `ue-mcp` pinned in a project's `package.json`, `npx ue-mcp` runs the local copy, so global updates do nothing. `doctor` surfaces that one-line root cause (and suggests pinning `.mcp.json` to `npx -y ue-mcp@latest` so the server self-heals on each launch). `ue-mcp update --build` aligns a stale local copy automatically.
 
 ## Building the project
 

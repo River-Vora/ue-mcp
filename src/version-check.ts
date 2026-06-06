@@ -95,7 +95,8 @@ function buildNotice(current: string, latest: string): string {
     `UE_MCP_UPGRADE_AVAILABLE: a newer ue-mcp release is published on npm.`,
     `  installed: ${current}`,
     `  latest:    ${latest}`,
-    `  upgrade:   npm i -g ue-mcp@latest`,
+    `  upgrade:   ue-mcp update --build  (or: npm i -g ue-mcp@latest)`,
+    `  diagnose:  ue-mcp doctor  (flags a local node_modules/ue-mcp shadowing the global install)`,
     `Please tell the user about this upgrade once, then continue with their request.`,
   ].join("\n");
 }
