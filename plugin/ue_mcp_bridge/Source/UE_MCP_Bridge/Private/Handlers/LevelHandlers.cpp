@@ -91,6 +91,7 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("remove_component_from_actor"), &RemoveComponentFromActor);
 	Registry.RegisterHandler(TEXT("load_level"), &LoadLevel);
 	Registry.RegisterHandler(TEXT("set_component_property"), &SetComponentProperty);
+	Registry.RegisterHandler(TEXT("get_component_details"), &GetComponentDetails);
 	Registry.RegisterHandler(TEXT("set_actor_material"), &SetActorMaterial);
 	Registry.RegisterHandler(TEXT("set_volume_properties"), &SetVolumeProperties);
 	Registry.RegisterHandler(TEXT("get_world_settings"), &GetWorldSettings);
@@ -1061,6 +1062,48 @@ TSharedPtr<FJsonValue> FLevelHandlers::LoadLevel(const TSharedPtr<FJsonObject>& 
 	return MCPResult(Result);
 }
 
+// Resolve a component on a placed actor by name, case-insensitively, across
+// all components GetComponents returns (which includes inherited/SCS
+// components on placed Blueprint instances). Empty name -> root component.
+// (#539: case-sensitive exact-match was missing SCS components whose instance
+// name differed only in case, reporting "component not found".)
+static UActorComponent* FindComponentOnActor(AActor* Actor, const FString& Name)
+{
+	if (!Actor) return nullptr;
+	if (Name.IsEmpty()) return Actor->GetRootComponent();
+
+	TArray<UActorComponent*> Components;
+	Actor->GetComponents(Components);
+
+	// Pass 1: exact match (case-insensitive) by instance name or class name.
+	for (UActorComponent* Comp : Components)
+	{
+		if (Comp->GetName().Equals(Name, ESearchCase::IgnoreCase) ||
+			Comp->GetClass()->GetName().Equals(Name, ESearchCase::IgnoreCase))
+		{
+			return Comp;
+		}
+	}
+	// Pass 2: prefix match (e.g. "StaticMeshComponent" -> "StaticMeshComponent0").
+	for (UActorComponent* Comp : Components)
+	{
+		if (Comp->GetName().StartsWith(Name, ESearchCase::IgnoreCase) ||
+			Comp->GetClass()->GetName().StartsWith(Name, ESearchCase::IgnoreCase))
+		{
+			return Comp;
+		}
+	}
+	// Pass 3: substring (handles _GEN_VARIABLE suffixes and decorated names).
+	for (UActorComponent* Comp : Components)
+	{
+		if (Comp->GetName().Contains(Name, ESearchCase::IgnoreCase))
+		{
+			return Comp;
+		}
+	}
+	return nullptr;
+}
+
 TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
@@ -1079,40 +1122,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
 	}
 
-	// Find the component -- exact match first, then prefix/class match
-	UActorComponent* TargetComp = nullptr;
-	if (!ComponentName.IsEmpty())
-	{
-		TArray<UActorComponent*> Components;
-		TargetActor->GetComponents(Components);
-		// Pass 1: exact match by name or class name
-		for (UActorComponent* Comp : Components)
-		{
-			if (Comp->GetName() == ComponentName || Comp->GetClass()->GetName() == ComponentName)
-			{
-				TargetComp = Comp;
-				break;
-			}
-		}
-		// Pass 2: prefix match (e.g. "StaticMeshComponent" matches "StaticMeshComponent0")
-		if (!TargetComp)
-		{
-			for (UActorComponent* Comp : Components)
-			{
-				if (Comp->GetName().StartsWith(ComponentName) || Comp->GetClass()->GetName().StartsWith(ComponentName))
-				{
-					TargetComp = Comp;
-					break;
-				}
-			}
-		}
-	}
-	else
-	{
-		// Use root component as default
-		TargetComp = TargetActor->GetRootComponent();
-	}
-
+	UActorComponent* TargetComp = FindComponentOnActor(TargetActor, ComponentName);
 	if (!TargetComp)
 	{
 		return MCPError(FString::Printf(TEXT("Component '%s' not found on actor '%s'"), *ComponentName, *ActorLabel));
@@ -1258,6 +1268,18 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 		}
 	}
 
+	// #539: writing RelativeLocation/RelativeRotation/RelativeScale3D on a scene
+	// component only moves it once the transform is recomputed. Refresh so the
+	// change is visible and persisted, not just stored on the property.
+	if (USceneComponent* SceneComp = Cast<USceneComponent>(TargetComp))
+	{
+		SceneComp->UpdateComponentToWorld();
+		SceneComp->MarkRenderStateDirty();
+	}
+	{
+		FPropertyChangedEvent CompChange(Prop);
+		TargetComp->PostEditChangeProperty(CompChange);
+	}
 	TargetComp->MarkPackageDirty();
 
 	auto Result = MCPSuccess();
@@ -1277,6 +1299,87 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 
 	return MCPResult(Result);
 }
+
+// get_component_details -- read a placed actor's component(s), including
+// relative/world transforms. With componentName, returns that component's
+// transform + class; without it, lists every component with its transform so
+// callers can read a lid's open-pose rotation without execute_python. (#539)
+TSharedPtr<FJsonValue> FLevelHandlers::GetComponentDetails(const TSharedPtr<FJsonObject>& Params)
+{
+	FString ActorLabel;
+	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+
+	const FString ComponentName = OptionalString(Params, TEXT("componentName"));
+
+	REQUIRE_EDITOR_WORLD(World);
+
+	AActor* TargetActor = FindActorByLabel(World, ActorLabel);
+	if (!TargetActor)
+	{
+		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	}
+
+	auto DescribeComponent = [](UActorComponent* Comp) -> TSharedPtr<FJsonObject>
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("name"), Comp->GetName());
+		Obj->SetStringField(TEXT("class"), Comp->GetClass()->GetName());
+		if (USceneComponent* Scene = Cast<USceneComponent>(Comp))
+		{
+			const FVector RelLoc = Scene->GetRelativeLocation();
+			const FRotator RelRot = Scene->GetRelativeRotation();
+			const FVector RelScale = Scene->GetRelativeScale3D();
+			const FTransform World = Scene->GetComponentTransform();
+
+			auto VecObj = [](const FVector& V)
+			{
+				TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+				O->SetNumberField(TEXT("x"), V.X); O->SetNumberField(TEXT("y"), V.Y); O->SetNumberField(TEXT("z"), V.Z);
+				return O;
+			};
+			auto RotObj = [](const FRotator& R)
+			{
+				TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
+				O->SetNumberField(TEXT("pitch"), R.Pitch); O->SetNumberField(TEXT("yaw"), R.Yaw); O->SetNumberField(TEXT("roll"), R.Roll);
+				return O;
+			};
+			Obj->SetObjectField(TEXT("relativeLocation"), VecObj(RelLoc));
+			Obj->SetObjectField(TEXT("relativeRotation"), RotObj(RelRot));
+			Obj->SetObjectField(TEXT("relativeScale3D"), VecObj(RelScale));
+			Obj->SetObjectField(TEXT("worldLocation"), VecObj(World.GetLocation()));
+			Obj->SetObjectField(TEXT("worldRotation"), RotObj(World.Rotator()));
+			USceneComponent* Parent = Scene->GetAttachParent();
+			Obj->SetStringField(TEXT("attachParent"), Parent ? Parent->GetName() : TEXT(""));
+		}
+		return Obj;
+	};
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+
+	if (!ComponentName.IsEmpty())
+	{
+		UActorComponent* TargetComp = FindComponentOnActor(TargetActor, ComponentName);
+		if (!TargetComp)
+		{
+			return MCPError(FString::Printf(TEXT("Component '%s' not found on actor '%s'"), *ComponentName, *ActorLabel));
+		}
+		Result->SetObjectField(TEXT("component"), DescribeComponent(TargetComp));
+		return MCPResult(Result);
+	}
+
+	TArray<UActorComponent*> Components;
+	TargetActor->GetComponents(Components);
+	TArray<TSharedPtr<FJsonValue>> CompArray;
+	for (UActorComponent* Comp : Components)
+	{
+		CompArray.Add(MakeShared<FJsonValueObject>(DescribeComponent(Comp)));
+	}
+	Result->SetNumberField(TEXT("componentCount"), CompArray.Num());
+	Result->SetArrayField(TEXT("components"), CompArray);
+	return MCPResult(Result);
+}
+
 TSharedPtr<FJsonValue> FLevelHandlers::GetWorldSettings(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);
