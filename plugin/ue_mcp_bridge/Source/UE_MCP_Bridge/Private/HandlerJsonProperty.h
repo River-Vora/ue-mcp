@@ -3,6 +3,8 @@
 #include "CoreMinimal.h"
 #include "Dom/JsonValue.h"
 #include "Dom/JsonObject.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "UObject/UnrealType.h"
 #include "UObject/PropertyPortFlags.h"
 #include "UObject/SoftObjectPtr.h"
@@ -18,9 +20,33 @@
 // path, and soft references. Falls back to ImportText for scalars.
 namespace MCPJsonProperty
 {
-	inline bool SetJsonOnProperty(FProperty* Prop, void* ValueAddr, const TSharedPtr<FJsonValue>& Value, FString& OutError)
+	inline bool SetJsonOnProperty(FProperty* Prop, void* ValueAddr, const TSharedPtr<FJsonValue>& InValue, FString& OutError)
 	{
-		if (!Prop || !Value.IsValid() || !ValueAddr) { OutError = TEXT("null property/value/addr"); return false; }
+		if (!Prop || !InValue.IsValid() || !ValueAddr) { OutError = TEXT("null property/value/addr"); return false; }
+
+		TSharedPtr<FJsonValue> Value = InValue;
+
+		// #517/#531: some MCP clients double-encode complex arguments, so an
+		// array/object value arrives as a JSON *string* ("[{...}]") rather than a
+		// real JSON array/object. For container/struct targets, transparently
+		// re-parse a JSON-looking string back into a JSON value so the structured
+		// branches below fire instead of bouncing off "expected JSON array". A
+		// non-JSON string (e.g. UE export-text "((A=1),(B=2))") is left untouched
+		// and handled by the ImportText fallback at the bottom.
+		if (Value->Type == EJson::String &&
+			(Prop->IsA<FArrayProperty>() || Prop->IsA<FSetProperty>() || Prop->IsA<FMapProperty>() || Prop->IsA<FStructProperty>()))
+		{
+			const FString Trimmed = Value->AsString().TrimStartAndEnd();
+			if (Trimmed.StartsWith(TEXT("[")) || Trimmed.StartsWith(TEXT("{")))
+			{
+				TSharedPtr<FJsonValue> Reparsed;
+				const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Trimmed);
+				if (FJsonSerializer::Deserialize(Reader, Reparsed) && Reparsed.IsValid())
+				{
+					Value = Reparsed;
+				}
+			}
+		}
 
 		// #420: explicit JSON null clears TObjectPtr<>/FSoftObjectPtr/FWeakObjectPtr/
 		// UClass*/FScriptInterface. The natural shape for clearing an AnimClass,
@@ -58,40 +84,50 @@ namespace MCPJsonProperty
 			return false;
 		}
 
-		// TArray
+		// TArray. A JSON array maps element-by-element through the recursive
+		// setter (struct elements, object/class refs by path, scalars). If the
+		// value is not a JSON array even after the string re-parse above, fall
+		// through to the ImportText fallback, which accepts UE export-text
+		// "(elem,elem)" for arrays.
 		if (FArrayProperty* ArrProp = CastField<FArrayProperty>(Prop))
 		{
 			const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
-			if (!Value->TryGetArray(Items) || !Items) { OutError = TEXT("expected JSON array"); return false; }
-			FScriptArrayHelper H(ArrProp, ValueAddr);
-			H.Resize(Items->Num());
-			for (int32 i = 0; i < Items->Num(); ++i)
+			if (Value->TryGetArray(Items) && Items)
 			{
-				FString E;
-				if (!SetJsonOnProperty(ArrProp->Inner, H.GetRawPtr(i), (*Items)[i], E))
+				FScriptArrayHelper H(ArrProp, ValueAddr);
+				H.Resize(Items->Num());
+				for (int32 i = 0; i < Items->Num(); ++i)
 				{
-					OutError = FString::Printf(TEXT("[%d]: %s"), i, *E); return false;
+					FString E;
+					if (!SetJsonOnProperty(ArrProp->Inner, H.GetRawPtr(i), (*Items)[i], E))
+					{
+						OutError = FString::Printf(TEXT("[%d]: %s"), i, *E); return false;
+					}
 				}
+				return true;
 			}
-			return true;
+			// else: fall through to ImportText fallback below.
 		}
 
 		// TSet
-		if (FSetProperty* SetProp = CastField<FSetProperty>(Prop))
+		else if (FSetProperty* SetProp = CastField<FSetProperty>(Prop))
 		{
 			const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
-			if (!Value->TryGetArray(Items) || !Items) { OutError = TEXT("expected JSON array for TSet"); return false; }
-			FScriptSetHelper H(SetProp, ValueAddr);
-			H.EmptyElements();
-			for (const TSharedPtr<FJsonValue>& V : *Items)
+			if (Value->TryGetArray(Items) && Items)
 			{
-				const int32 Idx = H.AddDefaultValue_Invalid_NeedsRehash();
-				uint8* ElemAddr = H.GetElementPtr(Idx);
-				FString E;
-				if (!SetJsonOnProperty(SetProp->ElementProp, ElemAddr, V, E)) { OutError = E; return false; }
+				FScriptSetHelper H(SetProp, ValueAddr);
+				H.EmptyElements();
+				for (const TSharedPtr<FJsonValue>& V : *Items)
+				{
+					const int32 Idx = H.AddDefaultValue_Invalid_NeedsRehash();
+					uint8* ElemAddr = H.GetElementPtr(Idx);
+					FString E;
+					if (!SetJsonOnProperty(SetProp->ElementProp, ElemAddr, V, E)) { OutError = E; return false; }
+				}
+				H.Rehash();
+				return true;
 			}
-			H.Rehash();
-			return true;
+			// else: fall through to ImportText fallback below.
 		}
 
 		// Struct: recurse on JSON object fields; otherwise fall through to ImportText

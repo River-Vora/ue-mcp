@@ -142,6 +142,7 @@ export const assetTool: ToolDef = categoryTool(
     data: z.record(z.unknown()).optional().describe("Alias for row in set_datatable_row"),
     jsonPath: z.string().optional(), jsonString: z.string().optional(),
     exportName: z.string().optional(), propertyName: z.string().optional(),
+    value: z.unknown().optional().describe("Property value for set_property — scalar, object/array, or asset-path string. Goes through MCPJsonProperty (#420/#531)"),
     includeValues: z.boolean().optional().describe("Include property values in read_properties"),
     settings: z.record(z.unknown()).optional(),
     compressionSettings: z.string().optional().describe("Texture compression: Default, Normalmap, Grayscale, Displacementmap, VectorDisplacementmap, HDR, EditorIcon, Alpha, DistanceFieldFont, HDR_Compressed, BC7"),
