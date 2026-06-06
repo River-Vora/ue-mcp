@@ -456,10 +456,140 @@ TSharedPtr<FJsonValue> FAnimationHandlers::SetBoneKeyframes(const TSharedPtr<FJs
 }
 
 // ---------------------------------------------------------------------------
-// get_bone_transforms — Read reference pose transforms for specified bones
-// Params: skeletonPath, boneNames[]? (if omitted, returns all bones)
+// bake_keyframes_batch — write per-bone keyframe arrays for many bones into an
+// AnimSequence in one call. (#540) Replaces N round-trips of set_bone_keyframes
+// and the silent-T-pose failure mode: set_bone_track_keys returns false when the
+// track does not yet exist, so this auto-AddBoneCurve's each track first, wraps
+// the whole batch in one open/close bracket, and raises if any bone's write
+// fails instead of reporting a hollow success.
+// Params: assetPath, tracks: [{bone, keyframes: [{location,rotation{x,y,z,w},scale?}]}], save? (default true)
 // ---------------------------------------------------------------------------
+TSharedPtr<FJsonValue> FAnimationHandlers::BakeKeyframesBatch(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
 
+	const TArray<TSharedPtr<FJsonValue>>* Tracks = nullptr;
+	if (!Params->TryGetArrayField(TEXT("tracks"), Tracks) || !Tracks)
+	{
+		return MCPError(TEXT("Missing 'tracks' array parameter ([{bone, keyframes:[...]}, ...])"));
+	}
+
+	const bool bSave = OptionalBool(Params, TEXT("save"), true);
+
+	UAnimSequence* AnimSeq = Cast<UAnimSequence>(UEditorAssetLibrary::LoadAsset(AssetPath));
+	if (!AnimSeq) return MCPError(FString::Printf(TEXT("Failed to load AnimSequence at '%s'"), *AssetPath));
+	USkeleton* Skeleton = AnimSeq->GetSkeleton();
+	if (!Skeleton) return MCPError(TEXT("AnimSequence has no Skeleton"));
+	const FReferenceSkeleton& RefSkeleton = Skeleton->GetReferenceSkeleton();
+
+	IAnimationDataController& Controller = AnimSeq->GetController();
+	Controller.OpenBracket(NSLOCTEXT("MCP", "BakeKeyframesBatch", "MCP Bake Keyframes Batch"));
+
+	TArray<TSharedPtr<FJsonValue>> PerBone;
+	FString FailErr;
+	int32 BonesBaked = 0;
+
+	for (const TSharedPtr<FJsonValue>& TrackVal : *Tracks)
+	{
+		const TSharedPtr<FJsonObject>* TrackObjPtr = nullptr;
+		if (!TrackVal->TryGetObject(TrackObjPtr) || !TrackObjPtr) continue;
+		const TSharedPtr<FJsonObject>& Track = *TrackObjPtr;
+
+		FString BoneName;
+		if (!Track->TryGetStringField(TEXT("bone"), BoneName) || BoneName.IsEmpty())
+		{
+			FailErr = TEXT("a track is missing its 'bone' name");
+			break;
+		}
+		const FName BoneFName(*BoneName);
+		const int32 BoneIndex = RefSkeleton.FindBoneIndex(BoneFName);
+		if (BoneIndex == INDEX_NONE)
+		{
+			FailErr = FString::Printf(TEXT("bone '%s' not found in skeleton"), *BoneName);
+			break;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* KeyframesArray = nullptr;
+		if (!Track->TryGetArrayField(TEXT("keyframes"), KeyframesArray) || !KeyframesArray)
+		{
+			FailErr = FString::Printf(TEXT("bone '%s' has no 'keyframes' array"), *BoneName);
+			break;
+		}
+
+		// Critical: create the bone track before writing keys, otherwise
+		// SetBoneTrackKeys returns false and the asset stays a T-pose.
+		const IAnimationDataModel* DataModel = AnimSeq->GetDataModel();
+		if (!DataModel->IsValidBoneTrackName(BoneFName))
+		{
+			Controller.AddBoneCurve(BoneFName);
+		}
+
+		const FTransform RefPose = RefSkeleton.GetRefBonePose()[BoneIndex];
+		TArray<FVector> Locations;
+		TArray<FQuat> Rotations;
+		TArray<FVector> Scales;
+		for (const TSharedPtr<FJsonValue>& KeyframeVal : *KeyframesArray)
+		{
+			const TSharedPtr<FJsonObject>* KFPtr = nullptr;
+			if (!KeyframeVal->TryGetObject(KFPtr) || !KFPtr) continue;
+			const TSharedPtr<FJsonObject>& KF = *KFPtr;
+
+			FVector Location = OptionalVec3(KF, TEXT("location"), RefPose.GetLocation());
+			FVector Scale = OptionalVec3(KF, TEXT("scale"), RefPose.GetScale3D());
+			FQuat Rotation = RefPose.GetRotation();
+			const TSharedPtr<FJsonObject>* RotObj = nullptr;
+			if (KF->TryGetObjectField(TEXT("rotation"), RotObj))
+			{
+				(*RotObj)->TryGetNumberField(TEXT("x"), Rotation.X);
+				(*RotObj)->TryGetNumberField(TEXT("y"), Rotation.Y);
+				(*RotObj)->TryGetNumberField(TEXT("z"), Rotation.Z);
+				(*RotObj)->TryGetNumberField(TEXT("w"), Rotation.W);
+			}
+			Locations.Add(Location);
+			Rotations.Add(Rotation);
+			Scales.Add(Scale);
+		}
+
+		if (Locations.Num() == 0)
+		{
+			FailErr = FString::Printf(TEXT("bone '%s' had no valid keyframes"), *BoneName);
+			break;
+		}
+
+		const bool bOk = Controller.SetBoneTrackKeys(BoneFName, Locations, Rotations, Scales);
+		if (!bOk)
+		{
+			FailErr = FString::Printf(TEXT("SetBoneTrackKeys failed for bone '%s' (%d keys)"), *BoneName, Locations.Num());
+			break;
+		}
+
+		TSharedPtr<FJsonObject> BoneRes = MakeShared<FJsonObject>();
+		BoneRes->SetStringField(TEXT("bone"), BoneName);
+		BoneRes->SetNumberField(TEXT("keyframes"), Locations.Num());
+		PerBone.Add(MakeShared<FJsonValueObject>(BoneRes));
+		++BonesBaked;
+	}
+
+	Controller.CloseBracket(false);
+	GEditor->ResetTransaction(NSLOCTEXT("MCP", "BakeKeyframesBatchReset", "MCP Bake Keyframes Batch Complete"));
+
+	if (!FailErr.IsEmpty())
+	{
+		// The bracket is closed; surface the failure rather than a hollow success.
+		return MCPError(FString::Printf(TEXT("bake_keyframes_batch failed after %d bone(s): %s"), BonesBaked, *FailErr));
+	}
+
+	AnimSeq->PostEditChange();
+	AnimSeq->MarkPackageDirty();
+	if (bSave) UEditorAssetLibrary::SaveAsset(AssetPath);
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("assetPath"), AssetPath);
+	Result->SetNumberField(TEXT("bonesBaked"), BonesBaked);
+	Result->SetArrayField(TEXT("tracks"), PerBone);
+	return MCPResult(Result);
+}
 
 // ---------------------------------------------------------------------------
 // get_bone_transforms — Read reference pose transforms for specified bones

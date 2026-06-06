@@ -27,6 +27,7 @@ export const animationTool: ToolDef = categoryTool(
     get_physics_asset:    bp("Read physics asset. Params: assetPath", "get_physics_asset_info"),
     create_sequence:      bp("Create blank AnimSequence. Params: name, skeletonPath, packagePath?, numFrames?, frameRate?", "create_sequence"),
     set_bone_keyframes:   bp("Set bone transform keyframes. Params: assetPath, boneName, keyframes", "set_bone_keyframes"),
+    bake_keyframes_batch: bp("Bake per-bone keyframe arrays for many bones into an AnimSequence in one call. Auto-creates each bone track first (set_bone_keyframes silently leaves a T-pose if the track is missing), wraps the batch in one transaction, and raises if any bone fails instead of reporting hollow success (#540). Params: assetPath, tracks ([{bone, keyframes:[{location,rotation{x,y,z,w},scale?}]}]), save? (default true)", "bake_keyframes_batch", (p) => ({ assetPath: p.assetPath, tracks: p.tracks, save: p.save })),
     get_bone_transforms:  bp("Read reference pose transforms. Params: skeletonPath, boneNames?, space? ('local' default, or 'component' for composed parent-chain transforms - retarget-chain / anatomical-scale work) (#245)", "get_bone_transforms"),
     set_montage_sequence: bp("Replace animation sequence in a montage. Params: assetPath, animSequencePath, slotIndex?", "set_montage_sequence"),
     set_montage_properties: bp("Set montage properties. Params: assetPath, sequenceLength?, rateScale?, blendIn?, blendOut?", "set_montage_properties"),
@@ -152,6 +153,16 @@ export const animationTool: ToolDef = categoryTool(
       rotation: Quat.optional(),
       scale: Vec3.optional(),
     })).optional(),
+    tracks: z.array(z.object({
+      bone: z.string(),
+      keyframes: z.array(z.object({
+        frame: z.number().optional(),
+        location: Vec3.optional(),
+        rotation: Quat.optional(),
+        scale: Vec3.optional(),
+      })),
+    })).optional().describe("Per-bone keyframe arrays for bake_keyframes_batch (#540)"),
+    save: z.boolean().optional().describe("bake_keyframes_batch: save the asset after baking (default true)"),
     // PoseSearch (v0.7.15)
     schemaPath: z.string().optional().describe("Path to a UPoseSearchSchema asset"),
     sequencePath: z.string().optional().describe("Animation asset path to add to a PoseSearchDatabase"),
