@@ -107,6 +107,9 @@ private:
 	// v0.7.19 issue #150 — AssetRegistry referencers for a set of packages
 	static TSharedPtr<FJsonValue> GetReferencers(const TSharedPtr<FJsonObject>& Params);
 
+	// issue #588 — AssetRegistry forward dependencies for a set of packages
+	static TSharedPtr<FJsonValue> GetDependencies(const TSharedPtr<FJsonObject>& Params);
+
 	// v1.0.0-rc.2 — #155 (asset gaps)
 	static TSharedPtr<FJsonValue> SetSkeletalMeshMaterialSlots(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> DiagnoseRegistry(const TSharedPtr<FJsonObject>& Params);
@@ -115,6 +118,8 @@ private:
 	static TSharedPtr<FJsonValue> GetMeshBounds(const TSharedPtr<FJsonObject>& Params);
 	// #431: one-call mesh QA - bounds + materials + LOD/vertex/skeleton.
 	static TSharedPtr<FJsonValue> GetMeshInfo(const TSharedPtr<FJsonObject>& Params);
+	// #593: list bones (names + rest-pose transforms) from a SkeletalMesh/Skeleton asset.
+	static TSharedPtr<FJsonValue> ListSkeletonBones(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetMeshCollision(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> MoveFolder(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetMeshNav(const TSharedPtr<FJsonObject>& Params);

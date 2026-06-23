@@ -122,11 +122,13 @@ UE-MCP exposes **<!-- count:tools -->21<!-- /count --> category tools** covering
 | `export` | Export asset to disk file (Texture2D → PNG, StaticMesh → FBX, etc.). Params: `assetPath, outputPath` |
 | `search_fts` | Ranked asset search (token-scored over name/class/path). Params: `query, maxResults?, classFilter?` |
 | `reindex_fts` | Rebuild the SQLite FTS5 asset index. Params: `directory?` |
-| `get_referencers` | Reverse dependency lookup. Params: `packages[] OR packagePath (#150)` |
+| `get_referencers` | Reverse dependency lookup (what references this). Params: `packages[] OR packagePath (#150)` |
+| `get_dependencies` | Forward dependency lookup (what packages this asset references). Params: `packages[] OR packagePath, hard? (default true), soft? (default true) (#588)` |
 | `set_sk_material_slots` | Set materials on a USkeletalMesh by slot name or slotIndex (bypasses the blueprint override-materials path that UE's ICH silently reverts). Params: `assetPath, slots[{slotName?\\|slotIndex?, materialPath}]` |
 | `diagnose_registry` | Scan a content path and compare disk vs AssetRegistry (including in-memory pending-kill entries). Returns onDiskCount, inMemoryIncludedCount, ghostCount and paths. Params: `path, recursive? (default true), reconcile? (forceRescan=true)` |
 | `get_mesh_bounds` | Get StaticMesh OR SkeletalMesh bounding box. Params: `assetPath` |
 | `get_mesh_info` | One-call mesh QA: bounds + material slots + skeleton + LOD/vertex counts. Works for both UStaticMesh and USkeletalMesh. Params: `assetPath` |
+| `list_skeleton_bones` | List bones (names + rest-pose local and component-space transforms) from a SkeletalMesh or Skeleton asset, no live actor needed. Params: `assetPath, includeTransforms? (default true) (#593)` |
 | `read_import_sources` | Read AssetImportData source filenames on an imported asset (StaticMesh, SkeletalMesh, Texture, Animation, etc.). Returns sources[] of {relativeFilename, absolutePath, timestamp, fileHash, displayLabelName}. Params: `assetPath (#270)` |
 | `get_mesh_collision` | Inspect StaticMesh collision setup. Params: `assetPath` |
 | `move_folder` | Move/rename entire content folder with redirector fixup in one transaction. Params: `sourcePath, destinationPath (#192)` |

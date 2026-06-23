@@ -244,6 +244,8 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 
 	// v0.7.19 #150 — AssetRegistry referencers
 	Registry.RegisterHandler(TEXT("get_asset_referencers"), &GetReferencers);
+	Registry.RegisterHandler(TEXT("get_asset_dependencies"), &GetDependencies);
+	Registry.RegisterHandler(TEXT("list_skeleton_bones"), &ListSkeletonBones);
 
 	// v1.0.0-rc.2 — #155 (asset gaps)
 	Registry.RegisterHandler(TEXT("set_sk_material_slots"), &SetSkeletalMeshMaterialSlots);
@@ -1895,6 +1897,59 @@ TSharedPtr<FJsonValue> FAssetHandlers::GetReferencers(const TSharedPtr<FJsonObje
 	auto Result = MCPSuccess();
 	Result->SetObjectField(TEXT("referencersByPackage"), ByPkg);
 	Result->SetNumberField(TEXT("totalReferencers"), TotalRefs);
+	Result->SetNumberField(TEXT("queriedPackages"), Packages.Num());
+	return MCPResult(Result);
+}
+
+// ─── #588 asset(get_dependencies) ───────────────────────────────────
+// Forward dependency lookup per package: "what packages does this asset
+// reference?" Mirrors GetReferencers (#150) but walks the other direction.
+// Optional 'hard'/'soft' flags filter by dependency link type; both default
+// on, matching GetDependencies' default (all package dependencies).
+TSharedPtr<FJsonValue> FAssetHandlers::GetDependencies(const TSharedPtr<FJsonObject>& Params)
+{
+	TArray<FString> Packages;
+	const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+	if (Params->TryGetArrayField(TEXT("packages"), Arr) && Arr)
+	{
+		for (const TSharedPtr<FJsonValue>& V : *Arr)
+		{
+			FString S; if (V.IsValid() && V->TryGetString(S) && !S.IsEmpty()) Packages.Add(S);
+		}
+	}
+	else
+	{
+		FString Single;
+		if (Params->TryGetStringField(TEXT("packagePath"), Single)) Packages.Add(Single);
+	}
+	if (Packages.Num() == 0) return MCPError(TEXT("Supply 'packages' (array) or 'packagePath'"));
+
+	const bool bHard = OptionalBool(Params, TEXT("hard"), true);
+	const bool bSoft = OptionalBool(Params, TEXT("soft"), true);
+
+	using namespace UE::AssetRegistry;
+	EDependencyQuery QueryFlags = EDependencyQuery::NoRequirements;
+	if (bHard && !bSoft) QueryFlags = EDependencyQuery::Hard;
+	else if (bSoft && !bHard) QueryFlags = EDependencyQuery::Soft;
+	const FDependencyQuery Query(QueryFlags);
+
+	IAssetRegistry& AR = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+
+	TSharedPtr<FJsonObject> ByPkg = MakeShared<FJsonObject>();
+	int32 TotalDeps = 0;
+	for (const FString& Pkg : Packages)
+	{
+		TArray<FName> Deps;
+		AR.GetDependencies(FName(*Pkg), Deps, EDependencyCategory::Package, Query);
+		TArray<TSharedPtr<FJsonValue>> Out;
+		for (const FName& D : Deps) Out.Add(MakeShared<FJsonValueString>(D.ToString()));
+		ByPkg->SetArrayField(Pkg, Out);
+		TotalDeps += Deps.Num();
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetObjectField(TEXT("dependenciesByPackage"), ByPkg);
+	Result->SetNumberField(TEXT("totalDependencies"), TotalDeps);
 	Result->SetNumberField(TEXT("queriedPackages"), Packages.Num());
 	return MCPResult(Result);
 }
