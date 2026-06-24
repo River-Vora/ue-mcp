@@ -237,7 +237,7 @@ UE-MCP exposes **<!-- count:tools -->21<!-- /count --> category tools** covering
 | `get_runtime_virtual_texture_summary` | List RuntimeVirtualTextureVolume actors + their bound VirtualTexture assets (#150) |
 | `set_water_body_property` | Set a property on an actor's WaterBodyComponent (ShapeDilation, WaterLevel, etc.). Params: `actorLabel, propertyName, value` |
 | `build_lighting` | Build lights. Params: `quality?` |
-| `get_spline_info` | Read spline. Params: `actorLabel` |
+| `get_spline_info` | Read a spline component's points, closedLoop, length, per-point tangents/types. Editor or PIE (#553). Optional componentName picks a specific (custom) spline; projectPoint (Vec3) returns closestLocation/inputKey/distanceAlongSpline/distanceToSpline/tangent (#555). Params: `actorLabel, componentName?, world? (editor\\|pie), projectPoint?` |
 | `set_spline_points` | Set spline points. Params: `actorLabel, points[], closedLoop?` |
 | `set_actor_material` | Set material on actor. Params: `actorLabel, materialPath, slotIndex?` |
 | `get_world_settings` | Read world settings (GameMode, KillZ, gravity, etc.) |
