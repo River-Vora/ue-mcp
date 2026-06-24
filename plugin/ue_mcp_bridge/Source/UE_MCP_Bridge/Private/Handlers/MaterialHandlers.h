@@ -29,6 +29,8 @@ private:
 	static TSharedPtr<FJsonValue> ListMaterialStaticSwitches(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetMaterialStaticSwitch(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetExpressionValue(const TSharedPtr<FJsonObject>& Params);
+	// #617 read/write a MaterialExpressionCustom's HLSL Code, inputs, output type
+	static TSharedPtr<FJsonValue> SetCustomExpression(const TSharedPtr<FJsonObject>& Params);
 
 	// Name-based handlers matching TS tool expectations
 	static TSharedPtr<FJsonValue> ConnectTextureToMaterial(const TSharedPtr<FJsonObject>& Params);

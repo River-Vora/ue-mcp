@@ -286,6 +286,7 @@ UE-MCP exposes **<!-- count:tools -->21<!-- /count --> category tools** covering
 | `list_static_switches` | List static switch parameters on a Material or MaterialInstance. Params: `assetPath` |
 | `set_static_switch` | Set a MaterialInstanceConstant static switch parameter. Params: `assetPath, parameterName, value, association?, parameterIndex?` |
 | `set_expression_value` | Set value on expression node. Params: `materialPath, expressionIndex, value` |
+| `set_custom_expression` | Read/write a MaterialExpressionCustom (HLSL) node: code, named inputs[], outputType (float1\\|float2\\|float3\\|float4\\|materialAttributes), description. Omit code/inputs to read. Add via add_expression expressionType=Custom first. Params: `materialPath, expressionIndex, code?, inputs?, outputType?, description? (#617)` |
 | `disconnect_property` | Disconnect a material property input. Params: `materialPath, property` |
 | `create_instance` | Create material instance. Params: `parentPath, name?, packagePath?` |
 | `create` | Create material. Params: `name, packagePath?` |

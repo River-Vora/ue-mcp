@@ -15,6 +15,7 @@
 #include "Materials/MaterialExpressionConstant4Vector.h"
 #include "Materials/MaterialExpressionTextureSample.h"
 #include "Materials/MaterialExpressionScalarParameter.h"
+#include "Materials/MaterialExpressionCustom.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
 #include "Materials/MaterialExpressionTextureCoordinate.h"
 #include "Materials/MaterialExpressionTextureObjectParameter.h"
@@ -63,6 +64,7 @@ void FMaterialHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("list_material_static_switches"), &ListMaterialStaticSwitches);
 	Registry.RegisterHandler(TEXT("set_material_static_switch"), &SetMaterialStaticSwitch);
 	Registry.RegisterHandler(TEXT("set_expression_value"), &SetExpressionValue);
+	Registry.RegisterHandler(TEXT("set_custom_expression"), &SetCustomExpression);
 
 	// Expression graph operations
 	Registry.RegisterHandler(TEXT("connect_texture_to_material"), &ConnectTextureToMaterial);
@@ -2218,6 +2220,110 @@ namespace
 		if (Hit(TEXT("geometrycollections")) || Hit(TEXT("geometry_collections"))) { OutUsage = MATUSAGE_GeometryCollections; return true; }
 		return false;
 	}
+}
+
+// #617 read/write a MaterialExpressionCustom's HLSL Code, named inputs, and
+// output type. Omit 'code' (and 'inputs') to read the current node state.
+TSharedPtr<FJsonValue> FMaterialHandlers::SetCustomExpression(const TSharedPtr<FJsonObject>& Params)
+{
+	FString MaterialPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("materialPath"), TEXT("path"), MaterialPath)) return Err;
+	if (MaterialPath.IsEmpty()) Params->TryGetStringField(TEXT("assetPath"), MaterialPath);
+	if (MaterialPath.IsEmpty()) return MCPError(TEXT("Missing required parameter 'materialPath'"));
+
+	int32 ExpressionIndex = -1;
+	if (!Params->TryGetNumberField(TEXT("expressionIndex"), ExpressionIndex))
+	{
+		return MCPError(TEXT("Missing required parameter 'expressionIndex' (index from list_expressions)"));
+	}
+
+	UMaterial* Material = LoadMaterialFromPath(MaterialPath);
+	if (!Material) return MCPError(FString::Printf(TEXT("Failed to load material at '%s'"), *MaterialPath));
+
+	auto Expressions = Material->GetExpressions();
+	if (ExpressionIndex < 0 || ExpressionIndex >= Expressions.Num())
+	{
+		return MCPError(FString::Printf(TEXT("Expression index %d out of range (0-%d)"), ExpressionIndex, Expressions.Num() - 1));
+	}
+
+	UMaterialExpressionCustom* Custom = Cast<UMaterialExpressionCustom>(Expressions[ExpressionIndex]);
+	if (!Custom)
+	{
+		return MCPError(FString::Printf(TEXT("Expression %d is %s, not a Custom node. Add one with add_expression expressionType=Custom."),
+			ExpressionIndex, *Expressions[ExpressionIndex]->GetClass()->GetName()));
+	}
+
+	bool bChanged = false;
+
+	FString Code;
+	if (Params->TryGetStringField(TEXT("code"), Code))
+	{
+		Material->PreEditChange(nullptr);
+		Custom->Code = Code;
+		bChanged = true;
+	}
+
+	FString Description;
+	if (Params->TryGetStringField(TEXT("description"), Description))
+	{
+		Custom->Description = Description;
+		bChanged = true;
+	}
+
+	// Output type: CMOT_Float1..4 / CMOT_MaterialAttributes (accept "float3" etc.)
+	FString OutputTypeStr;
+	if (Params->TryGetStringField(TEXT("outputType"), OutputTypeStr))
+	{
+		const FString L = OutputTypeStr.ToLower();
+		if (L == TEXT("float1") || L == TEXT("cmot_float1")) Custom->OutputType = CMOT_Float1;
+		else if (L == TEXT("float2") || L == TEXT("cmot_float2")) Custom->OutputType = CMOT_Float2;
+		else if (L == TEXT("float3") || L == TEXT("cmot_float3")) Custom->OutputType = CMOT_Float3;
+		else if (L == TEXT("float4") || L == TEXT("cmot_float4")) Custom->OutputType = CMOT_Float4;
+		else if (L.Contains(TEXT("materialattributes"))) Custom->OutputType = CMOT_MaterialAttributes;
+		bChanged = true;
+	}
+
+	// Inputs: array of input names (rebuilds the input pin list). Wire them
+	// afterward with connect_expressions targetInput=<name>.
+	const TArray<TSharedPtr<FJsonValue>>* InputsArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("inputs"), InputsArr) && InputsArr)
+	{
+		Custom->Inputs.Empty();
+		for (const TSharedPtr<FJsonValue>& V : *InputsArr)
+		{
+			FString InName;
+			if (V.IsValid() && V->TryGetString(InName) && !InName.IsEmpty())
+			{
+				FCustomInput CI;
+				CI.InputName = FName(*InName);
+				Custom->Inputs.Add(CI);
+			}
+		}
+		bChanged = true;
+	}
+
+	if (bChanged)
+	{
+		Custom->PostEditChange();
+		Material->PostEditChange();
+		Material->MarkPackageDirty();
+		SaveAssetPackage(Material);
+	}
+
+	auto Result = MCPSuccess();
+	if (bChanged) MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("materialPath"), MaterialPath);
+	Result->SetNumberField(TEXT("expressionIndex"), ExpressionIndex);
+	Result->SetStringField(TEXT("code"), Custom->Code);
+	Result->SetStringField(TEXT("description"), Custom->Description);
+	Result->SetNumberField(TEXT("outputType"), (int32)Custom->OutputType);
+	TArray<TSharedPtr<FJsonValue>> InNames;
+	for (const FCustomInput& CI : Custom->Inputs)
+	{
+		InNames.Add(MakeShared<FJsonValueString>(CI.InputName.ToString()));
+	}
+	Result->SetArrayField(TEXT("inputs"), InNames);
+	return MCPResult(Result);
 }
 
 TSharedPtr<FJsonValue> FMaterialHandlers::SetMaterialUsage(const TSharedPtr<FJsonObject>& Params)
