@@ -99,21 +99,25 @@ See the [Tool Reference](tool-reference.md) for everything available.
 
 ## Updating
 
+> **Use `--build`, or editor-side fixes will not apply.** The bridge has two halves: a Node/MCP server and a C++ plugin that runs inside the Unreal editor. The plugin ships as **source**, not a prebuilt binary, so your editor keeps running the old compiled version until it is recompiled. A plain `ue-mcp update` refreshes only the npm package. It does not copy the new plugin source into your project or rebuild it, so any fix that lives in the C++ plugin (dialog handling, actor placement, anything the editor does) never reaches your running editor. `ue-mcp doctor` will still show the latest version, because the version it reports is the npm/server half, not the compiled plugin. If a release fixes editor behavior and "nothing changed" after updating, you almost certainly skipped the rebuild.
+
 Update, deploy, and rebuild in one command (run from a **plain terminal, not through your MCP client**):
 
 ```bash
 ue-mcp update --build          # update npm package, deploy plugin, rebuild editor, print the doctor table
 ```
 
-Or do less:
+`--build` does the two steps that a bare `update` skips: it deploys the new plugin source into your project and recompiles the editor (this takes a few minutes). This is the command you want for almost every update.
+
+The lesser variants only make sense if you intend to build separately:
 
 ```bash
-ue-mcp update --deploy         # update + deploy plugin sources (no rebuild)
-ue-mcp update                  # update the npm package only
+ue-mcp update --deploy         # update + deploy plugin sources (no rebuild - plugin still stale until you build)
+ue-mcp update                  # update the npm package only (editor plugin unchanged)
 ue-mcp deploy                  # copy plugin sources into your project
 ```
 
-`update` cannot restart the MCP server it was spawned by, so finish with: **quit your MCP client → `ue-mcp update --build` → relaunch the client.**
+`update` cannot restart the MCP server it was spawned by, so finish with: **quit your MCP client → `ue-mcp update --build` → relaunch the client.** Restarting the editor afterward ensures the freshly built plugin loads.
 
 ### `ue-mcp doctor`
 
