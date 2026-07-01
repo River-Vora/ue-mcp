@@ -22,6 +22,8 @@ import * as path from "node:path";
 import yaml from "js-yaml";
 
 import { ALL_TOOLS } from "./tools.js";
+import { enrichToolsWithEpicCatalog, type EpicCatalog } from "./epic-enrich.js";
+import { saveCatalogCache, loadCatalogCache } from "./epic-cache.js";
 
 type TextBlock = { type: "text"; text: string };
 
@@ -75,6 +77,42 @@ async function main() {
   const pluginLoad = await loadPlugins(ALL_TOOLS, pluginEntries, configDir, pkg.version);
   const activeTools = pluginLoad.tools;
   const pluginRecords = pluginLoad.records;
+
+  // ── Epic 5.8 native toolset surfacing (best-effort, startup) ─────
+  // If the editor bridge is reachable now, pull Epic's live toolset catalog and
+  // inject each tool as a first-class action into the matching ue-mcp category
+  // (GAS tools into `gas`, Niagara into `niagara`, etc.). This must run before
+  // the flow registry and MCP tool registration below so the injected actions
+  // are dispatchable and advertised. When the editor is not up yet, the `epic`
+  // gateway still works; a server restart picks up enrichment. (Re-enrichment on
+  // late connect would require tools/list_changed and is a follow-up.)
+  try {
+    let catalog: EpicCatalog | null = null;
+    if (!bridge.isConnected) {
+      await bridge.connect(2000).catch(() => {});
+    }
+    if (bridge.isConnected) {
+      // Live editor: fetch the current catalog and refresh the cache.
+      catalog = (await bridge.call("epic_list_toolsets", { includeSchemas: true }, 20000)) as EpicCatalog;
+      saveCatalogCache(configDir, catalog, project.engineAssociation);
+    } else {
+      // Offline: surface the last-seen catalog so the tool set stays stable
+      // across sessions and is inspectable without a running editor.
+      catalog = loadCatalogCache(configDir);
+      if (catalog?.toolsets?.length) {
+        console.error("[ue-mcp] Epic toolsets: editor offline, enriching from cached catalog");
+      }
+    }
+    if (catalog) {
+      const enriched = enrichToolsWithEpicCatalog(activeTools, catalog);
+      if (enriched.injected > 0) {
+        const summary = Object.entries(enriched.byCategory).map(([c, n]) => `${c}:${n}`).join(", ");
+        console.error(`[ue-mcp] Epic 5.8 toolsets: surfaced ${enriched.injected} tools (${summary})`);
+      }
+    }
+  } catch (e) {
+    console.error(`[ue-mcp] Epic toolset enrichment skipped: ${e instanceof Error ? e.message : e}`);
+  }
 
   // Lazy flow accessor — reads ue-mcp.yml fresh each call so agents see
   // edits without a server restart. project(get_status) uses this so the

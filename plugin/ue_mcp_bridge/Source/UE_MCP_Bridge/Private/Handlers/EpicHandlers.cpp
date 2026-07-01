@@ -191,6 +191,10 @@ TSharedPtr<FJsonValue> FEpicHandlers::ListToolsets(const TSharedPtr<FJsonObject>
 	}
 
 	const FString Filter = OptionalString(Params, TEXT("nameFilter"), TEXT(""));
+	// When true, return the full tool objects (name/description/input/output
+	// schema) instead of just tool names. Used by the server to build
+	// per-category first-class actions from the live catalog in a single call.
+	const bool bIncludeSchemas = OptionalBool(Params, TEXT("includeSchemas"), false);
 
 	TArray<TSharedPtr<FJsonValue>> OutList;
 	for (const TSharedPtr<FJsonValue>& V : Arr)
@@ -210,23 +214,31 @@ TSharedPtr<FJsonValue> FEpicHandlers::ListToolsets(const TSharedPtr<FJsonObject>
 		FString Desc;
 		if ((*Obj)->TryGetStringField(TEXT("description"), Desc)) Entry->SetStringField(TEXT("description"), Desc);
 
-		TArray<TSharedPtr<FJsonValue>> ToolNames;
 		const TArray<TSharedPtr<FJsonValue>>* Tools = nullptr;
 		if ((*Obj)->TryGetArrayField(TEXT("tools"), Tools) && Tools)
 		{
-			for (const TSharedPtr<FJsonValue>& TV : *Tools)
-			{
-				const TSharedPtr<FJsonObject>* TO = nullptr;
-				if (TV.IsValid() && TV->TryGetObject(TO) && TO)
-				{
-					FString TN;
-					(*TO)->TryGetStringField(TEXT("name"), TN);
-					ToolNames.Add(MakeShared<FJsonValueString>(TN));
-				}
-			}
 			Entry->SetNumberField(TEXT("toolCount"), Tools->Num());
+			if (bIncludeSchemas)
+			{
+				// Pass the full tool objects straight through.
+				Entry->SetArrayField(TEXT("tools"), *Tools);
+			}
+			else
+			{
+				TArray<TSharedPtr<FJsonValue>> ToolNames;
+				for (const TSharedPtr<FJsonValue>& TV : *Tools)
+				{
+					const TSharedPtr<FJsonObject>* TO = nullptr;
+					if (TV.IsValid() && TV->TryGetObject(TO) && TO)
+					{
+						FString TN;
+						(*TO)->TryGetStringField(TEXT("name"), TN);
+						ToolNames.Add(MakeShared<FJsonValueString>(TN));
+					}
+				}
+				Entry->SetArrayField(TEXT("tools"), ToolNames);
+			}
 		}
-		Entry->SetArrayField(TEXT("tools"), ToolNames);
 		OutList.Add(MakeShared<FJsonValueObject>(Entry));
 	}
 
