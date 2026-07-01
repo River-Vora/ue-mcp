@@ -77,7 +77,8 @@
     "test:smoke": "node scripts/smoke-test.js",
     "generate": "tsx scripts/generate-default-config.ts",
     "generate:metadata": "tsx scripts/generate-tool-metadata.ts",
-    "prepublishOnly": "npx tsc && tsx scripts/generate-default-config.ts && tsx scripts/generate-tool-metadata.ts"
+    "prepublishOnly": "npx tsc && tsx scripts/generate-default-config.ts && tsx scripts/generate-tool-metadata.ts",
+    "gen:epic-docs": "npx tsc && node scripts/gen-epic-docs.mjs"
   },
   "dependencies": {
     "@db-lyon/flowkit": "~0.5.3",
