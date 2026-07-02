@@ -60,7 +60,7 @@ ue-mcp:
   http:
     enabled: false
   context:
-    strategy: full   # full (default) | lean
+    strategy: full   # full (default) | lean | micro
 
 tasks: {}
 flows: {}
@@ -85,7 +85,7 @@ plugins: []
 | `disable` | `string[]` | `[]` | Tool categories to disable. Disabled categories are not registered with the MCP server, reducing context noise for the AI. Use `"feedback"` here to opt out of the feedback tool entirely. |
 | `nativeTools` | `object` | `{ enabled: true }` | Native (Epic 5.8 ToolsetRegistry) tool surfacing. `enabled` (bool, default `true`) turns the whole feature on/off; when off, only the `epic` discovery gateway remains. `exclude` (`string[]`) names ue-mcp categories that should not be enriched with Epic tools (they stay reachable via `epic(call_tool)`). See [Native Epic tools](#native-epic-5-8-tools) below. |
 | `http` | `object` | `undefined` (HTTP server off) | Optional REST surface for the flow engine. Object with `enabled` (bool), `port` (default `7723`), `host` (default `127.0.0.1`). When `enabled: true`, the MCP server also serves `GET /flows`, `GET /flows/<name>/plan`, `POST /flows/<name>/run`, and the Server-Sent Events stream at `GET /flows/events` (live per-step lifecycle events; see [Live Observation](flows.md#live-observation-sse)) over HTTP so external tools can drive and observe flows without an MCP client. |
-| `context` | `object` | `{ strategy: full }` | Context-seeding strategy. `strategy: full` (default) advertises every action inline; `strategy: lean` trims the init payload for token-constrained clients and serves the action catalog on demand. See [Context strategy](#context-strategy-full-vs-lean) below. |
+| `context` | `object` | `{ strategy: full }` | Context-seeding strategy. `strategy: full` (default) advertises every action inline; `lean` keeps action names but serves descriptions on demand (~half the seed); `micro` collapses everything behind one gateway tool (~1k tokens). See [Context strategy](#context-strategy-full-lean-micro) below. |
 
 ### Native Epic 5.8 tools
 
@@ -139,36 +139,38 @@ A plugin can declare `uePluginDependency: <PluginName>` in its `ue-mcp.plugin.ym
 
 For example, a plugin that declares `uePluginDependency: SomePlugin` will report `uePluginPresent: false` until `SomePlugin` is added to `<Project>.uproject`'s `Plugins` array and the C++ modules are built.
 
-## Context strategy (full vs lean)
+## Context strategy (full, lean, micro)
 
-Every category tool advertises its actions to the AI at startup. In the default **`full`** strategy each tool description carries its complete action catalog and the server seeds a full instruction block, so an agent sees everything up front. That is great for discoverability but costs tokens on the MCP `initialize` handshake.
+Everything the server injects at session start - the `initialize` instructions plus the whole `tools/list` payload (names, descriptions, and parameter schemas) - is the "context tax". Three strategies trade that seed cost against how many discovery round-trips an agent makes. Measure the tax on your own project with `npm run context-tax` (set `ANTHROPIC_API_KEY` for exact token counts).
 
-The **`lean`** strategy keeps the exact same 22 typed category tools and their validated `action` enums, but serves the action catalog on demand instead of inline:
+| Strategy | Seed (test project) | What's advertised | Cost to use |
+|----------|--------------------|-------------------|-------------|
+| **`full`** (default) | ~45k tokens | all 22 category tools, every action + parameter inline | zero discovery calls |
+| **`lean`** | ~23k tokens | the same 22 tools with their validated `action` enums, but descriptions collapsed to a summary; a `catalog` tool (`search` / `describe` / `list_categories`) and a per-category `describe` action serve the details on demand | ~1 round-trip to learn a category |
+| **`micro`** | ~1k tokens | a single `tools` gateway - `list_categories`, `describe`, and `call` - fronting every category; nothing else | discovery for everything |
 
-- each tool description collapses to a one-line summary plus a discovery pointer,
-- the server instructions switch to a compact variant,
-- every category gains a `describe` action that lists its own actions,
-- a new `catalog` tool finds actions across every category: `catalog(action="search", query="spawn actor")`, `catalog(action="describe", category="blueprint")`, `catalog(action="list_categories")`.
+- **full** is best when the agent should see the entire surface up front and you are not token-constrained.
+- **lean** keeps action names visible (so the model can often call directly, and unknown actions are still rejected up front) while dropping the prose. A solid middle ground.
+- **micro** mirrors the native MCP toolset gateway (`list_toolsets` / `describe_toolset` / `call_tool`): the agent calls `tools(action="list_categories")`, then `tools(action="describe", category="blueprint")`, then `tools(action="call", category="blueprint", method="create", args={ ... })`. Smallest possible seed, most discovery traffic.
 
-Because the typed enum is retained, an unknown action is still rejected up front rather than failing silently. Nothing is removed - the agent pulls the details it needs when it needs them.
-
-Set it with the standalone command (writes `ue-mcp.yml` for you):
+Set the strategy with the standalone command (writes `ue-mcp.yml` for you):
 
 ```
-npx ue-mcp context lean      # switch to lean
-npx ue-mcp context full      # switch back to full (default)
+npx ue-mcp context full      # every action inline (default)
+npx ue-mcp context lean      # names visible, descriptions on demand
+npx ue-mcp context micro     # one gateway tool fronts everything
 npx ue-mcp context           # show the current strategy
 ```
 
-`npx ue-mcp init` also has a **Context strategy** page that toggles it. Or edit `ue-mcp.yml` directly:
+`npx ue-mcp init` also has a **Context strategy** page. Or edit `ue-mcp.yml` directly:
 
 ```yaml
 ue-mcp:
   context:
-    strategy: lean
+    strategy: micro
 ```
 
-Or per session, without editing the file: `UE_MCP_CONTEXT_STRATEGY=lean` (the env var wins over the config value). Anything other than `lean` resolves to `full`. Restart your MCP client (`/mcp` in Claude Code) after changing the strategy.
+Or per session, without editing the file: `UE_MCP_CONTEXT_STRATEGY=micro` (the env var wins over the config value). Anything other than `lean` or `micro` resolves to `full`. Restart your MCP client (`/mcp` in Claude Code) after changing the strategy.
 
 ## Bridge Connection
 
@@ -222,7 +224,7 @@ The C++ bridge plugin enables these UE plugins (adding them to `.uproject` if mi
 | `npx ue-mcp plugin install <name>` | Install a ue-mcp plugin from npm and register it in `ue-mcp.yml`. See [Configuration → Plugins](#plugins). |
 | `npx ue-mcp plugin uninstall <name>` | Inverse of install. |
 | `npx ue-mcp plugin create <name>` | Scaffold a new plugin package. See [Plugins](plugins.md). |
-| `npx ue-mcp context [lean\|full]` | Read or set the [context strategy](#context-strategy-full-vs-lean) in `ue-mcp.yml`. No argument prints the current strategy. |
+| `npx ue-mcp context [full\|lean\|micro]` | Read or set the [context strategy](#context-strategy-full-lean-micro) in `ue-mcp.yml`. No argument prints the current strategy. |
 
 ## Editor Lifecycle
 

@@ -35,9 +35,10 @@ export interface UeMcpConfig {
     host?: string;
   };
   /** Context-seeding strategy. `full` (default) lists every action inline;
-   *  `lean` hides the catalog behind on-demand discovery. See lean-context.ts. */
+   *  `lean` keeps action names but serves descriptions on demand; `micro`
+   *  collapses everything behind one gateway tool. See lean-context.ts. */
   context?: {
-    strategy?: "full" | "lean";
+    strategy?: "full" | "lean" | "micro";
   };
 }
 

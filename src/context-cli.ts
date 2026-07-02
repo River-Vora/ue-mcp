@@ -5,10 +5,12 @@ import yaml from "js-yaml";
 import { dumpYaml } from "./yaml-dump.js";
 
 /**
- * `ue-mcp context [lean|full|status] [project]` - read or set the context
- * seeding strategy in the project's ue-mcp.yml. `lean` trims the MCP init
- * payload and serves the action catalog on demand; `full` (default) advertises
- * every action inline. Restart the MCP client to apply.
+ * `ue-mcp context [full|lean|micro|status] [project]` - read or set the context
+ * seeding strategy in the project's ue-mcp.yml.
+ *   full  (default) advertises every action inline
+ *   lean  keeps action names, serves descriptions on demand
+ *   micro collapses everything behind one gateway tool
+ * Restart the MCP client to apply.
  */
 
 const RESET = "\x1b[0m";
@@ -19,7 +21,7 @@ const RED = "\x1b[31m";
 const CYAN = "\x1b[36m";
 const YELLOW = "\x1b[33m";
 
-const ACTIONS = new Set(["lean", "full", "status", "on", "off"]);
+const ACTIONS = new Set(["full", "lean", "micro", "status"]);
 
 function printHelp(): void {
   console.log(`
@@ -28,8 +30,9 @@ function printHelp(): void {
   ${BOLD}Usage:${RESET}
     ue-mcp context                 show the current strategy
     ue-mcp context status          show the current strategy
-    ue-mcp context lean            switch to lean (catalog served on demand)
-    ue-mcp context full            switch to full (every action inline, default)
+    ue-mcp context full            every action inline (largest seed, default)
+    ue-mcp context lean            action names visible, descriptions on demand
+    ue-mcp context micro           one gateway tool fronts everything (smallest)
 
   A project path may be passed as the last argument; otherwise the .uproject in
   the current directory is used. Restart your MCP client (/mcp in Claude Code)
@@ -77,9 +80,10 @@ function loadYaml(configPath: string): Record<string, unknown> {
   }
 }
 
-function currentStrategy(existing: Record<string, unknown>): "full" | "lean" {
+function currentStrategy(existing: Record<string, unknown>): "full" | "lean" | "micro" {
   const block = existing["ue-mcp"] as { context?: { strategy?: string } } | undefined;
-  return block?.context?.strategy === "lean" ? "lean" : "full";
+  const s = block?.context?.strategy;
+  return s === "lean" ? "lean" : s === "micro" ? "micro" : "full";
 }
 
 function main(): void {
@@ -99,24 +103,22 @@ function main(): void {
   const configPath = path.join(projectDir, "ue-mcp.yml");
   const existing = loadYaml(configPath);
   const before = currentStrategy(existing);
-
-  // Normalise on/off aliases.
-  const want = action === "on" ? "lean" : action === "off" ? "full" : action;
+  const want = action;
 
   if (want === "status") {
-    const color = before === "lean" ? GREEN : YELLOW;
+    const color = before === "full" ? YELLOW : GREEN;
     console.log("");
     console.log(`  ${BOLD}${CYAN}Context strategy${RESET}: ${color}${before}${RESET}`);
     console.log(`  ${DIM}${configPath}${RESET}`);
-    console.log(`  ${DIM}Switch with: ue-mcp context ${before === "lean" ? "full" : "lean"}${RESET}`);
+    console.log(`  ${DIM}Options: full (default) | lean | micro   -> ue-mcp context <tier>${RESET}`);
     console.log("");
     return;
   }
 
   const block = (existing["ue-mcp"] as Record<string, unknown>) ?? {};
   if (typeof block.version !== "number") block.version = 1;
-  if (want === "lean") {
-    block.context = { strategy: "lean" };
+  if (want === "lean" || want === "micro") {
+    block.context = { strategy: want };
   } else {
     // full is the default, so drop the key rather than persist it.
     delete block.context;

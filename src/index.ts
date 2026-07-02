@@ -5,8 +5,8 @@ import { z } from "zod";
 import { EditorBridge } from "./bridge.js";
 import { ProjectContext } from "./project.js";
 import { attach, attachSummary } from "./deployer.js";
-import { SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_LEAN } from "./instructions.js";
-import { resolveContextStrategy, applyLeanContext } from "./lean-context.js";
+import { SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_LEAN, SERVER_INSTRUCTIONS_MICRO } from "./instructions.js";
+import { resolveContextStrategy, applyLeanContext, buildMicroGateway } from "./lean-context.js";
 import { isDirectiveResponse, type ToolDef, type ToolContext, type PluginInfo, type ElicitFn } from "./types.js";
 import { McpError, ErrorCode } from "./errors.js";
 import { info, warn } from "./log.js";
@@ -131,15 +131,36 @@ async function main() {
     }
   }
 
-  // ── Context-seeding strategy (full | lean) ───────────────────────
-  // Applied AFTER plugin + Epic enrichment so the lean catalog/search index
-  // covers those injected actions too, and BEFORE the flow registry + MCP
-  // registration below so the `catalog` tool and per-category `describe`
-  // actions are dispatchable and advertised.
+  // ── Context-seeding strategy (full | lean | micro) ───────────────
+  // Applied AFTER plugin + Epic enrichment so lean/micro discovery covers the
+  // injected actions too, and BEFORE the flow registry + MCP registration so
+  // the gateway / catalog / describe surfaces are dispatchable and advertised.
+  //   full  - every category tool advertised with its full action catalog
+  //   lean  - trimmed category tools + a `catalog` discovery tool (names stay
+  //           visible, descriptions/params on demand)
+  //   micro - one `tools` gateway (list_categories / describe / call) fronts
+  //           everything; smallest possible seed
   const contextStrategy = resolveContextStrategy(project.config.context?.strategy);
-  const seededTools = contextStrategy === "lean" ? applyLeanContext(activeTools) : activeTools;
-  if (contextStrategy === "lean") {
-    console.error(`[ue-mcp] Context strategy: lean - ${activeTools.length} categories, action catalog served on demand (catalog/describe)`);
+  const disabled = new Set(project.config.disable ?? []);
+  const enabledActive = activeTools.filter((t) => !disabled.has(t.name));
+
+  let advertisedTools: ToolDef[];
+  let registryTools: ToolDef[];
+  if (contextStrategy === "micro") {
+    const gateway = buildMicroGateway(enabledActive);
+    advertisedTools = [gateway];
+    // Keep every category task in the registry so flows still resolve.
+    registryTools = [gateway, ...activeTools];
+  } else if (contextStrategy === "lean") {
+    const leaned = applyLeanContext(activeTools);
+    advertisedTools = leaned.filter((t) => !disabled.has(t.name));
+    registryTools = leaned;
+  } else {
+    advertisedTools = enabledActive;
+    registryTools = activeTools;
+  }
+  if (contextStrategy !== "full") {
+    console.error(`[ue-mcp] Context strategy: ${contextStrategy}`);
   }
 
   // Lazy flow accessor — reads ue-mcp.yml fresh each call so agents see
@@ -184,7 +205,7 @@ async function main() {
   const ctx: ToolContext = { bridge, project, getFlows, getPlugins };
 
   // ── Flow engine: task registry ──────────────────────────────────
-  const registry = buildFlowRegistry(seededTools);
+  const registry = buildFlowRegistry(registryTools);
   for (const { name, ctor } of pluginLoad.taskRegistrations) {
     registry.register(name, ctor);
   }
@@ -198,7 +219,11 @@ async function main() {
   // budget as SERVER_INSTRUCTIONS itself; deeper plugin docs remain
   // readable on demand via the file-reading surface.
   const knowledgeBlock = buildKnowledgeBlock(pluginLoad.knowledgeByCategory);
-  const baseInstructions = contextStrategy === "lean" ? SERVER_INSTRUCTIONS_LEAN : SERVER_INSTRUCTIONS;
+  const baseInstructions = contextStrategy === "micro"
+    ? SERVER_INSTRUCTIONS_MICRO
+    : contextStrategy === "lean"
+      ? SERVER_INSTRUCTIONS_LEAN
+      : SERVER_INSTRUCTIONS;
   const serverInstructions = knowledgeBlock
     ? `${baseInstructions}\n\n═══ PLUGIN KNOWLEDGE ═══\n${knowledgeBlock}`
     : baseInstructions;
@@ -212,8 +237,7 @@ async function main() {
 
   ctx.elicit = buildElicit(server);
 
-  const disabled = new Set(project.config.disable ?? []);
-  const tools = seededTools.filter((t) => !disabled.has(t.name));
+  const tools = advertisedTools;
 
   // ── Register category tools — dispatched through the task registry ──
   for (const tool of tools) {

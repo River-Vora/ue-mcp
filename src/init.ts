@@ -66,7 +66,7 @@ function writeProjectConfig(
   projectDir: string,
   disabled: string[],
   nativeTools?: { enabled: boolean; exclude: string[] },
-  contextStrategy?: "full" | "lean",
+  contextStrategy?: "full" | "lean" | "micro",
 ): void {
   const configPath = path.join(projectDir, "ue-mcp.yml");
   let existing: Record<string, unknown> = {};
@@ -99,9 +99,9 @@ function writeProjectConfig(
   }
 
   // Context strategy is `full` by default, so only persist the block when the
-  // user picks `lean` - keeps the scaffold clean for the common case.
-  if (contextStrategy === "lean") {
-    block.context = { strategy: "lean" };
+  // user picks `lean` or `micro` - keeps the scaffold clean for the common case.
+  if (contextStrategy === "lean" || contextStrategy === "micro") {
+    block.context = { strategy: contextStrategy };
   } else if (contextStrategy === "full") {
     delete block.context;
   }
@@ -278,19 +278,19 @@ async function init() {
 
   console.log("");
 
-  // 2c. Context strategy — how much of the action catalog is seeded at startup.
-  // `full` (default) advertises every action inline; `lean` collapses tool
-  // descriptions to a summary and serves the catalog on demand (catalog/describe),
-  // trimming the MCP initialize payload for token-constrained clients.
-  const existingLean = project.config.context?.strategy === "lean";
-  const contextStates = await checkboxSelect("Context strategy", [
-    {
-      label: "Use lean context (smaller startup, actions discovered on demand)",
-      checked: existingLean,
-      suffix: "Trims the initialize payload; agents call catalog(search)/<tool>(describe) to find actions. Default is full (every action listed inline).",
-    },
-  ]);
-  const contextStrategy: "full" | "lean" = contextStates[0] ? "lean" : "full";
+  // 2c. Context strategy: how much of the action catalog is seeded at startup.
+  // full: every action inline (largest, zero discovery calls). lean: action
+  // names stay visible, descriptions/params on demand. micro: one gateway tool
+  // fronts everything (smallest seed, most discovery calls).
+  const CONTEXT_TIERS = ["full", "lean", "micro"] as const;
+  const existingStrategy = project.config.context?.strategy ?? "full";
+  const tierLabels = [
+    "full  - every action listed inline (largest seed, no discovery calls)",
+    "lean  - action names visible, descriptions on demand (~half the seed)",
+    "micro - one gateway tool fronts everything (smallest seed)",
+  ].map((l, i) => (CONTEXT_TIERS[i] === existingStrategy ? `${l}   [current]` : l));
+  const tierIndex = await singleSelect("Context strategy", tierLabels);
+  const contextStrategy = CONTEXT_TIERS[tierIndex] ?? "full";
 
   console.log("");
 

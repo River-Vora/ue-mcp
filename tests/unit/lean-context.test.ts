@@ -6,6 +6,7 @@ import {
   splitDescription,
   buildCatalogTool,
   applyLeanContext,
+  buildMicroGateway,
 } from "../../src/lean-context.js";
 
 function fixtureTools(): ToolDef[] {
@@ -41,9 +42,10 @@ describe("resolveContextStrategy", () => {
     expect(resolveContextStrategy(undefined)).toBe("full");
   });
 
-  it("reads lean from config", () => {
+  it("reads lean and micro from config", () => {
     delete process.env.UE_MCP_CONTEXT_STRATEGY;
     expect(resolveContextStrategy("lean")).toBe("lean");
+    expect(resolveContextStrategy("micro")).toBe("micro");
   });
 
   it("env overrides config, case-insensitively", () => {
@@ -148,5 +150,69 @@ describe("catalog discovery tool", () => {
     };
     expect(out.count).toBe(2);
     expect(out.categories.find((c) => c.category === "blueprint")?.summary).toBe("Blueprint authoring.");
+  });
+});
+
+describe("buildMicroGateway", () => {
+  function microFixture(): ToolDef[] {
+    return [
+      categoryTool("blueprint", "Blueprint authoring.", {
+        create: { description: "Create a BP", handler: async (_c, p) => ({ created: p.name }) },
+        compile: bp("Compile a BP", "compile_blueprint"),
+      }, undefined, {}),
+      categoryTool("level", "Level actors.", {
+        place_actor: bp("Place an actor", "place_actor"),
+      }, undefined, {}),
+    ];
+  }
+
+  const mockBridge = {
+    isConnected: true,
+    connect: async () => {},
+    call: async (method: string, params?: Record<string, unknown>) => ({ bridgeCalled: method, params }),
+  };
+  const ctxB = { bridge: mockBridge } as unknown as ToolContext;
+  const invoke = (gw: ToolDef, params: Record<string, unknown>) =>
+    gw.actions.call.handler!(ctxB, { action: "call", ...params });
+
+  it("exposes exactly the three gateway actions", () => {
+    const gw = buildMicroGateway(microFixture());
+    expect(gw.name).toBe("tools");
+    expect(Object.keys(gw.actions)).toEqual(["list_categories", "describe", "call"]);
+  });
+
+  it("list_categories returns every category with a summary", async () => {
+    const gw = buildMicroGateway(microFixture());
+    const out = (await gw.actions.list_categories.handler!(ctxB, { action: "list_categories" })) as {
+      count: number; categories: Array<{ category: string; summary: string }>;
+    };
+    expect(out.count).toBe(2);
+    expect(out.categories.map((c) => c.category)).toEqual(["blueprint", "level"]);
+  });
+
+  it("describe lists a category's actions and rejects unknown ones", async () => {
+    const gw = buildMicroGateway(microFixture());
+    const ok = (await gw.actions.describe.handler!(ctxB, { action: "describe", category: "blueprint" })) as { actions: string[] };
+    expect(ok.actions.some((a) => a.startsWith("create:"))).toBe(true);
+    const bad = (await gw.actions.describe.handler!(ctxB, { action: "describe", category: "nope" })) as { error?: string };
+    expect(bad.error).toBeDefined();
+  });
+
+  it("call routes to a handler action", async () => {
+    const gw = buildMicroGateway(microFixture());
+    const out = await invoke(gw, { category: "blueprint", method: "create", args: { name: "BP_X" } });
+    expect(out).toEqual({ created: "BP_X" });
+  });
+
+  it("call routes a bridge action through ctx.bridge", async () => {
+    const gw = buildMicroGateway(microFixture());
+    const out = await invoke(gw, { category: "blueprint", method: "compile", args: { target: "BP_X" } });
+    expect(out).toEqual({ bridgeCalled: "compile_blueprint", params: { target: "BP_X" } });
+  });
+
+  it("call throws on unknown category or method", async () => {
+    const gw = buildMicroGateway(microFixture());
+    await expect(invoke(gw, { category: "nope", method: "create" })).rejects.toThrow(/Unknown category/);
+    await expect(invoke(gw, { category: "blueprint", method: "nope" })).rejects.toThrow(/Unknown action/);
   });
 });

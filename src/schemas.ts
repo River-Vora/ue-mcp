@@ -55,7 +55,7 @@ export const UeMcpConfigSchema = z
     // tool + per-category `describe` action). See lean-context.ts.
     context: z
       .object({
-        strategy: z.enum(["full", "lean"]).optional(),
+        strategy: z.enum(["full", "lean", "micro"]).optional(),
       })
       .optional(),
   })

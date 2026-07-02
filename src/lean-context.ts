@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { categoryTool, type ActionSpec, type ToolDef } from "./types.js";
+import { McpError, ErrorCode } from "./errors.js";
 
 /**
  * Lean context strategy.
@@ -23,16 +24,16 @@ import { categoryTool, type ActionSpec, type ToolDef } from "./types.js";
  * failure mode this repo works hardest to avoid.
  */
 
-export type ContextStrategy = "full" | "lean";
+export type ContextStrategy = "full" | "lean" | "micro";
 
 /**
  * Resolve the active strategy. Env var wins over config so a user can flip it
- * per-session without editing ue-mcp.yml. Anything other than "lean" (case
- * insensitive) resolves to "full", the safe, unchanged default.
+ * per-session without editing ue-mcp.yml. Anything other than "lean"/"micro"
+ * (case insensitive) resolves to "full", the safe, unchanged default.
  */
 export function resolveContextStrategy(configStrategy?: string): ContextStrategy {
   const raw = (process.env.UE_MCP_CONTEXT_STRATEGY ?? configStrategy ?? "full").trim().toLowerCase();
-  return raw === "lean" ? "lean" : "full";
+  return raw === "lean" ? "lean" : raw === "micro" ? "micro" : "full";
 }
 
 const ACTIONS_MARKER = "\n\nActions:\n";
@@ -193,4 +194,79 @@ export function applyLeanContext(tools: ToolDef[]): ToolDef[] {
   const leaned = tools.map(leanTool);
   if (tools.some((t) => t.name === "catalog")) return leaned;
   return [buildCatalogTool(tools), ...leaned];
+}
+
+/**
+ * Micro strategy: collapse the entire surface behind a single gateway tool,
+ * mirroring the native MCP toolset gateway (list_toolsets / describe_toolset /
+ * call_tool). The 22 category tools are NOT advertised; the agent enumerates
+ * with list_categories, learns a category with describe, and invokes anything
+ * with call. This is the smallest possible seed.
+ *
+ * `call` dispatches straight to the target ActionSpec (handler or bridge) using
+ * the same logic categoryTool() uses, so no registry round-trip is needed.
+ */
+export function buildMicroGateway(tools: ToolDef[]): ToolDef {
+  const byName = new Map(tools.map((t) => [t.name, t] as const));
+  const summaries = tools.map((t) => ({ category: t.name, summary: splitDescription(t.description).summary }));
+
+  const actions: Record<string, ActionSpec> = {
+    list_categories: {
+      description: "List every category with a one-line summary.",
+      handler: async () => ({
+        count: summaries.length,
+        categories: summaries,
+        next: 'tools(action="describe", category="<name>"), then tools(action="call", category, method, args)',
+      }),
+    },
+    describe: {
+      description: "List a category's actions and how to call them. Params: category.",
+      handler: async (_ctx, p) => {
+        const category = typeof p.category === "string" ? p.category : "";
+        const tool = byName.get(category);
+        if (!tool) {
+          return { error: `Unknown category "${category}".`, categories: summaries.map((s) => s.category) };
+        }
+        return {
+          category,
+          actions: Object.entries(tool.actions).map(([name, s]) => (s.description ? `${name}: ${s.description}` : name)),
+          call: `tools(action="call", category="${category}", method="<action>", args={ ... })`,
+        };
+      },
+    },
+    call: {
+      description: "Invoke any action. Params: category, method (the action name), args (object of the action's params).",
+      handler: async (ctx, p) => {
+        const category = typeof p.category === "string" ? p.category : "";
+        const method = typeof p.method === "string" ? p.method : "";
+        const tool = byName.get(category);
+        if (!tool) {
+          throw new McpError(ErrorCode.UNKNOWN_ACTION, `Unknown category "${category}". Use tools(action="list_categories").`);
+        }
+        const spec = tool.actions[method];
+        if (!spec) {
+          throw new McpError(ErrorCode.UNKNOWN_ACTION, `Unknown action "${method}" on ${category}. Use tools(action="describe", category="${category}").`);
+        }
+        const args = p.args && typeof p.args === "object" ? (p.args as Record<string, unknown>) : {};
+        if (spec.handler) return spec.handler(ctx, args);
+        if (spec.bridge) {
+          const mapped = spec.mapParams ? spec.mapParams(args) : args;
+          return ctx.bridge.call(spec.bridge, mapped, spec.timeoutMs);
+        }
+        throw new McpError(ErrorCode.NO_HANDLER, `Action ${category}.${method} has no handler.`);
+      },
+    },
+  };
+
+  return categoryTool(
+    "tools",
+    "Gateway to every ue-mcp category (micro context mode). Discover with list_categories/describe, then invoke with call.",
+    actions,
+    undefined,
+    {
+      category: z.string().optional().describe('Category name for describe/call, e.g. "blueprint"'),
+      method: z.string().optional().describe('Action name for call, e.g. "create"'),
+      args: z.record(z.unknown()).optional().describe("Params object passed to the called action"),
+    },
+  );
 }
