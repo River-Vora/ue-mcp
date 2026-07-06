@@ -19,6 +19,7 @@
 #include "EdGraphUtilities.h"
 #include "K2Node.h"
 #include "K2Node_CallFunction.h"
+#include "K2Node_CallParentFunction.h"
 #include "K2Node_Event.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_EditablePinBase.h"
@@ -134,6 +135,12 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AddNode(const TSharedPtr<FJsonObject>
 	// Resolve short aliases to full class names
 	FString ResolvedClass = NodeClass;
 	if (NodeClass == TEXT("CallFunction"))  ResolvedClass = TEXT("K2Node_CallFunction");
+	// #688: "Parent: <Function>" call. Binds to the parent implementation of an
+	// overridden function so an override graph can chain to the base. Uses the
+	// existing K2Node_CallFunction resolution path below (SetFromFunction is
+	// virtual on the parent-call subclass); with no explicit targetClass the
+	// function resolves against Blueprint->ParentClass.
+	else if (NodeClass == TEXT("CallParent") || NodeClass == TEXT("ParentFunction") || NodeClass == TEXT("CallParentFunction")) ResolvedClass = TEXT("K2Node_CallParentFunction");
 	else if (NodeClass == TEXT("Event"))    ResolvedClass = TEXT("K2Node_Event");
 	else if (NodeClass == TEXT("GetVar"))   ResolvedClass = TEXT("K2Node_VariableGet");
 	else if (NodeClass == TEXT("SetVar"))   ResolvedClass = TEXT("K2Node_VariableSet");
