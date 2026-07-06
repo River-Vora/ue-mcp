@@ -118,6 +118,9 @@ private:
 	static TSharedPtr<FJsonValue> ReadMirrorDataTable(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreatePoseSearchNormalizationSet(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetPoseSearchDatabaseSettings(const TSharedPtr<FJsonObject>& Params);
+	// Motion Matching runtime AnimGraph nodes.
+	static TSharedPtr<FJsonValue> AddMotionMatchingNode(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> AddPoseHistoryNode(const TSharedPtr<FJsonObject>& Params);
 
 	// #419/#420 — live-actor skeletal reads + rebind + preview (moved from Level)
 	static TSharedPtr<FJsonValue> GetBoneTransform(const TSharedPtr<FJsonObject>& Params);

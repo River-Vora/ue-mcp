@@ -20,8 +20,16 @@
 #include "PoseSearch/PoseSearchNormalizationSet.h"
 #include "Animation/MirrorDataTable.h"
 #include "Animation/Skeleton.h"
+#include "Animation/AnimBlueprint.h"
 #include "BoneContainer.h"
 #include "EditorAssetLibrary.h"
+#include "AnimGraphNode_MotionMatching.h"
+#include "AnimGraphNode_PoseSearchHistoryCollector.h"
+#include "AnimGraphNode_Root.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "UObject/UnrealType.h"
 #include "Runtime/Launch/Resources/Version.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -75,6 +83,72 @@ static void FinalizeSchema(UPoseSearchSchema* Schema)
 {
 	FPropertyChangedEvent EmptyEvent(nullptr);
 	Schema->PostEditChangeProperty(EmptyEvent);
+}
+
+// ─── AnimGraph node authoring helpers ─────────────────────────────────────
+
+// Anim graph nodes keep their settings in a private `Node` USTRUCT member. Reach
+// it by reflection so we can set fields without the (private) C++ member access.
+static void* GetAnimNodeMemory(UObject* GraphNode, UScriptStruct*& OutStruct)
+{
+	OutStruct = nullptr;
+	if (!GraphNode) return nullptr;
+	FStructProperty* NodeProp = CastField<FStructProperty>(GraphNode->GetClass()->FindPropertyByName(TEXT("Node")));
+	if (!NodeProp) return nullptr;
+	OutStruct = NodeProp->Struct;
+	return NodeProp->ContainerPtrToValuePtr<void>(GraphNode);
+}
+
+static void SetNodeObject(UScriptStruct* S, void* Data, const TCHAR* Field, UObject* Value)
+{
+	if (FObjectPropertyBase* P = CastField<FObjectPropertyBase>(S->FindPropertyByName(Field)))
+		P->SetObjectPropertyValue(P->ContainerPtrToValuePtr<void>(Data), Value);
+}
+static void SetNodeInt(UScriptStruct* S, void* Data, const TCHAR* Field, int32 Value)
+{
+	if (FIntProperty* P = CastField<FIntProperty>(S->FindPropertyByName(Field)))
+		P->SetPropertyValue(P->ContainerPtrToValuePtr<void>(Data), Value);
+}
+static void SetNodeFloat(UScriptStruct* S, void* Data, const TCHAR* Field, float Value)
+{
+	if (FFloatProperty* P = CastField<FFloatProperty>(S->FindPropertyByName(Field)))
+		P->SetPropertyValue(P->ContainerPtrToValuePtr<void>(Data), Value);
+}
+static void SetNodeBool(UScriptStruct* S, void* Data, const TCHAR* Field, bool Value)
+{
+	if (FBoolProperty* P = CastField<FBoolProperty>(S->FindPropertyByName(Field)))
+		P->SetPropertyValue(P->ContainerPtrToValuePtr<void>(Data), Value);
+}
+
+// First pose pin in the given direction (anim graph nodes expose exactly one).
+static UEdGraphPin* GetPosePin(UEdGraphNode* Node, EEdGraphPinDirection Dir)
+{
+	if (!Node) return nullptr;
+	for (UEdGraphPin* Pin : Node->Pins)
+	{
+		if (Pin && Pin->Direction == Dir) return Pin;
+	}
+	return nullptr;
+}
+
+static UAnimGraphNode_Root* FindOutputPoseNode(UEdGraph* Graph)
+{
+	for (UEdGraphNode* N : Graph->Nodes)
+	{
+		if (UAnimGraphNode_Root* Root = Cast<UAnimGraphNode_Root>(N)) return Root;
+	}
+	return nullptr;
+}
+
+// Place a freshly-constructed anim graph node into the graph.
+static void PlaceAnimNode(UEdGraph* Graph, UEdGraphNode* Node, int32 X, int32 Y)
+{
+	Graph->AddNode(Node, false, false);
+	Node->CreateNewGuid();
+	Node->PostPlacedNewNode();
+	Node->AllocateDefaultPins();
+	Node->NodePosX = X;
+	Node->NodePosY = Y;
 }
 
 // ─── PoseSearchSchema ─────────────────────────────────────────────────────
@@ -443,5 +517,132 @@ TSharedPtr<FJsonValue> FAnimationHandlers::SetPoseSearchDatabaseSettings(const T
 	Res->SetNumberField(TEXT("baseCostBias"), Database->BaseCostBias);
 	Res->SetNumberField(TEXT("loopingCostBias"), Database->LoopingCostBias);
 	Res->SetNumberField(TEXT("kdTreeQueryNumNeighbors"), Database->KDTreeQueryNumNeighbors);
+	return MCPResult(Res);
+}
+
+// ─── AnimGraph runtime nodes ──────────────────────────────────────────────
+
+TSharedPtr<FJsonValue> FAnimationHandlers::AddMotionMatchingNode(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
+	UAnimBlueprint* AnimBP = LoadAssetByPath<UAnimBlueprint>(AssetPath);
+	if (!AnimBP) return MCPError(FString::Printf(TEXT("AnimBlueprint not found: %s"), *AssetPath));
+
+	const FString GraphName = OptionalString(Params, TEXT("graphName"), TEXT("AnimGraph"));
+	UEdGraph* Graph = nullptr;
+	TArray<UEdGraph*> All;
+	AnimBP->GetAllGraphs(All);
+	for (UEdGraph* G : All) { if (G && G->GetName() == GraphName) { Graph = G; break; } }
+	if (!Graph) return MCPError(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+
+	UPoseSearchDatabase* Database = nullptr;
+	const FString DbPath = OptionalString(Params, TEXT("databasePath"));
+	if (!DbPath.IsEmpty())
+	{
+		Database = LoadAssetByPath<UPoseSearchDatabase>(DbPath);
+		if (!Database) return MCPError(FString::Printf(TEXT("PoseSearchDatabase not found: %s"), *DbPath));
+	}
+
+	UAnimGraphNode_MotionMatching* MMNode = NewObject<UAnimGraphNode_MotionMatching>(Graph);
+	PlaceAnimNode(Graph, MMNode, 0, 0);
+
+	UScriptStruct* NodeStruct = nullptr;
+	void* NodeData = GetAnimNodeMemory(MMNode, NodeStruct);
+	if (NodeStruct && NodeData)
+	{
+		if (Database) SetNodeObject(NodeStruct, NodeData, TEXT("Database"), Database);
+		double BlendTime = 0.0;
+		if (Params->TryGetNumberField(TEXT("blendTime"), BlendTime)) SetNodeFloat(NodeStruct, NodeData, TEXT("BlendTime"), (float)BlendTime);
+	}
+
+	bool bConnected = false;
+	if (OptionalBool(Params, TEXT("connectToOutput"), true))
+	{
+		if (UAnimGraphNode_Root* Root = FindOutputPoseNode(Graph))
+		{
+			UEdGraphPin* RootIn = GetPosePin(Root, EGPD_Input);
+			UEdGraphPin* NodeOut = GetPosePin(MMNode, EGPD_Output);
+			if (RootIn && NodeOut) { RootIn->BreakAllPinLinks(); NodeOut->MakeLinkTo(RootIn); bConnected = true; }
+		}
+	}
+
+	FKismetEditorUtilities::CompileBlueprint(AnimBP);
+	SaveAssetPackage(AnimBP);
+
+	TSharedPtr<FJsonObject> Res = MCPSuccess();
+	MCPSetCreated(Res);
+	Res->SetStringField(TEXT("assetPath"), AssetPath);
+	Res->SetStringField(TEXT("graphName"), GraphName);
+	Res->SetStringField(TEXT("nodeGuid"), MMNode->NodeGuid.ToString());
+	Res->SetStringField(TEXT("databasePath"), Database ? Database->GetPathName() : FString());
+	Res->SetBoolField(TEXT("connectedToOutput"), bConnected);
+	return MCPResult(Res);
+}
+
+TSharedPtr<FJsonValue> FAnimationHandlers::AddPoseHistoryNode(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
+	UAnimBlueprint* AnimBP = LoadAssetByPath<UAnimBlueprint>(AssetPath);
+	if (!AnimBP) return MCPError(FString::Printf(TEXT("AnimBlueprint not found: %s"), *AssetPath));
+
+	const FString GraphName = OptionalString(Params, TEXT("graphName"), TEXT("AnimGraph"));
+	UEdGraph* Graph = nullptr;
+	TArray<UEdGraph*> All;
+	AnimBP->GetAllGraphs(All);
+	for (UEdGraph* G : All) { if (G && G->GetName() == GraphName) { Graph = G; break; } }
+	if (!Graph) return MCPError(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+
+	UAnimGraphNode_PoseSearchHistoryCollector* HistNode = NewObject<UAnimGraphNode_PoseSearchHistoryCollector>(Graph);
+	PlaceAnimNode(Graph, HistNode, -300, 0);
+
+	UScriptStruct* NodeStruct = nullptr;
+	void* NodeData = GetAnimNodeMemory(HistNode, NodeStruct);
+	if (NodeStruct && NodeData)
+	{
+		int32 IntVal = 0;
+		if (Params->TryGetNumberField(TEXT("poseCount"), IntVal)) SetNodeInt(NodeStruct, NodeData, TEXT("PoseCount"), IntVal);
+		double Num = 0.0;
+		if (Params->TryGetNumberField(TEXT("samplingInterval"), Num)) SetNodeFloat(NodeStruct, NodeData, TEXT("SamplingInterval"), (float)Num);
+		// Default to self-generated trajectory so no external trajectory pin is required.
+		SetNodeBool(NodeStruct, NodeData, TEXT("bGenerateTrajectory"), OptionalBool(Params, TEXT("generateTrajectory"), true));
+		if (Params->TryGetNumberField(TEXT("trajectoryHistoryCount"), IntVal)) SetNodeInt(NodeStruct, NodeData, TEXT("TrajectoryHistoryCount"), IntVal);
+		if (Params->TryGetNumberField(TEXT("trajectoryPredictionCount"), IntVal)) SetNodeInt(NodeStruct, NodeData, TEXT("TrajectoryPredictionCount"), IntVal);
+	}
+
+	// Insert into the pose chain feeding the output: whatever currently drives the
+	// output pose becomes this node's Source, and this node drives the output.
+	bool bInserted = false;
+	if (OptionalBool(Params, TEXT("insertBeforeOutput"), true))
+	{
+		if (UAnimGraphNode_Root* Root = FindOutputPoseNode(Graph))
+		{
+			UEdGraphPin* RootIn = GetPosePin(Root, EGPD_Input);
+			UEdGraphPin* HistIn = GetPosePin(HistNode, EGPD_Input);
+			UEdGraphPin* HistOut = GetPosePin(HistNode, EGPD_Output);
+			if (RootIn && HistIn && HistOut)
+			{
+				if (RootIn->LinkedTo.Num() > 0)
+				{
+					UEdGraphPin* PrevSource = RootIn->LinkedTo[0];
+					RootIn->BreakAllPinLinks();
+					PrevSource->MakeLinkTo(HistIn);
+				}
+				HistOut->MakeLinkTo(RootIn);
+				bInserted = true;
+			}
+		}
+	}
+
+	FKismetEditorUtilities::CompileBlueprint(AnimBP);
+	SaveAssetPackage(AnimBP);
+
+	TSharedPtr<FJsonObject> Res = MCPSuccess();
+	MCPSetCreated(Res);
+	Res->SetStringField(TEXT("assetPath"), AssetPath);
+	Res->SetStringField(TEXT("graphName"), GraphName);
+	Res->SetStringField(TEXT("nodeGuid"), HistNode->NodeGuid.ToString());
+	Res->SetBoolField(TEXT("insertedBeforeOutput"), bInserted);
 	return MCPResult(Res);
 }
