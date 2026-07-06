@@ -56,7 +56,8 @@ export const animationTool: ToolDef = categoryTool(
     read_bone_track:    bp("Read bone transform samples from AnimSequence. Params: assetPath, boneName, frames?: [int]", "read_bone_track"),
     create_pose_search_database: bp("Create a PoseSearchDatabase asset (motion matching). Params: name, packagePath?, schemaPath?", "create_pose_search_database"),
     set_pose_search_schema:      bp("Set the Schema on an existing PoseSearchDatabase. Params: assetPath, schemaPath", "set_pose_search_schema", (p) => ({ assetPath: p.assetPath, schemaPath: p.schemaPath })),
-    add_pose_search_sequence:    bp("Append an AnimSequence/AnimComposite/AnimMontage/BlendSpace to a PoseSearchDatabase. Params: assetPath, sequencePath", "add_pose_search_sequence", (p) => ({ assetPath: p.assetPath, sequencePath: p.sequencePath })),
+    add_pose_search_sequence:    bp("Append an AnimSequence/AnimComposite/AnimMontage/BlendSpace to a PoseSearchDatabase, with optional per-clip flags. Params: assetPath, sequencePath, mirror? ('original'|'mirrored'|'both'), disableReselection?, sampleStart?, sampleEnd?, enabled? (#684)", "add_pose_search_sequence", (p) => ({ assetPath: p.assetPath, sequencePath: p.sequencePath, mirror: p.mirror, disableReselection: p.disableReselection, sampleStart: p.sampleStart, sampleEnd: p.sampleEnd, enabled: p.enabled })),
+    set_pose_search_clips:       bp("Author the whole clip list of a PoseSearchDatabase in one call (the 'duplicate a stock PSD, swap its clips' pipeline step). Replaces the list by default. Each clip carries per-entry flags. Params: assetPath, clips ([{sequencePath, mirror? ('original'|'mirrored'|'both'), disableReselection?, sampleStart?, sampleEnd?, enabled?}] - a bare string path also works), clearExisting? (default true). Follow with build_pose_search_index (#684)", "set_pose_search_clips", (p) => ({ assetPath: p.assetPath, clips: p.clips, clearExisting: p.clearExisting })),
     build_pose_search_index:     bp("Build (or rebuild) the search index. Params: assetPath, wait? (default true)", "build_pose_search_index", (p) => ({ assetPath: p.assetPath, wait: p.wait })),
     read_pose_search_database:   bp("Inspect a PoseSearchDatabase: schema, animation entries, cost biases, tags. Params: assetPath", "read_pose_search_database", (p) => ({ assetPath: p.assetPath })),
     // v1.0.0-rc.2 — #153, #154 (animation authoring gaps)
@@ -168,6 +169,12 @@ export const animationTool: ToolDef = categoryTool(
     schemaPath: z.string().optional().describe("Path to a UPoseSearchSchema asset"),
     sequencePath: z.string().optional().describe("Animation asset path to add to a PoseSearchDatabase"),
     wait: z.boolean().optional().describe("build_pose_search_index: block until the async build resolves (default true)"),
+    // #684 per-clip flags + bulk clip authoring
+    mirror: z.string().optional().describe("PoseSearch clip mirror option: 'original' | 'mirrored' | 'both'"),
+    disableReselection: z.boolean().optional().describe("PoseSearch clip: disallow reselecting poses from the same asset"),
+    sampleStart: z.number().optional().describe("PoseSearch clip sampling range start (seconds); [0,0] = whole clip"),
+    sampleEnd: z.number().optional().describe("PoseSearch clip sampling range end (seconds); [0,0] = whole clip"),
+    clips: z.array(z.any()).optional().describe("set_pose_search_clips: array of clip entries ({sequencePath, mirror?, disableReselection?, sampleStart?, sampleEnd?, enabled?}) or bare path strings"),
     // #153 / #154
     assetPaths: z.array(z.string()).optional().describe("Asset paths (batch) for set_sequence_properties"),
     properties: z.record(z.any()).optional().describe("Property dict for set_sequence_properties"),

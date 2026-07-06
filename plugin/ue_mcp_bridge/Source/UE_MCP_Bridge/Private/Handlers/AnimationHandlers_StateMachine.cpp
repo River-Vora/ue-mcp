@@ -35,6 +35,7 @@
 #include "PoseSearch/PoseSearchDerivedData.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Animation/AnimComposite.h"
+#include "Animation/AnimSequenceBase.h"
 #include "Animation/BlendSpace.h"
 #include "Animation/Skeleton.h"
 #include "StructUtils/InstancedStruct.h"
@@ -61,8 +62,77 @@ static int32 GetPoseSearchAnimationAssetCount(const UPoseSearchDatabase* Databas
 #endif
 }
 
-static bool AddPoseSearchAnimationAsset(UPoseSearchDatabase* Database, UObject* AnimAsset, FString& OutError)
+// Optional per-clip authoring flags (#684). Each is only applied when set, so a
+// caller can tune one flag without disturbing the rest.
+struct FPoseSearchClipFlags
 {
+	TOptional<bool> bEnabled;
+	TOptional<bool> bDisableReselection;
+	TOptional<EPoseSearchMirrorOption> MirrorOption;
+	TOptional<FFloatInterval> SamplingRange;
+};
+
+// Parse clip flags out of a JSON object (the handler Params for a single add, or
+// a per-entry object for the bulk setter). Recognises: enabled, disableReselection,
+// mirror ("original"|"mirrored"|"both"), sampleStart / sampleEnd (seconds).
+static FPoseSearchClipFlags ParsePoseSearchClipFlags(const TSharedPtr<FJsonObject>& Obj)
+{
+	FPoseSearchClipFlags Flags;
+	bool BoolVal = false;
+	if (Obj->TryGetBoolField(TEXT("enabled"), BoolVal)) Flags.bEnabled = BoolVal;
+	if (Obj->TryGetBoolField(TEXT("disableReselection"), BoolVal)) Flags.bDisableReselection = BoolVal;
+
+	FString Mirror;
+	if (Obj->TryGetStringField(TEXT("mirror"), Mirror))
+	{
+		if (Mirror.Equals(TEXT("mirrored"), ESearchCase::IgnoreCase))
+			Flags.MirrorOption = EPoseSearchMirrorOption::MirroredOnly;
+		else if (Mirror.Equals(TEXT("both"), ESearchCase::IgnoreCase))
+			Flags.MirrorOption = EPoseSearchMirrorOption::UnmirroredAndMirrored;
+		else
+			Flags.MirrorOption = EPoseSearchMirrorOption::UnmirroredOnly;
+	}
+
+	double SampleStart = 0.0, SampleEnd = 0.0;
+	const bool bHasStart = Obj->TryGetNumberField(TEXT("sampleStart"), SampleStart);
+	const bool bHasEnd = Obj->TryGetNumberField(TEXT("sampleEnd"), SampleEnd);
+	if (bHasStart || bHasEnd)
+	{
+		Flags.SamplingRange = FFloatInterval((float)SampleStart, (float)SampleEnd);
+	}
+	return Flags;
+}
+
+#if UE_MCP_HAS_POSESEARCH_DATABASE_ASSET_API
+static void ApplyPoseSearchClipFlags(FPoseSearchDatabaseAnimationAsset& Entry, const FPoseSearchClipFlags& Flags)
+{
+#if WITH_EDITORONLY_DATA
+	if (Flags.bEnabled.IsSet()) Entry.bEnabled = Flags.bEnabled.GetValue();
+	if (Flags.bDisableReselection.IsSet()) Entry.bDisableReselection = Flags.bDisableReselection.GetValue();
+	if (Flags.MirrorOption.IsSet()) Entry.MirrorOption = Flags.MirrorOption.GetValue();
+	if (Flags.SamplingRange.IsSet()) Entry.SamplingRange = Flags.SamplingRange.GetValue();
+#endif
+}
+#endif
+
+static bool AddPoseSearchAnimationAsset(UPoseSearchDatabase* Database, UObject* AnimAsset, const FPoseSearchClipFlags& Flags, FString& OutError)
+{
+	// PoseSearch accepts AnimSequence/Composite/Montage (all UAnimSequenceBase) and BlendSpace.
+	if (!AnimAsset->IsA<UAnimSequenceBase>() && !AnimAsset->IsA<UBlendSpace>())
+	{
+		OutError = FString::Printf(TEXT("Animation asset type not supported by PoseSearch: %s"), *AnimAsset->GetClass()->GetName());
+		return false;
+	}
+
+#if UE_MCP_HAS_POSESEARCH_DATABASE_ASSET_API
+	// UE 5.7+ unified every clip type into FPoseSearchDatabaseAnimationAsset,
+	// which holds any UObject anim asset directly.
+	FPoseSearchDatabaseAnimationAsset Entry;
+	Entry.AnimAsset = AnimAsset;
+	ApplyPoseSearchClipFlags(Entry, Flags);
+	Database->AddAnimationAsset(Entry);
+	return true;
+#else
 	FInstancedStruct NewEntry;
 	if (UAnimSequence* Sequence = Cast<UAnimSequence>(AnimAsset))
 	{
@@ -89,13 +159,9 @@ static bool AddPoseSearchAnimationAsset(UPoseSearchDatabase* Database, UObject* 
 		OutError = FString::Printf(TEXT("Animation asset type not supported by PoseSearch: %s"), *AnimAsset->GetClass()->GetName());
 		return false;
 	}
-
-#if UE_MCP_HAS_POSESEARCH_DATABASE_ASSET_API
-	Database->AddAnimationAsset(MoveTemp(NewEntry));
-#else
 	Database->AnimationAssets.Add(MoveTemp(NewEntry));
-#endif
 	return true;
+#endif
 }
 
 // ─── State Machine Helpers ────────────────────────────────────────
@@ -1254,10 +1320,13 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AddPoseSearchSequence(const TSharedPt
 		return MCPError(FString::Printf(TEXT("Animation asset type not supported by PoseSearch: %s"), *AnimAsset->GetClass()->GetName()));
 	}
 
+	// #684: optional per-clip flags (mirror / disableReselection / samplingRange / enabled).
+	const FPoseSearchClipFlags Flags = ParsePoseSearchClipFlags(Params);
+
 	const int32 PrevCount = GetPoseSearchAnimationAssetCount(Database);
 	Database->Modify();
 	FString AddError;
-	if (!AddPoseSearchAnimationAsset(Database, AnimAsset, AddError))
+	if (!AddPoseSearchAnimationAsset(Database, AnimAsset, Flags, AddError))
 	{
 		return MCPError(AddError);
 	}
@@ -1273,6 +1342,105 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AddPoseSearchSequence(const TSharedPt
 	Res->SetNumberField(TEXT("previousCount"), PrevCount);
 	Res->SetNumberField(TEXT("newCount"), NewCount);
 	Res->SetNumberField(TEXT("addedIndex"), NewCount - 1);
+	return MCPResult(Res);
+}
+
+
+// #684: bulk clip-list authoring. Replaces (or appends to) the whole clip list in
+// one call, with per-entry flags. This is the idiomatic "duplicate a stock PSD,
+// swap its clips" pipeline step that add_pose_search_sequence can only do one clip
+// at a time. Params: assetPath, clips[] ({sequencePath|asset, mirror?,
+// disableReselection?, sampleStart?, sampleEnd?, enabled?}), clearExisting? (default true).
+TSharedPtr<FJsonValue> FAnimationHandlers::SetPoseSearchClips(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+
+	UPoseSearchDatabase* Database = Cast<UPoseSearchDatabase>(UEditorAssetLibrary::LoadAsset(AssetPath));
+	if (!Database) return MCPError(FString::Printf(TEXT("PoseSearchDatabase not found: %s"), *AssetPath));
+
+	const TArray<TSharedPtr<FJsonValue>>* Clips = nullptr;
+	if (!Params->TryGetArrayField(TEXT("clips"), Clips) || !Clips)
+	{
+		return MCPError(TEXT("Missing required parameter 'clips' (array of {sequencePath, mirror?, disableReselection?, sampleStart?, sampleEnd?, enabled?})"));
+	}
+
+	const bool bClearExisting = OptionalBool(Params, TEXT("clearExisting"), true);
+	const int32 PrevCount = GetPoseSearchAnimationAssetCount(Database);
+
+	// Resolve every clip up front so a bad path fails the whole call before mutating.
+	struct FResolvedClip { UObject* Asset; FPoseSearchClipFlags Flags; FString Path; };
+	TArray<FResolvedClip> Resolved;
+	Resolved.Reserve(Clips->Num());
+	for (const TSharedPtr<FJsonValue>& ClipVal : *Clips)
+	{
+		const TSharedPtr<FJsonObject>* ClipObj = nullptr;
+		FString ClipPath;
+		if (ClipVal->TryGetObject(ClipObj) && ClipObj && (*ClipObj).IsValid())
+		{
+			if (!(*ClipObj)->TryGetStringField(TEXT("sequencePath"), ClipPath) &&
+				!(*ClipObj)->TryGetStringField(TEXT("asset"), ClipPath) &&
+				!(*ClipObj)->TryGetStringField(TEXT("assetPath"), ClipPath) &&
+				!(*ClipObj)->TryGetStringField(TEXT("animationPath"), ClipPath))
+			{
+				return MCPError(TEXT("Each clip needs a 'sequencePath' (or 'asset'/'assetPath'/'animationPath')"));
+			}
+		}
+		else if (!ClipVal->TryGetString(ClipPath))
+		{
+			return MCPError(TEXT("Each clip must be an object or an animation asset path string"));
+		}
+
+		UObject* AnimAsset = UEditorAssetLibrary::LoadAsset(ClipPath);
+		if (!AnimAsset) return MCPError(FString::Printf(TEXT("Animation asset not found: %s"), *ClipPath));
+		if (!AnimAsset->IsA<UAnimSequenceBase>() && !AnimAsset->IsA<UBlendSpace>())
+		{
+			return MCPError(FString::Printf(TEXT("Animation asset type not supported by PoseSearch: %s"), *AnimAsset->GetClass()->GetName()));
+		}
+
+		FResolvedClip RC;
+		RC.Asset = AnimAsset;
+		RC.Path = ClipPath;
+		RC.Flags = (ClipObj && (*ClipObj).IsValid()) ? ParsePoseSearchClipFlags(*ClipObj) : FPoseSearchClipFlags();
+		Resolved.Add(MoveTemp(RC));
+	}
+
+	Database->Modify();
+
+#if UE_MCP_HAS_POSESEARCH_DATABASE_ASSET_API
+	if (bClearExisting)
+	{
+		for (int32 i = GetPoseSearchAnimationAssetCount(Database) - 1; i >= 0; --i)
+		{
+			Database->RemoveAnimationAssetAt(i);
+		}
+	}
+#else
+	if (bClearExisting) Database->AnimationAssets.Empty();
+#endif
+
+	TArray<TSharedPtr<FJsonValue>> Added;
+	for (const FResolvedClip& RC : Resolved)
+	{
+		FString AddError;
+		if (!AddPoseSearchAnimationAsset(Database, RC.Asset, RC.Flags, AddError))
+		{
+			return MCPError(AddError);
+		}
+		Added.Add(MakeShared<FJsonValueString>(RC.Asset->GetPathName()));
+	}
+
+	Database->PostEditChange();
+	UEditorAssetLibrary::SaveLoadedAsset(Database);
+
+	TSharedPtr<FJsonObject> Res = MCPSuccess();
+	MCPSetUpdated(Res);
+	Res->SetStringField(TEXT("path"), AssetPath);
+	Res->SetBoolField(TEXT("clearedExisting"), bClearExisting);
+	Res->SetNumberField(TEXT("previousCount"), PrevCount);
+	Res->SetNumberField(TEXT("addedCount"), Added.Num());
+	Res->SetNumberField(TEXT("newCount"), GetPoseSearchAnimationAssetCount(Database));
+	Res->SetArrayField(TEXT("addedAssets"), Added);
 	return MCPResult(Res);
 }
 

@@ -143,6 +143,7 @@ void FAnimationHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("create_pose_search_database"), &CreatePoseSearchDatabase);
 	Registry.RegisterHandler(TEXT("set_pose_search_schema"), &SetPoseSearchSchema);
 	Registry.RegisterHandler(TEXT("add_pose_search_sequence"), &AddPoseSearchSequence);
+	Registry.RegisterHandler(TEXT("set_pose_search_clips"), &SetPoseSearchClips);
 	Registry.RegisterHandler(TEXT("build_pose_search_index"), &BuildPoseSearchIndex);
 	Registry.RegisterHandler(TEXT("read_pose_search_database"), &ReadPoseSearchDatabase);
 

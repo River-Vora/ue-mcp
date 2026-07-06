@@ -103,6 +103,8 @@ private:
 	static TSharedPtr<FJsonValue> CreatePoseSearchDatabase(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetPoseSearchSchema(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AddPoseSearchSequence(const TSharedPtr<FJsonObject>& Params);
+	// #684: bulk clip-list authoring with per-entry flags (mirror/reselection/sampling).
+	static TSharedPtr<FJsonValue> SetPoseSearchClips(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> BuildPoseSearchIndex(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadPoseSearchDatabase(const TSharedPtr<FJsonObject>& Params);
 
