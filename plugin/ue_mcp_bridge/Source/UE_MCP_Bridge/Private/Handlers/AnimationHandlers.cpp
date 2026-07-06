@@ -147,6 +147,16 @@ void FAnimationHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("build_pose_search_index"), &BuildPoseSearchIndex);
 	Registry.RegisterHandler(TEXT("read_pose_search_database"), &ReadPoseSearchDatabase);
 
+	// Motion Matching content pipeline (schema / mirror / normalization / tuning)
+	Registry.RegisterHandler(TEXT("create_pose_search_schema"), &CreatePoseSearchSchema);
+	Registry.RegisterHandler(TEXT("add_pose_search_schema_pose_channel"), &AddPoseSearchSchemaPoseChannel);
+	Registry.RegisterHandler(TEXT("add_pose_search_schema_trajectory_channel"), &AddPoseSearchSchemaTrajectoryChannel);
+	Registry.RegisterHandler(TEXT("read_pose_search_schema"), &ReadPoseSearchSchema);
+	Registry.RegisterHandler(TEXT("create_mirror_data_table"), &CreateMirrorDataTable);
+	Registry.RegisterHandler(TEXT("read_mirror_data_table"), &ReadMirrorDataTable);
+	Registry.RegisterHandler(TEXT("create_pose_search_normalization_set"), &CreatePoseSearchNormalizationSet);
+	Registry.RegisterHandler(TEXT("set_pose_search_database_settings"), &SetPoseSearchDatabaseSettings);
+
 	// #419/#420 — live-actor skeletal reads + rebind + preview (moved from Level)
 	Registry.RegisterHandler(TEXT("get_bone_transform"), &GetBoneTransform);
 	Registry.RegisterHandler(TEXT("list_bones"), &ListBones);

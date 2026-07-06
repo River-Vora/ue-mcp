@@ -108,6 +108,17 @@ private:
 	static TSharedPtr<FJsonValue> BuildPoseSearchIndex(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadPoseSearchDatabase(const TSharedPtr<FJsonObject>& Params);
 
+	// Motion Matching content pipeline: schema, mirror table, normalization set,
+	// database tuning (AnimationHandlers_MotionMatching.cpp).
+	static TSharedPtr<FJsonValue> CreatePoseSearchSchema(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> AddPoseSearchSchemaPoseChannel(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> AddPoseSearchSchemaTrajectoryChannel(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ReadPoseSearchSchema(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> CreateMirrorDataTable(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ReadMirrorDataTable(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> CreatePoseSearchNormalizationSet(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetPoseSearchDatabaseSettings(const TSharedPtr<FJsonObject>& Params);
+
 	// #419/#420 — live-actor skeletal reads + rebind + preview (moved from Level)
 	static TSharedPtr<FJsonValue> GetBoneTransform(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ListBones(const TSharedPtr<FJsonObject>& Params);
