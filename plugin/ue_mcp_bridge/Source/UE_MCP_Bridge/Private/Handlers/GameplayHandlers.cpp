@@ -4,6 +4,12 @@
 #include "HandlerJsonProperty.h"
 #include "HandlerAssetCreate.h"
 #include "EditorScriptingUtilities/Public/EditorAssetLibrary.h"
+#include "Modules/ModuleManager.h"
+#include "StateTree.h"
+#include "StateTreeEditorData.h"
+#include "StateTreeSchema.h"
+#include "StateTreeEditingSubsystem.h"
+#include "StateTreeCompilerLog.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -773,13 +779,74 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreateStateTree(const TSharedPtr<FJson
 	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, TEXT("StateTree"), STClass, nullptr);
 	if (Created.EarlyReturn) return Created.EarlyReturn;
 
-	UEditorAssetLibrary::SaveAsset(Created.Asset->GetPathName());
+	// #653/#681: a bare UStateTree has no EditorData, so every statetree(*)
+	// authoring action failed with "EditorData not found" and nothing could be
+	// persisted. Mirror UStateTreeFactory: attach a UStateTreeEditorData with a
+	// concrete schema and a root state, then compile - so states/tasks are
+	// authorable AND serialize with the asset (survive save/load).
+	UStateTree* StateTree = Cast<UStateTree>(Created.Asset);
+	if (!StateTree)
+	{
+		return MCPError(TEXT("Created asset is not a UStateTree"));
+	}
+
+	if (StateTree->EditorData == nullptr)
+	{
+		// Resolve the schema class (default: actor-component schema). Resolved by
+		// path so no hard GameplayStateTreeModule build dependency is needed.
+		const FString SchemaName = OptionalString(Params, TEXT("schema"),
+			TEXT("/Script/GameplayStateTreeModule.StateTreeComponentSchema"));
+		// The standard actor-component schema lives in GameplayStateTreeModule,
+		// which is not loaded until something uses a StateTreeComponent. Force it
+		// (and the AI variant) so the schema class registers.
+		FModuleManager::Get().LoadModule(TEXT("GameplayStateTreeModule"));
+		UClass* SchemaClass = LoadClass<UStateTreeSchema>(nullptr, *SchemaName);
+		if (!SchemaClass) SchemaClass = FindObject<UClass>(nullptr, *SchemaName);
+		if (!SchemaClass) SchemaClass = FindFirstObjectSafe<UClass>(*SchemaName);
+		if (!SchemaClass)
+		{
+			// Fall back to any concrete, non-abstract StateTreeSchema subclass so
+			// authoring still works even if the named schema is unavailable.
+			for (TObjectIterator<UClass> It; It; ++It)
+			{
+				if (It->IsChildOf(UStateTreeSchema::StaticClass()) &&
+					*It != UStateTreeSchema::StaticClass() &&
+					!It->HasAnyClassFlags(CLASS_Abstract) &&
+					!It->GetName().Contains(TEXT("Test")))
+				{
+					SchemaClass = *It;
+					break;
+				}
+			}
+		}
+		if (!SchemaClass)
+		{
+			return MCPError(FString::Printf(
+				TEXT("StateTree schema class not found: %s (pass 'schema' as a /Script/<Module>.<SchemaClass> path)"), *SchemaName));
+		}
+
+		UStateTreeEditorData* EditorData = NewObject<UStateTreeEditorData>(
+			StateTree, UStateTreeEditorData::StaticClass(), FName(), RF_Transactional);
+		StateTree->EditorData = EditorData;
+		EditorData->Schema = NewObject<UStateTreeSchema>(EditorData, SchemaClass, FName(), RF_Transactional);
+		EditorData->AddRootState();
+
+		FStateTreeCompilerLog Log;
+		UStateTreeEditingSubsystem::CompileStateTree(StateTree, Log);
+		StateTree->MarkPackageDirty();
+	}
+
+	SaveAssetPackage(StateTree);
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
+	Result->SetStringField(TEXT("path"), StateTree->GetPathName());
 	Result->SetStringField(TEXT("name"), Name);
-	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
+	if (UStateTreeEditorData* ED = Cast<UStateTreeEditorData>(StateTree->EditorData))
+	{
+		if (ED->Schema) Result->SetStringField(TEXT("schema"), ED->Schema->GetClass()->GetPathName());
+	}
+	MCPSetDeleteAssetRollback(Result, StateTree->GetPathName());
 
 	return MCPResult(Result);
 }
