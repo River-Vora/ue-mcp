@@ -26,6 +26,8 @@
 #include "UnrealClient.h"
 #include "ContentStreaming.h"
 #include "RenderingThread.h"
+#include "Misc/AutomationTest.h"
+#include "HAL/PlatformProcess.h"
 #include "Slate/SceneViewport.h"
 #include "HAL/PlatformMemory.h"
 #include "Misc/App.h"
@@ -187,6 +189,8 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("list_crashes"), &ListCrashes);
 	Registry.RegisterHandler(TEXT("get_crash_info"), &GetCrashInfo);
 	Registry.RegisterHandler(TEXT("check_for_crashes"), &CheckForCrashes);
+	// #693: headless automation test runner.
+	Registry.RegisterHandlerWithTimeout(TEXT("run_automation_tests"), &RunAutomationTests, 300.0f);
 	// #14: Build project
 	Registry.RegisterHandler(TEXT("build_project"), &BuildProject);
 	// #49: Generate project files
@@ -1930,5 +1934,80 @@ TSharedPtr<FJsonValue> FEditorHandlers::ListFunctionLibraries(const TSharedPtr<F
 	Result->SetArrayField(TEXT("libraries"), Libraries);
 	Result->SetNumberField(TEXT("count"), Libraries.Num());
 	if (!Pattern.IsEmpty()) Result->SetStringField(TEXT("pattern"), Pattern);
+	return MCPResult(Result);
+}
+
+// ─── #693 run_automation_tests ──────────────────────────────────────
+// Headlessly run registered Automation tests whose name matches a filter and
+// report pass/fail + errors. Uses FAutomationTestFramework's synchronous
+// StartTestByName/StopTest, which fully runs non-latent tests. Latent tests
+// (that enqueue cross-frame commands) have their queued commands flushed on a
+// best-effort tick loop with a timeout.
+TSharedPtr<FJsonValue> FEditorHandlers::RunAutomationTests(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString NameFilter = OptionalString(Params, TEXT("filter"));
+	const int32 MaxTests = OptionalInt(Params, TEXT("maxTests"), 50);
+
+	FAutomationTestFramework& Framework = FAutomationTestFramework::Get();
+	Framework.SetRequestedTestFilter(EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter |
+		EAutomationTestFlags::SmokeFilter | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::ClientContext);
+
+	TArray<FAutomationTestInfo> AllTests;
+	Framework.GetValidTestNames(AllTests);
+
+	TArray<TSharedPtr<FJsonValue>> Results;
+	int32 Ran = 0, Passed = 0, Failed = 0;
+	for (const FAutomationTestInfo& Info : AllTests)
+	{
+		const FString TestName = Info.GetTestName();
+		const FString DisplayName = Info.GetDisplayName();
+		if (!NameFilter.IsEmpty() &&
+			!TestName.Contains(NameFilter) && !DisplayName.Contains(NameFilter))
+		{
+			continue;
+		}
+		if (Ran >= MaxTests) break;
+
+		Framework.StartTestByName(TestName, /*RoleIndex*/ 0);
+
+		// Flush latent commands (best effort, bounded) so latent tests finish.
+		int32 Guard = 0;
+		while (!Framework.ExecuteLatentCommands() && Guard++ < 1000)
+		{
+			FPlatformProcess::Sleep(0.0f);
+		}
+
+		FAutomationTestExecutionInfo ExecInfo;
+		const bool bPassed = Framework.StopTest(ExecInfo);
+		++Ran;
+		if (bPassed) ++Passed; else ++Failed;
+
+		TSharedPtr<FJsonObject> R = MakeShared<FJsonObject>();
+		R->SetStringField(TEXT("test"), DisplayName.IsEmpty() ? TestName : DisplayName);
+		R->SetBoolField(TEXT("passed"), bPassed);
+		R->SetNumberField(TEXT("errors"), ExecInfo.GetErrorTotal());
+		R->SetNumberField(TEXT("warnings"), ExecInfo.GetWarningTotal());
+		if (ExecInfo.GetErrorTotal() > 0)
+		{
+			TArray<TSharedPtr<FJsonValue>> ErrMsgs;
+			for (const FAutomationExecutionEntry& Entry : ExecInfo.GetEntries())
+			{
+				if (Entry.Event.Type == EAutomationEventType::Error)
+				{
+					ErrMsgs.Add(MakeShared<FJsonValueString>(Entry.Event.Message));
+				}
+			}
+			R->SetArrayField(TEXT("errorMessages"), ErrMsgs);
+		}
+		Results.Add(MakeShared<FJsonValueObject>(R));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("filter"), NameFilter);
+	Result->SetNumberField(TEXT("discovered"), AllTests.Num());
+	Result->SetNumberField(TEXT("ran"), Ran);
+	Result->SetNumberField(TEXT("passed"), Passed);
+	Result->SetNumberField(TEXT("failed"), Failed);
+	Result->SetArrayField(TEXT("results"), Results);
 	return MCPResult(Result);
 }

@@ -142,6 +142,8 @@ const PARAM_OVERRIDES = {
   build_project:               { dryRun: true },
   read_editor_log:             { tailLines: 1 },
   get_crash_reports:           { maxReports: 1 },
+  // Discover-only: a no-match filter so smoke doesn't actually run a test suite.
+  run_automation_tests:        { filter: "__smoke_no_match__", maxTests: 0 },
 };
 
 // Handlers the smoke sweep must NOT invoke: they trigger Live Coding, which

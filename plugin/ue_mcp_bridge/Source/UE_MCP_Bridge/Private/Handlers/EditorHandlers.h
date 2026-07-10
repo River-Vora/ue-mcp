@@ -157,6 +157,8 @@ private:
 	static TSharedPtr<FJsonValue> ListCrashes(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetCrashInfo(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CheckForCrashes(const TSharedPtr<FJsonObject>& Params);
+	// #693: headlessly run registered Automation tests and report pass/fail.
+	static TSharedPtr<FJsonValue> RunAutomationTests(const TSharedPtr<FJsonObject>& Params);
 	// #14: Build project
 	static TSharedPtr<FJsonValue> BuildProject(const TSharedPtr<FJsonObject>& Params);
 	// #49: Generate project files
