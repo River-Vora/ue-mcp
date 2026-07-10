@@ -200,6 +200,7 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("get_pie_config"), &GetPieConfig);
 	Registry.RegisterHandler(TEXT("pie_set_player_view"), &PieSetPlayerView);
 	Registry.RegisterHandler(TEXT("stage_game_input"), &StageGameInput);
+	Registry.RegisterHandler(TEXT("invoke_function_repeating"), &InvokeFunctionRepeating);
 	// #455: discover UBlueprintFunctionLibrary classes (GeometryScript,
 	// Kismet, anything user-defined). Pair with editor.invoke_function to
 	// drive GeometryScript ops from MCP without hand-writing each handler.

@@ -8,6 +8,7 @@
 #include "HandlerUtils.h"
 #include "HandlerJsonProperty.h"
 #include "JsonSerializer.h"
+#include "Containers/Ticker.h"
 #include "Editor.h"
 #include "Editor/EditorEngine.h"
 #include "Engine/World.h"
@@ -1302,6 +1303,64 @@ TSharedPtr<FJsonValue> FEditorHandlers::StageGameInput(const TSharedPtr<FJsonObj
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("inputMode"), Mode);
 	Result->SetBoolField(TEXT("showMouseCursor"), bShowCursor);
+	return MCPResult(Result);
+}
+
+// #583: fire a parameterless UFUNCTION on an actor repeatedly at an interval
+// for sustained on-demand triggering (human visual verification). Returns
+// immediately; a game-thread ticker drives the remaining calls in the
+// background and unregisters itself when the count is exhausted or the actor
+// goes away.
+TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunctionRepeating(const TSharedPtr<FJsonObject>& Params)
+{
+	FString FunctionName;
+	if (auto Err = RequireString(Params, TEXT("functionName"), FunctionName)) return Err;
+	FString ActorLabel;
+	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+
+	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("auto")).ToLower();
+	UWorld* World = ResolveWorldScope(WorldScope);
+	if (!World) return MCPError(TEXT("World not available"));
+
+	AActor* Target = FindActorByLabelNameOrPath(World, ActorLabel);
+	if (!Target) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+
+	UFunction* Func = Target->FindFunction(FName(*FunctionName));
+	if (!Func) return MCPError(FString::Printf(TEXT("Function '%s' not found on '%s'"), *FunctionName, *Target->GetClass()->GetName()));
+	if (Func->NumParms != 0) return MCPError(FString::Printf(TEXT("Function '%s' takes parameters; only parameterless functions are supported for repeating invoke"), *FunctionName));
+
+	const double Interval = FMath::Max(0.05, OptionalNumber(Params, TEXT("intervalSeconds"), 1.0));
+	const int32 Count = FMath::Clamp(OptionalInt(Params, TEXT("count"), 5), 1, 10000);
+
+	// Fire once immediately, then schedule the rest.
+	Target->ProcessEvent(Func, nullptr);
+	int32 Remaining = Count - 1;
+
+	if (Remaining > 0)
+	{
+		TWeakObjectPtr<AActor> WeakActor(Target);
+		const FString FnName = FunctionName;
+		TSharedRef<int32> RemainingRef = MakeShared<int32>(Remaining);
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
+			[WeakActor, FnName, RemainingRef](float) -> bool
+			{
+				AActor* A = WeakActor.Get();
+				if (!A) return false; // actor gone -> stop
+				if (UFunction* F = A->FindFunction(FName(*FnName)))
+				{
+					A->ProcessEvent(F, nullptr);
+				}
+				(*RemainingRef)--;
+				return (*RemainingRef) > 0; // continue until exhausted
+			}), (float)Interval);
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("actorLabel"), Target->GetActorLabel());
+	Result->SetStringField(TEXT("functionName"), FunctionName);
+	Result->SetNumberField(TEXT("count"), Count);
+	Result->SetNumberField(TEXT("intervalSeconds"), Interval);
+	Result->SetStringField(TEXT("note"), TEXT("Fired once now; remaining calls run in the background at the interval."));
 	return MCPResult(Result);
 }
 
