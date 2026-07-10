@@ -2041,9 +2041,11 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorBounds(const TSharedPtr<FJsonObje
 	FString ActorLabel;
 	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
 
-	REQUIRE_EDITOR_WORLD(World);
+	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
+	UWorld* World = ResolveWorldScope(WorldScope);
+	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
-	AActor* Actor = FindActorByLabel(World, ActorLabel);
+	AActor* Actor = FindActorByLabelNameOrPath(World, ActorLabel);
 	if (!Actor)
 	{
 		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
@@ -2051,7 +2053,21 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorBounds(const TSharedPtr<FJsonObje
 
 	FVector Origin;
 	FVector Extent;
-	Actor->GetActorBounds(false, Origin, Extent);
+	const bool bOnlyColliding = OptionalBool(Params, TEXT("onlyColliding"), false);
+	// #677: GetActorBounds(false) returns a degenerate box for skeletal-mesh
+	// actors whose component bounds aren't primed. GetComponentsBoundingBox
+	// (non-colliding=true) aggregates every primitive component's real bounds,
+	// which is robust for skinned meshes.
+	FBox Box = Actor->GetComponentsBoundingBox(/*bNonColliding*/ !bOnlyColliding, /*bIncludeFromChildActors*/ true);
+	if (Box.IsValid)
+	{
+		Origin = Box.GetCenter();
+		Extent = Box.GetExtent();
+	}
+	else
+	{
+		Actor->GetActorBounds(bOnlyColliding, Origin, Extent);
+	}
 
 	TSharedPtr<FJsonObject> OriginObj = MakeShared<FJsonObject>();
 	OriginObj->SetNumberField(TEXT("x"), Origin.X);
