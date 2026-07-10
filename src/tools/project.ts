@@ -6,6 +6,8 @@ import { deploy, deploySummary, findEngineInstall } from "../deployer.js";
 import { resolveConfigPath, findIniFiles, parseIni, buildTagTree } from "../config-parser.js";
 import { parseHeader, collectFiles, findSourceRoots, resolveModuleDir } from "../cpp-parser.js";
 import { readDeployedBridgeApiVersion } from "../plugin/bridge-api.js";
+import { searchTools, type ToolSearchHit } from "../tool-search.js";
+import { getWorkarounds } from "../workaround-tracker.js";
 
 /**
  * Resolve a module name to its Source/<Module> directory, searching the project
@@ -350,36 +352,38 @@ export const projectTool: ToolDef = categoryTool(
       },
     },
     search_tools: {
-      description: "Search every ue-mcp tool + action by keyword and return the best matches (tool, action, description, score) - the first step to find a dedicated action before falling back to editor(execute_python). 30 of recent feature requests asked for actions that already existed; search here first. Params: query (space-separated keywords), limit? (default 20) (#704)",
-      handler: async (ctx, p) => {
-        const query = ((p.query as string) ?? "").toLowerCase().trim();
-        if (!query) throw new Error("Missing 'query'");
-        const terms = query.split(/\s+/).filter(Boolean);
-        const limit = (p.limit as number) ?? 20;
-        // Dynamic import avoids a load-time circular dependency (tools.ts imports
-        // this project tool). ALL_TOOLS is the full category-tool registry.
-        const { ALL_TOOLS } = await import("../tools.js");
-        const matches: Array<{ tool: string; action: string; description: string; score: number }> = [];
-        for (const tool of ALL_TOOLS as Array<{ name: string; description?: string; actions?: Record<string, { description?: string }> }>) {
-          for (const [actionName, spec] of Object.entries(tool.actions ?? {})) {
-            const desc = spec?.description ?? "";
-            const hay = `${tool.name} ${actionName} ${desc}`.toLowerCase();
-            let score = 0;
-            for (const t of terms) {
-              if (actionName.toLowerCase().includes(t)) score += 3;   // name hit weighs most
-              else if (hay.includes(t)) score += 1;
-            }
-            // Whole-query phrase bonus.
-            if (hay.includes(query)) score += 2;
-            if (score > 0) matches.push({ tool: tool.name, action: actionName, description: desc, score });
-          }
-        }
-        matches.sort((a, b) => b.score - a.score);
+      description: "Search every ue-mcp tool + action by keyword or task INTENT (a synonym layer maps 'screenshot'->capture_scene_png, 'tile a texture'->the texture-bomb flow, etc.) and return ranked matches (tool, action, description, score). The first step before editor(execute_python); most tasks already have a dedicated action. Params: query (space-separated keywords/intent), limit? (default 20) (#704)",
+      handler: async (_ctx, p) => {
+        const query = (p.query as string) ?? "";
+        if (!query.trim()) throw new Error("Missing 'query'");
+        const results = await searchTools(query, (p.limit as number) ?? 20);
         return {
           query,
-          resultCount: matches.length,
-          results: matches.slice(0, limit),
-          hint: matches.length === 0 ? "No dedicated action matched. Only then consider editor(execute_python)." : undefined,
+          resultCount: results.length,
+          results,
+          hint: results.length === 0 ? "No dedicated action matched. Only then consider editor(execute_python)." : undefined,
+        };
+      },
+    },
+    execute_python_report: {
+      description: "Measurement for #704: reads this session's execute_python calls and, for each, runs its taskSummary back through search_tools to flag calls that OVERLAPPED an existing dedicated action ('you used Python for X, but tool Y does X'). Returns totalCalls, overlapping[] and an overlapRate. Params: none (#704)",
+      handler: async () => {
+        const entries = getWorkarounds();
+        const overlapping: Array<{ taskSummary: string; suggestion: ToolSearchHit; codeSnippet: string }> = [];
+        for (const e of entries) {
+          const q = (e.taskSummary ?? "").trim();
+          if (!q) continue;
+          const hits = await searchTools(q, 1);
+          if (hits.length > 0 && hits[0].score >= 4) {
+            overlapping.push({ taskSummary: q, suggestion: hits[0], codeSnippet: e.code.slice(0, 120) });
+          }
+        }
+        return {
+          totalCalls: entries.length,
+          withTaskSummary: entries.filter((e) => (e.taskSummary ?? "").trim()).length,
+          overlappingCount: overlapping.length,
+          overlapRate: entries.length ? +(overlapping.length / entries.length).toFixed(2) : 0,
+          overlapping,
         };
       },
     },

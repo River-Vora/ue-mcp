@@ -2,6 +2,7 @@ import { z } from "zod";
 import { categoryTool, bp, directive, type ToolDef, type ToolContext } from "../types.js";
 import { startEditor, stopEditor, restartEditor, buildProject } from "../editor-control.js";
 import { pushWorkaround, workaroundCount } from "../workaround-tracker.js";
+import { searchTools } from "../tool-search.js";
 import { Vec3, Rotator } from "../schemas.js";
 
 export const editorTool: ToolDef = categoryTool(
@@ -43,9 +44,47 @@ export const editorTool: ToolDef = categoryTool(
     },
     execute_command: bp("Run console command. Params: command", "execute_command"),
     execute_python: {
-      description: "LAST RESORT ONLY - run arbitrary Python in the editor when NO dedicated action exists. It bypasses the bridge's validation/permissions/logging and is slower and less reproducible. Before using it, call project(search_tools, query=...) to find a dedicated action - most tasks (asset import, level/actor edits, blueprint/material/widget authoring, reflection, PIE control) already have one. Params: code",
+      description: "GATED LAST RESORT. execute_python is unreachable until a semantic tool search over your taskSummary has been run AND every candidate it returns is EXPLICITLY ruled out with a stated reason. Flow: (1) call with taskSummary (+code) - it returns the candidate actions; (2) re-call with the same taskSummary/code PLUS ruledOut=[{action, reason}] giving a specific reason each candidate does not fit. Python runs only once every candidate is ruled out. Params: code, taskSummary (required), ruledOut? (#704)",
       handler: async (ctx: ToolContext, params: Record<string, unknown>) => {
         const code = (params.code as string) ?? "";
+        const taskSummary = ((params.taskSummary as string) ?? "").trim();
+
+        // #704: hard gate. Require an intent statement, run the semantic search,
+        // and refuse to run Python until EVERY candidate action is explicitly
+        // ruled out with a stated reason.
+        if (!taskSummary) {
+          return {
+            blocked: true,
+            reason: "missing_task_summary",
+            message: "execute_python requires a 'taskSummary' (plain-words intent). It is searched against the tool registry and gated behind ruling out every candidate. Re-call with taskSummary.",
+          };
+        }
+
+        // Candidates = meaningful matches (a name/phrase hit), capped at 5.
+        const candidates = (await searchTools(taskSummary, 5)).filter((h) => h.score >= 4);
+        if (candidates.length > 0) {
+          const ruledRaw = Array.isArray(params.ruledOut) ? (params.ruledOut as Array<Record<string, unknown>>) : [];
+          const ruled = new Map<string, string>();
+          for (const r of ruledRaw) {
+            const action = String(r?.action ?? "").trim();
+            const reason = String(r?.reason ?? "").trim();
+            if (action && reason.length >= 12) ruled.set(action, reason); // non-trivial reason required
+          }
+          const unresolved = candidates.filter((c) => !ruled.has(c.action));
+          if (unresolved.length > 0) {
+            pushWorkaround({ code, timestamp: new Date().toISOString(), taskSummary, suggestedTool: candidates.map((c) => `${c.tool}(${c.action})`).join(", ") });
+            return {
+              blocked: true,
+              reason: "candidates_not_ruled_out",
+              taskSummary,
+              candidates,
+              needReasonFor: unresolved.map((c) => `${c.tool}(${c.action})`),
+              message: `execute_python is GATED. A tool search for "${taskSummary}" returned ${candidates.length} candidate action(s). Rule out EACH with a specific reason (>=12 chars) via ruledOut:[{action, reason}], then re-call. Still need a reason for: ${unresolved.map((c) => c.action).join(", ")}. If one of these actually does the task, call it instead of Python.`,
+            };
+          }
+        }
+
+        // Gate passed (no candidates, or every candidate ruled out) - run Python.
         const result = await ctx.bridge.call("execute_python", { code });
 
         // Track this workaround in memory, and side-channel to a tmp log so
@@ -53,7 +92,7 @@ export const editorTool: ToolDef = categoryTool(
         const snippet = typeof result === "object" && result !== null
           ? JSON.stringify(result).slice(0, 200)
           : String(result).slice(0, 200);
-        const entry = { code, timestamp: new Date().toISOString(), resultSnippet: snippet };
+        const entry = { code, timestamp: new Date().toISOString(), resultSnippet: snippet, taskSummary };
         pushWorkaround(entry);
         try {
           const os = await import("node:os");
@@ -169,6 +208,8 @@ export const editorTool: ToolDef = categoryTool(
   {
     command: z.string().optional(),
     code: z.string().optional(),
+    taskSummary: z.string().optional().describe("execute_python: plain-words intent, searched against the tool registry to gate the call (#704)"),
+    ruledOut: z.array(z.object({ action: z.string(), reason: z.string() })).optional().describe("execute_python: reason each searched candidate action does not fit; every candidate must be ruled out before Python runs (#704)"),
     filePath: z.string().optional().describe("Absolute path to a .py file for run_python_file"),
     args: z.union([
       z.array(z.string()),
