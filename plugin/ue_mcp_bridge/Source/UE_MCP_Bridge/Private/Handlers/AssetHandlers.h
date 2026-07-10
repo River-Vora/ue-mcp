@@ -54,6 +54,9 @@ private:
 	// FBX import handlers
 	static TSharedPtr<FJsonValue> ImportStaticMesh(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ImportSkeletalMesh(const TSharedPtr<FJsonObject>& Params);
+	// #595: read/write Chaos cloth data on a skeletal mesh's clothing assets.
+	static TSharedPtr<FJsonValue> ReadClothData(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetClothConfig(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ImportAnimation(const TSharedPtr<FJsonObject>& Params);
 
 	// Mesh material handlers

@@ -257,6 +257,9 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("get_asset_referencers"), &GetReferencers);
 	Registry.RegisterHandler(TEXT("get_asset_dependencies"), &GetDependencies);
 	Registry.RegisterHandler(TEXT("list_skeleton_bones"), &ListSkeletonBones);
+	// #595: Chaos cloth read/write.
+	Registry.RegisterHandler(TEXT("read_cloth_data"), &ReadClothData);
+	Registry.RegisterHandler(TEXT("set_cloth_config"), &SetClothConfig);
 	Registry.RegisterHandler(TEXT("get_primary_asset_ids"), &GetPrimaryAssetIds);
 
 	// v1.0.0-rc.2 — #155 (asset gaps)
