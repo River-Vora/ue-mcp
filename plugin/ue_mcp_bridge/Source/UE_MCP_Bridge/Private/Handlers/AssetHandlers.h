@@ -66,6 +66,9 @@ private:
 	static TSharedPtr<FJsonValue> ListTextureProperties(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetTextureProperties(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ImportTexture(const TSharedPtr<FJsonObject>& Params);
+	// #697: export a texture to PNG on disk, and compare two textures.
+	static TSharedPtr<FJsonValue> ExportTexture(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> CompareTextures(const TSharedPtr<FJsonObject>& Params);
 	// #430: one-call batch of texture imports - loops AssetImportTasks inside the editor.
 	static TSharedPtr<FJsonValue> ImportTextureBatch(const TSharedPtr<FJsonObject>& Params);
 

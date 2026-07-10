@@ -2596,3 +2596,81 @@ TSharedPtr<FJsonValue> FAssetHandlers::ExportAsset(const TSharedPtr<FJsonObject>
 // ─── #150 asset(get_referencers) ────────────────────────────────────
 // Reverse dependency lookup per package. Feeds the common "what uses this
 // texture / material?" question without dropping into Python.
+
+// #697: export a Texture2D to a PNG on disk (UTextureExporterPNG, auto-found
+// from the .png extension). Lets a look-dev workflow pull a texture out for
+// inspection or external diffing.
+TSharedPtr<FJsonValue> FAssetHandlers::ExportTexture(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
+	FString OutputPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("outputPath"), TEXT("filePath"), OutputPath)) return Err;
+
+	UTexture2D* Texture = Cast<UTexture2D>(UEditorAssetLibrary::LoadAsset(AssetPath));
+	if (!Texture) return MCPError(FString::Printf(TEXT("Texture2D not found: %s"), *AssetPath));
+
+	FString AbsPath = OutputPath;
+	if (FPaths::IsRelative(AbsPath)) AbsPath = FPaths::Combine(FPaths::ProjectDir(), AbsPath);
+	if (!AbsPath.EndsWith(TEXT(".png"))) AbsPath += TEXT(".png");
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(AbsPath), /*Tree*/ true);
+
+	UAssetExportTask* Task = NewObject<UAssetExportTask>();
+	FGCRootScope TaskRoot(Task);
+	Task->Object = Texture;
+	Task->Filename = AbsPath;
+	Task->bAutomated = true;
+	Task->bPrompt = false;
+	Task->bReplaceIdentical = true;
+	const bool bOk = UExporter::RunAssetExportTask(Task);
+	const int64 Size = IFileManager::Get().FileSize(*AbsPath);
+	if (!bOk || Size < 0) return MCPError(FString::Printf(TEXT("Texture export failed for %s"), *AssetPath));
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetStringField(TEXT("assetPath"), AssetPath);
+	Result->SetStringField(TEXT("path"), AbsPath);
+	Result->SetNumberField(TEXT("width"), Texture->GetSizeX());
+	Result->SetNumberField(TEXT("height"), Texture->GetSizeY());
+	Result->SetNumberField(TEXT("sizeBytes"), (double)Size);
+	return MCPResult(Result);
+}
+
+// #697: compare two textures by dimensions, pixel format, and source content
+// identity (FTextureSource::GetIdString) so a look-dev workflow can tell
+// whether an authored texture actually changed without pixel-diffing offline.
+TSharedPtr<FJsonValue> FAssetHandlers::CompareTextures(const TSharedPtr<FJsonObject>& Params)
+{
+	FString PathA, PathB;
+	if (auto Err = RequireStringAlt(Params, TEXT("assetPathA"), TEXT("a"), PathA)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("assetPathB"), TEXT("b"), PathB)) return Err;
+
+	UTexture2D* A = Cast<UTexture2D>(UEditorAssetLibrary::LoadAsset(PathA));
+	UTexture2D* B = Cast<UTexture2D>(UEditorAssetLibrary::LoadAsset(PathB));
+	if (!A) return MCPError(FString::Printf(TEXT("Texture2D not found: %s"), *PathA));
+	if (!B) return MCPError(FString::Printf(TEXT("Texture2D not found: %s"), *PathB));
+
+	const bool bSameDims = A->GetSizeX() == B->GetSizeX() && A->GetSizeY() == B->GetSizeY();
+	const bool bSameFormat = A->GetPixelFormat() == B->GetPixelFormat();
+#if WITH_EDITORONLY_DATA
+	const FString IdA = A->Source.GetIdString();
+	const FString IdB = B->Source.GetIdString();
+	const bool bSameSource = (IdA == IdB);
+#else
+	const FString IdA, IdB; const bool bSameSource = false;
+#endif
+	const bool bIdentical = bSameDims && bSameFormat && bSameSource;
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("assetPathA"), PathA);
+	Result->SetStringField(TEXT("assetPathB"), PathB);
+	Result->SetBoolField(TEXT("identical"), bIdentical);
+	Result->SetBoolField(TEXT("sameDimensions"), bSameDims);
+	Result->SetBoolField(TEXT("sameFormat"), bSameFormat);
+	Result->SetBoolField(TEXT("sameSourceContent"), bSameSource);
+	Result->SetNumberField(TEXT("widthA"), A->GetSizeX());
+	Result->SetNumberField(TEXT("heightA"), A->GetSizeY());
+	Result->SetNumberField(TEXT("widthB"), B->GetSizeX());
+	Result->SetNumberField(TEXT("heightB"), B->GetSizeY());
+	return MCPResult(Result);
+}
