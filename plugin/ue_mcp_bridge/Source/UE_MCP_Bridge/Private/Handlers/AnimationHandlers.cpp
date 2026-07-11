@@ -104,6 +104,7 @@ void FAnimationHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("add_transition"), &AddTransition);
 	Registry.RegisterHandler(TEXT("set_state_animation"), &SetStateAnimation);
 	Registry.RegisterHandler(TEXT("set_transition_blend"), &SetTransitionBlend);
+	Registry.RegisterHandler(TEXT("set_transition_condition"), &SetTransitionCondition);
 	Registry.RegisterHandler(TEXT("read_state_machine"), &ReadStateMachine);
 
 	// AnimGraph inspection (#23 / #91)
@@ -1128,6 +1129,13 @@ TSharedPtr<FJsonValue> FAnimationHandlers::PopulateBlendspace(const TSharedPtr<F
 		}
 	}
 
+	// #710: rebuild BlendSpaceData (Segments/Triangles). Without this the
+	// blendspace is un-triangulated and a BlendSpacePlayer outputs the ref
+	// pose at runtime until the asset is opened in the editor (which calls
+	// ResampleData itself). Bare PostEditChange does NOT rebuild triangulation.
+	BS->ResampleData();
+	BS->ValidateSampleData();
+
 	BS->PostEditChange();
 	BS->MarkPackageDirty();
 	UEditorAssetLibrary::SaveLoadedAsset(BS, /*bOnlyIfIsDirty*/ true);
@@ -1187,6 +1195,9 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AddBlendSample(const TSharedPtr<FJson
 			TEXT("BlendSpace::AddSample rejected position (%.3f, %.3f) - check axis ranges via read_blendspace."),
 			PosX, PosY));
 	}
+	// #710: retriangulate so the sample is usable at runtime without a manual editor open.
+	BlendSpace->ResampleData();
+	BlendSpace->ValidateSampleData();
 	BlendSpace->PostEditChange();
 	SaveAssetPackage(BlendSpace);
 
@@ -1279,6 +1290,9 @@ TSharedPtr<FJsonValue> FAnimationHandlers::SetBlendSample(const TSharedPtr<FJson
 		return MCPError(TEXT("Nothing to update - provide position {x,y} and/or animation"));
 	}
 
+	// #710: retriangulate so the edited sample interpolates at runtime.
+	BlendSpace->ResampleData();
+	BlendSpace->ValidateSampleData();
 	BlendSpace->PostEditChange();
 	SaveAssetPackage(BlendSpace);
 
