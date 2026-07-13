@@ -60,6 +60,11 @@ nav:
   - Flows: flows.md
   - Plugins:
     - plugins.md
+    - Using: plugins-using.md
+    - Authoring: plugins-authoring.md
+    - Native Modules: plugins-native-modules.md
+    - Guards: plugins-guards.md
+    - Troubleshooting: plugins-troubleshooting.md
     - PIE Studio: pie-record-replay.md
   - Configuration: configuration.md
   - Neon Shrine Demo: neon-shrine-demo.md
