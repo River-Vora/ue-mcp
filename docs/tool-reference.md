@@ -540,16 +540,74 @@ UE-MCP exposes **<!-- count:tools -->23<!-- /count --> category tools** covering
 
 ## audio
 
-*Audio: sound assets, playback, ambient sounds, SoundCues, MetaSounds.*
+*Audio: the full UE5 audio stack authored end-to-end - sound assets, playback, MetaSound + SoundCue graph authoring, submixes and effect chains, sound classes/mixes, concurrency, attenuation, and spatialization. Nothing here creates an empty placeholder; every asset is authorable to a working state.*
+
+### Assets and playback
 
 | Action | Description |
 |--------|-------------|
-| `list` | List sound assets. Params: `directory?, recursive?` |
-| `import_audio` | Import a WAV/OGG/FLAC file as a USoundWave. Returns durationSeconds, numChannels, looping. Params: `filePath, name?, packagePath? (default /Game/Audio), looping?, replaceExisting? (default true) (#664)` |
-| `play_at_location` | Play sound. Params: `soundPath, location, volumeMultiplier?, pitchMultiplier?` |
-| `spawn_ambient` | Place ambient sound. Params: `soundPath, location, label?` |
-| `create_cue` | Create SoundCue. Params: `name, packagePath?, soundWavePath?` |
-| `create_metasound` | Create MetaSoundSource. Params: `name, packagePath?` |
+| `list` | List sound assets (SoundWave, SoundCue, MetaSoundSource). Params: `directory?, recursive?` |
+| `import_audio` | Import a WAV/OGG/FLAC file as a USoundWave. Returns durationSeconds, numChannels, looping. Params: `filePath, name?, packagePath? (default /Game/Audio), looping?, replaceExisting? (default true)` |
+| `play_at_location` | Play a sound in the editor world. Params: `soundPath, location, volumeMultiplier?, pitchMultiplier?` |
+| `spawn_ambient` | Place an AmbientSound actor. Params: `soundPath, location, label?` |
+
+### MetaSound graph authoring
+
+Prefer `metasound_author` - it stamps a whole graph in one call. The granular actions are for incremental edits to a graph created with `create_metasound` in the same editor session.
+
+| Action | Description |
+|--------|-------------|
+| `metasound_author` | **One-shot: stamp a whole MetaSound graph from a declarative spec.** Params: `name, packagePath?, format? (mono\|stereo), oneShot?, inputs? [{name,dataType,default?}], outputs? [{name,dataType}], nodes? [{id,class,namespace?,variant?,majorVersion?,inputs?}], connections? [{from,to}]`. Connection endpoints are `nodeId:vertex`, or the special heads `input:<name>`, `output:<name>`, `audioOut:<channel>`. Each element reports its own ok/error; builds and saves at the end. |
+| `create_metasound` | Create an empty MetaSoundSource and open a builder session for incremental authoring. Params: `name, packagePath? (default /Game/Audio/MetaSounds), format?, oneShot?` |
+| `metasound_add_node` | Add a node by registered class name. Params: `assetPath, nodeClassName, nodeNamespace? (default UE), nodeVariant?, majorVersion?` |
+| `metasound_add_input` / `metasound_add_output` | Add a graph input/output. Params: `assetPath, name, dataType, defaultValue?` |
+| `metasound_connect` | Connect node output vertex to node input vertex. Params: `assetPath, fromNodeId, fromOutput, toNodeId, toInput` |
+| `metasound_connect_input` / `metasound_connect_output` / `metasound_connect_audio_out` | Connect a graph input to a node, a node to a graph output, or a node to the source audio output (`channel?`). |
+| `metasound_set_default` | Set a default on a node input or graph input. Params: `assetPath, value, dataType?, (nodeId + inputName) or graphInput` |
+| `metasound_build` | Write the builder document to the asset and save. Params: `assetPath` |
+| `metasound_list_node_classes` | List common MetaSound node classes to add. Params: `filter?` |
+| `metasound_get_graph` | Report a MetaSound's builder-session state. Params: `assetPath` |
+
+### SoundCue graph authoring
+
+| Action | Description |
+|--------|-------------|
+| `cue_author` | **One-shot: create a SoundCue and stamp its whole node tree.** Params: `name, packagePath?, nodes [{id,type,soundWavePath?,properties?}], connections [{parent,child,index?}] (omit parent => root), root?`. Node types: wave_player, mixer, random, modulator, attenuation, looping, concatenator, delay, switch. |
+| `create_cue` | Create a SoundCue, optionally seeded from a wave. Params: `name, packagePath?, soundWavePath?` |
+| `cue_add_node` | Add a node to a cue graph. Params: `cuePath, nodeType, soundWavePath?, properties?` |
+| `cue_connect` | Connect a node as a child of another (or as root). Params: `cuePath, parentNodeId?, childNodeId, childIndex?` |
+| `cue_get_graph` | Read a cue node graph. Params: `cuePath` |
+
+### Mixing, routing, and spatialization
+
+| Action | Description |
+|--------|-------------|
+| `create_submix` | Create a USoundSubmix, optionally parented. Params: `name, packagePath?, parentPath?, outputVolume?, wetLevel?, dryLevel?` |
+| `set_submix_parent` | Reparent a submix. Params: `submixPath, parentPath (empty detaches)` |
+| `add_submix_effect` | Append an effect preset to a submix's chain (creates the preset). Params: `submixPath, effectType (reverb\|eq\|dynamics\|filter\|delay), name?, packagePath?, settings?` |
+| `create_sound_class` | Create a USoundClass. Params: `name, packagePath?, parentPath?, properties?` |
+| `create_sound_mix` | Create a USoundMix with class adjusters. Params: `name, packagePath?, adjusters? [{soundClassPath, volumeAdjuster?, pitchAdjuster?, applyToChildren?}], fadeInTime?, fadeOutTime?` |
+| `create_concurrency` | Create a USoundConcurrency. Params: `name, packagePath?, maxCount?, limitToOwner?, resolutionRule?, volumeScale?` |
+| `create_attenuation` | Create a USoundAttenuation. Params: `name, packagePath?, settings?, falloffDistance?, spatialize?, enableOcclusion?` |
+| `set_sound_submix` | Set a sound's base submix. Params: `soundPath, submixPath` |
+| `add_sound_submix_send` | Add a submix send to a sound. Params: `soundPath, submixPath, sendLevel?` |
+| `set_sound_class` | Assign a sound class. Params: `soundPath, soundClassPath` |
+| `set_sound_attenuation` | Attach an attenuation asset. Params: `soundPath, attenuationPath` |
+| `set_sound_concurrency` | Attach a concurrency asset. Params: `soundPath, concurrencyPath` |
+| `set_property` | Set any UPROPERTY on an audio asset (dotted path, nested structs/arrays/object refs). Params: `assetPath, propertyName, value` |
+
+Example - a one-call sine synth routed through a music submix:
+
+```
+audio(action="metasound_author",
+  name="Hum", packagePath="/Game/Audio/MetaSounds", format="mono", oneShot=false,
+  nodes=[{ "id": "osc", "class": "Sine", "variant": "Audio", "inputs": { "Frequency": 220.0 } }],
+  connections=[{ "from": "osc:Audio", "to": "audioOut:0" }])
+
+audio(action="create_submix", name="Music", packagePath="/Game/Audio/Submixes")
+audio(action="add_submix_effect", submixPath="/Game/Audio/Submixes/Music.Music", effectType="reverb")
+audio(action="set_sound_submix", soundPath="/Game/Audio/MetaSounds/Hum.Hum", submixPath="/Game/Audio/Submixes/Music.Music")
+```
 
 ---
 
