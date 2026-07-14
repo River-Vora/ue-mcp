@@ -413,7 +413,13 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreateMirrorDataTable(const TSharedPt
 		Table->MirrorFindReplaceExpressions.Add(FMirrorFindReplaceExpression(TEXT("_r"), TEXT("_l"), EMirrorFindReplaceMethod::Suffix));
 	}
 
+	// UMirrorDataTable::UpdateFromFindReplaceExpressions(FFindReplaceOptions) is
+	// UE 5.8+. On 5.7 the expressions are stored on the table above but the
+	// mirror rows are not auto-synced from them here; the asset editor's Sync
+	// button (or manual row entry) fills them in.
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 	Table->UpdateFromFindReplaceExpressions(UMirrorDataTable::FFindReplaceOptions::Sync());
+#endif
 	UEditorAssetLibrary::SaveLoadedAsset(Table);
 
 	TSharedPtr<FJsonObject> Res = MCPSuccess();

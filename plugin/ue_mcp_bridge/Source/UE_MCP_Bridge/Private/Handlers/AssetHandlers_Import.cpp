@@ -2356,7 +2356,9 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetStringTableEntry(const TSharedPtr<FJso
 	const bool bExisted = StringTable->GetStringTable()->GetSourceString(EntryKey, PreviousSourceString);
 
 	StringTable->Modify(true);
-#if WITH_EDITORONLY_DATA
+	// The 3-arg SetSourceString (with a trailing metadata/namespace arg) is UE 5.8+.
+	// 5.7 (and non-editor) take the 2-arg form.
+#if WITH_EDITORONLY_DATA && (ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8))
 	StringTable->GetMutableStringTable()->SetSourceString(EntryKey, SourceString, FString());
 #else
 	StringTable->GetMutableStringTable()->SetSourceString(EntryKey, SourceString);

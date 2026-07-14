@@ -234,9 +234,6 @@ static UScriptStruct* ResolveChooserStruct(const FString& TypeName)
 static void ConfigureColumnInput(FChooserColumnBase* Col, const FString& InputStruct, const FString& BoundProperty, const FString& EnumPath)
 {
 #if WITH_EDITOR
-	FInstancedStruct* InputPtr = Col->GetInputValuePtr();
-	if (!InputPtr) return;
-
 	if (!InputStruct.IsEmpty())
 	{
 		if (UScriptStruct* InSS = ResolveChooserStruct(InputStruct))
@@ -244,10 +241,24 @@ static void ConfigureColumnInput(FChooserColumnBase* Col, const FString& InputSt
 			Col->SetInputType(InSS);
 		}
 	}
-	if (!InputPtr->IsValid()) return;
 
-	const UScriptStruct* PSS = InputPtr->GetScriptStruct();
-	void* PData = InputPtr->GetMutableMemory();
+	// The input parameter's struct type + memory. FChooserColumnBase::GetInputValuePtr()
+	// (a FInstancedStruct accessor) is UE 5.8+; on 5.7 reach the same memory through
+	// GetInputValue() (the parameter pointer) + GetInputType() (its struct).
+	const UScriptStruct* PSS = nullptr;
+	void* PData = nullptr;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
+	FInstancedStruct* InputPtr = Col->GetInputValuePtr();
+	if (!InputPtr || !InputPtr->IsValid()) return;
+	PSS = InputPtr->GetScriptStruct();
+	PData = InputPtr->GetMutableMemory();
+#else
+	FChooserParameterBase* Param = Col->GetInputValue();
+	PSS = Col->GetInputType();
+	if (!Param || !PSS) return;
+	PData = Param;
+#endif
+
 	FStructProperty* BindingProp = CastField<FStructProperty>(PSS->FindPropertyByName(TEXT("Binding")));
 	if (!BindingProp) return;
 	void* BindingData = BindingProp->ContainerPtrToValuePtr<void>(PData);
@@ -632,8 +643,15 @@ TSharedPtr<FJsonValue> FChooserHandlers::DeleteRow(const TSharedPtr<FJsonObject>
 	Table->Modify();
 
 	// Drop the per-row cell from every column, then the result + disabled flag.
+	// FChooserColumnBase::DeleteRows takes a TArrayView<int32> on UE 5.8+ and a
+	// TArray<uint32> on 5.7.
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 	int32 RowToDelete = RowIndex;
 	TArrayView<int32> RowView(&RowToDelete, 1);
+#else
+	TArray<uint32> RowView;
+	RowView.Add(static_cast<uint32>(RowIndex));
+#endif
 	for (FInstancedStruct& ColStruct : Table->ColumnsStructs)
 	{
 		if (FChooserColumnBase* Col = ColStruct.GetMutablePtr<FChooserColumnBase>())

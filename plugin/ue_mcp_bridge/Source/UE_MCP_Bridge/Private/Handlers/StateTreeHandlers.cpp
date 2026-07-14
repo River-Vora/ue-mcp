@@ -569,11 +569,17 @@ static bool AddEditorNodeToArray(TArray<FStateTreeEditorNode>& Arr, const FStrin
 	// the node's instance data type is a UClass (UObject-backed nodes such as
 	// the Blueprint task/condition/evaluator wrappers), which the previous
 	// struct-only path left null, so BP tasks could not be wired.
+	// The 3-arg FStateTreeEditorNode::InitializeAs(Outer, NodeStruct) - which also
+	// allocates the InstanceObject for UObject-backed (Blueprint-wrapped) nodes -
+	// is UE 5.8+. On 5.7 we fall back to the struct-only path; BP-wrapped nodes
+	// therefore do not get their InstanceObject auto-wired on 5.7 (#681).
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 	if (Outer)
 	{
 		EditorNode.InitializeAs(Outer, NodeStruct);
 	}
 	else
+#endif
 	{
 		EditorNode.Node.InitializeAs(NodeStruct);
 		const FStateTreeNodeBase& Node = EditorNode.Node.Get<FStateTreeNodeBase>();
@@ -582,6 +588,9 @@ static bool AddEditorNodeToArray(TArray<FStateTreeEditorNode>& Arr, const FStrin
 			EditorNode.Instance.InitializeAs(InstanceType);
 		}
 	}
+#if !(ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8))
+	(void)Outer; // unused on 5.7 (the Outer-based path above is 5.8+ only)
+#endif
 
 	if (InstanceProperties.IsValid())
 	{
@@ -1894,7 +1903,13 @@ TSharedPtr<FJsonValue> FStateTreeHandlers::AddBinding(const TSharedPtr<FJsonObje
 		{
 			for (FStateTreeEditorNode& EN : Arr)
 			{
+				// FStateTreeEditorNode::GetInstanceDataID() is UE 5.8+. On 5.7 the
+				// node's editor ID keys the instance data, so match on that.
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8)
 				if (EN.GetInstanceDataID() != TargetID) continue;
+#else
+				if (EN.ID != TargetID) continue;
+#endif
 				if (FStateTreeNodeBase* NodeBase = EN.Node.GetMutablePtr<FStateTreeNodeBase>())
 				{
 					NodeBase->OnBindingChanged(EN.ID, EN.GetInstance(), SourcePath, TargetPath, Lookup);

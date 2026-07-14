@@ -1930,6 +1930,12 @@ TSharedPtr<FJsonValue> FAnimationHandlers::BatchRetargetAnimations(const TShared
 		return MCPError(TEXT("Missing 'animPaths' (array of AnimSequence paths to retarget)"));
 	}
 
+	// The FIKRetargetBatchOperationInputs / UIKRetargetBatchOperation::RunBatchRetarget
+	// batch API is UE 5.8+. The 5.7 batch-retarget API differs; rather than a
+	// partial reimplementation, return a clear error below 5.8.
+#if !(ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8))
+	return MCPError(TEXT("batch_retarget_animations requires UE 5.8+ (the FIKRetargetBatchOperationInputs / RunBatchRetarget API is unavailable in this engine version)."));
+#else
 	FIKRetargetBatchOperationInputs Inputs;
 	Inputs.SourceMesh = SourceMesh;
 	Inputs.TargetMesh = TargetMesh;
@@ -1966,6 +1972,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::BatchRetargetAnimations(const TShared
 	Result->SetNumberField(TEXT("createdCount"), OutPaths.Num());
 	Result->SetArrayField(TEXT("createdAssets"), OutPaths);
 	return MCPResult(Result);
+#endif
 }
 
 // ─── #657 inspect_anim_nodes ────────────────────────────────────────
