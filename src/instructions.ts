@@ -1,4 +1,4 @@
-export const SERVER_INSTRUCTIONS = `UE-MCP: Unreal Engine editor bridge (C++ plugin) - 23 category tools covering 677+ actions, plus 830 official Unreal 5.8 tools wrapped in-process (UE 5.8+; see the epic category).
+export const SERVER_INSTRUCTIONS = `UE-MCP: Unreal Engine editor bridge (C++ plugin) - 24 category tools covering 685+ actions, plus 830 official Unreal 5.8 tools wrapped in-process (UE 5.8+; see the epic category).
 
 Every tool takes an "action" parameter that selects the operation. Call project(action="get_status") first.
 
@@ -83,14 +83,14 @@ This creates a GitHub issue so the maintainers can add proper support.
 // catalog is intentionally omitted: agents pull it on demand via the `catalog`
 // tool or a category's `describe` action. This keeps the initialize handshake
 // small for token-constrained clients while preserving full capability.
-export const SERVER_INSTRUCTIONS_LEAN = `UE-MCP (lean mode): Unreal Engine editor bridge (C++ plugin). 23 category tools; the per-action catalog is loaded on demand to keep context small.
+export const SERVER_INSTRUCTIONS_LEAN = `UE-MCP (lean mode): Unreal Engine editor bridge (C++ plugin). 24 category tools; the per-action catalog is loaded on demand to keep context small.
 
 Every tool takes an "action" parameter that selects the operation. Start with project(action="get_status").
 
 ═══ DISCOVER ACTIONS ═══
 Tool descriptions are trimmed in lean mode. Find the action you need with:
 - catalog(action="search", query="spawn actor") - rank matching actions across every category
-- catalog(action="list_categories") - the 22 categories with one-line summaries
+- catalog(action="list_categories") - the 23 categories with one-line summaries
 - <category>(action="describe") - every action in one category (e.g. blueprint(action="describe"))
 
 Each category's "action" parameter is still a validated enum, so unknown actions are rejected up front. Call describe/search first when you are unsure of the exact action name.
@@ -115,7 +115,7 @@ context.strategy: lean in ue-mcp.yml or UE_MCP_CONTEXT_STRATEGY=lean.
 // Smallest surface (context.strategy = "micro"). The entire ue-mcp API is
 // reached through one gateway tool, mirroring the native MCP toolset gateway
 // (list_toolsets / describe_toolset / call_tool). Nothing else is advertised.
-export const SERVER_INSTRUCTIONS_MICRO = `UE-MCP (micro mode): Unreal Engine editor bridge (C++ plugin). The entire surface (22 categories, 600+ actions) is reached through a single gateway tool to keep context tiny.
+export const SERVER_INSTRUCTIONS_MICRO = `UE-MCP (micro mode): Unreal Engine editor bridge (C++ plugin). The entire surface (23 categories, 600+ actions) is reached through a single gateway tool to keep context tiny.
 
 ═══ HOW TO USE ═══
 - tools(action="list_categories") - list every category with a one-line summary

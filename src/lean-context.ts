@@ -10,7 +10,7 @@ import { McpError, ErrorCode } from "./errors.js";
  * actions. That is great for discoverability but expensive on the MCP
  * initialize handshake for token-constrained clients.
  *
- * Lean mode keeps the exact same 23 typed category tools and their validated
+ * Lean mode keeps the exact same 24 typed category tools and their validated
  * `action` enums, but:
  *   - trims each tool description to its one-line summary + a discovery pointer,
  *   - trims the server instructions (see SERVER_INSTRUCTIONS_LEAN),
@@ -199,7 +199,7 @@ export function applyLeanContext(tools: ToolDef[]): ToolDef[] {
 /**
  * Micro strategy: collapse the entire surface behind a single gateway tool,
  * mirroring the native MCP toolset gateway (list_toolsets / describe_toolset /
- * call_tool). The 22 category tools are NOT advertised; the agent enumerates
+ * call_tool). The 23 category tools are NOT advertised; the agent enumerates
  * with list_categories, learns a category with describe, and invokes anything
  * with call. This is the smallest possible seed.
  *
