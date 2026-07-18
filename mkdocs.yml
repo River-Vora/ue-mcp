@@ -60,6 +60,7 @@ nav:
   - Flows: flows.md
   - Plugins:
     - plugins.md
+    - Registry (plugins.ue-mcp.com): https://plugins.ue-mcp.com
     - Using: plugins-using.md
     - Authoring: plugins-authoring.md
     - Native Modules: plugins-native-modules.md

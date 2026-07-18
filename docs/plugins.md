@@ -8,6 +8,8 @@ ue-mcp's plugin system lets npm packages extend the server in three ways:
 
 Most plugins use only the first shape; the other two are available when injection is the wrong fit. This section splits into [using a plugin somebody else wrote](plugins-using.md) and [writing your own](plugins-authoring.md).
 
+Browse and search published plugins in the registry at **[plugins.ue-mcp.com](https://plugins.ue-mcp.com)**, then install any listing by its slug with `ue-mcp plugin install <slug>`.
+
 !!! info "Live reference"
     [`pie-studio`](https://github.com/db-lyon/pie-studio) ([npm](https://www.npmjs.com/package/pie-studio)) is the canonical native-module reference. It ships C++ handlers for PIE recording, replay, observation, and input injection, surfaced as a `pie` category it provisions via `nativeModule.category`. See [Native C++ modules](plugins-native-modules.md).
 
