@@ -30,6 +30,7 @@
 #include "Misc/FileHelper.h"
 #include "LevelEditorViewport.h"
 #include "UnrealClient.h"
+#include "Engine/GameViewportClient.h"
 #include "ContentStreaming.h"
 #include "RenderingThread.h"
 #include "Misc/AutomationTest.h"
@@ -1247,9 +1248,37 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScreenshot(const TSharedPtr<FJson
 
 	if (bUsePie && PieWorld)
 	{
+		// #724: HighResShot renders the PIE world offscreen and (a) strips the
+		// debug canvas (AddOnScreenDebugMessage overlays) and (b) in
+		// Play-in-New-Window did not reliably resolve to the PIE game window.
+		// Capture the actual PIE game viewport with a normal screenshot request
+		// and bShowUI=true, so we get exactly what the player sees - HUD and the
+		// on-screen debug canvas included. The running game viewport consumes the
+		// pending request on its next Draw, so this targets the PIE window even
+		// in new-window mode. Fall back to HighResShot only if no game viewport.
+		FString FullPath = Filename;
+		if (FPaths::IsRelative(Filename))
+		{
+			FullPath = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots"), Filename);
+		}
+
+		UGameViewportClient* GameViewport = PieWorld->GetGameViewport();
+		if (GameViewport && GameViewport->Viewport)
+		{
+			FScreenshotRequest::RequestScreenshot(FullPath, /*bShowUI=*/true, /*bAddFilenameSuffix=*/false);
+			GameViewport->Viewport->Invalidate();
+
+			auto Result = MCPSuccess();
+			Result->SetStringField(TEXT("filename"), FullPath);
+			Result->SetStringField(TEXT("target"), TEXT("pie"));
+			Result->SetBoolField(TEXT("includesDebugCanvas"), true);
+			Result->SetStringField(TEXT("note"), TEXT("PIE game-viewport screenshot queued (UI + on-screen debug canvas included); written asynchronously."));
+			return MCPResult(Result);
+		}
+
+		// Fallback: no resolvable game viewport (unusual) - dispatch HighResShot.
 		int32 Width = OptionalInt(Params, TEXT("width"), 1920);
 		int32 Height = OptionalInt(Params, TEXT("height"), 1080);
-		// Some callers pass a single 'resolution' (long edge); honour it as width.
 		double ResolutionScalar = 0.0;
 		if (Params->TryGetNumberField(TEXT("resolution"), ResolutionScalar) && ResolutionScalar > 0)
 		{
@@ -1262,7 +1291,8 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScreenshot(const TSharedPtr<FJson
 		Result->SetStringField(TEXT("filename"), Filename);
 		Result->SetStringField(TEXT("target"), TEXT("pie"));
 		Result->SetStringField(TEXT("consoleCommand"), ConsoleCmd);
-		Result->SetStringField(TEXT("note"), TEXT("HighResShot dispatched into PIE world; output lands in Saved/Screenshots/<map>/."));
+		Result->SetBoolField(TEXT("includesDebugCanvas"), false);
+		Result->SetStringField(TEXT("note"), TEXT("No game viewport resolved; HighResShot dispatched (debug canvas not captured). Output in Saved/Screenshots/<map>/."));
 		return MCPResult(Result);
 	}
 
