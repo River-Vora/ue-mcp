@@ -3,6 +3,7 @@
 #include "HandlerUtils.h"
 #include "HandlerAssetCreate.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/ARFilter.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
 #include "UObject/UObjectGlobals.h"
@@ -15,6 +16,7 @@
 #include "Factories/SoundCueFactoryNew.h"
 #include "AssetImportTask.h"
 #include "Misc/Paths.h"
+#include "Misc/Base64.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Kismet/GameplayStatics.h"
@@ -25,6 +27,7 @@
 void FAudioHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 {
 	Registry.RegisterHandler(TEXT("list_sound_assets"), &ListSoundAssets);
+	Registry.RegisterHandler(TEXT("extract_sound_wave_pcm"), &ExtractSoundWavePCM);
 	Registry.RegisterHandler(TEXT("import_audio"), &ImportAudio);
 	Registry.RegisterHandler(TEXT("create_sound_cue"), &CreateSoundCue);
 	Registry.RegisterHandler(TEXT("create_metasound_source"), &CreateMetaSoundSource);
@@ -151,37 +154,144 @@ TSharedPtr<FJsonValue> FAudioHandlers::ListSoundAssets(const TSharedPtr<FJsonObj
 {
 	auto Result = MCPSuccess();
 
-	bool bRecursive = OptionalBool(Params, TEXT("recursive"), true);
+	// #730: the old implementation ignored `directory`, had no result cap, and
+	// serialized SoundWave + SoundCue + MetaSoundSource for the whole project in
+	// one response. On projects with hundreds of SoundWaves that response could
+	// exceed the WebSocket framing threshold and drop the bridge. Honor the
+	// directory, filter recursively via a single FARFilter query, and paginate.
+	const FString Directory = OptionalString(Params, TEXT("directory"), TEXT("/Game"));
+	const bool bRecursive = OptionalBool(Params, TEXT("recursive"), true);
+	int32 MaxResults = OptionalInt(Params, TEXT("maxResults"), 1000);
+	if (MaxResults <= 0) MaxResults = 1000;
+	int32 Offset = OptionalInt(Params, TEXT("offset"), 0);
+	if (Offset < 0) Offset = 0;
 
 	IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
 
-	TArray<FTopLevelAssetPath> ClassPaths;
-	ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/Engine"), TEXT("SoundWave")));
-	ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/Engine"), TEXT("SoundCue")));
-	ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/MetasoundEngine"), TEXT("MetaSoundSource")));
+	FARFilter Filter;
+	Filter.ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/Engine"), TEXT("SoundWave")));
+	Filter.ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/Engine"), TEXT("SoundCue")));
+	Filter.ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/MetasoundEngine"), TEXT("MetaSoundSource")));
+	Filter.bRecursiveClasses = true;
+	Filter.PackagePaths.Add(FName(*Directory));
+	Filter.bRecursivePaths = bRecursive;
 
-	TArray<TSharedPtr<FJsonValue>> AssetsArray;
+	TArray<FAssetData> AssetDataList;
+	AssetRegistry.GetAssets(Filter, AssetDataList);
 
-	for (const FTopLevelAssetPath& ClassPath : ClassPaths)
+	// Stable ordering so pagination is deterministic across calls.
+	AssetDataList.Sort([](const FAssetData& A, const FAssetData& B)
 	{
-		TArray<FAssetData> AssetDataList;
-		AssetRegistry.GetAssetsByClass(ClassPath, AssetDataList, bRecursive);
+		return A.GetObjectPathString() < B.GetObjectPathString();
+	});
 
-		for (const FAssetData& AssetData : AssetDataList)
-		{
-			TSharedPtr<FJsonObject> AssetObj = MakeShared<FJsonObject>();
-			AssetObj->SetStringField(TEXT("name"), AssetData.AssetName.ToString());
-			AssetObj->SetStringField(TEXT("path"), AssetData.GetObjectPathString());
-			AssetObj->SetStringField(TEXT("class"), AssetData.AssetClassPath.GetAssetName().ToString());
-			AssetObj->SetStringField(TEXT("packagePath"), AssetData.PackagePath.ToString());
-			AssetsArray.Add(MakeShared<FJsonValueObject>(AssetObj));
-		}
+	const int32 Total = AssetDataList.Num();
+	TArray<TSharedPtr<FJsonValue>> AssetsArray;
+	for (int32 Index = Offset; Index < Total && AssetsArray.Num() < MaxResults; ++Index)
+	{
+		const FAssetData& AssetData = AssetDataList[Index];
+		TSharedPtr<FJsonObject> AssetObj = MakeShared<FJsonObject>();
+		AssetObj->SetStringField(TEXT("name"), AssetData.AssetName.ToString());
+		AssetObj->SetStringField(TEXT("path"), AssetData.GetObjectPathString());
+		AssetObj->SetStringField(TEXT("class"), AssetData.AssetClassPath.GetAssetName().ToString());
+		AssetObj->SetStringField(TEXT("packagePath"), AssetData.PackagePath.ToString());
+		AssetsArray.Add(MakeShared<FJsonValueObject>(AssetObj));
 	}
 
+	const int32 NextOffset = Offset + AssetsArray.Num();
 	Result->SetArrayField(TEXT("assets"), AssetsArray);
 	Result->SetNumberField(TEXT("count"), AssetsArray.Num());
+	Result->SetNumberField(TEXT("total"), Total);
+	Result->SetNumberField(TEXT("offset"), Offset);
+	Result->SetNumberField(TEXT("maxResults"), MaxResults);
+	Result->SetBoolField(TEXT("hasMore"), NextOffset < Total);
+	if (NextOffset < Total)
+	{
+		Result->SetNumberField(TEXT("nextOffset"), NextOffset);
+	}
+	Result->SetStringField(TEXT("directory"), Directory);
 
 	return MCPResult(Result);
+}
+
+// #729: decode a USoundWave's imported audio to in-memory PCM. UE Python does
+// not expose USoundWave::GetImportedSoundWaveData, so a semantic-search pipeline
+// (CLAP etc.) previously had no way to reach the samples without relying on the
+// original import file, which may have moved. This returns interleaved signed
+// 16-bit PCM, base64-encoded, plus the format metadata needed to feed a model.
+TSharedPtr<FJsonValue> FAudioHandlers::ExtractSoundWavePCM(const TSharedPtr<FJsonObject>& Params)
+{
+	FString SoundPath;
+	if (auto Err = RequireString(Params, TEXT("soundPath"), SoundPath)) return Err;
+
+	USoundWave* Wave = LoadObject<USoundWave>(nullptr, *SoundPath);
+	if (!Wave)
+	{
+		return MCPError(FString::Printf(TEXT("SoundWave not found: %s"), *SoundPath));
+	}
+
+#if WITH_EDITOR
+	TArray<uint8> RawPCM;
+	uint32 SampleRate = 0;
+	uint16 NumChannels = 0;
+	if (!Wave->GetImportedSoundWaveData(RawPCM, SampleRate, NumChannels)
+		|| RawPCM.Num() == 0 || SampleRate == 0 || NumChannels == 0)
+	{
+		return MCPError(TEXT("Failed to decode imported SoundWave data (no editor source data available for this asset)"));
+	}
+
+	// RawPCM is interleaved signed 16-bit little-endian across NumChannels.
+	int32 TotalFrames = (RawPCM.Num() / (int32)sizeof(int16)) / NumChannels;
+
+	// Optional decode window so callers can bound the response size (CLAP-style
+	// pipelines only need a few seconds). Default is the whole asset.
+	const double MaxSeconds = OptionalNumber(Params, TEXT("maxSeconds"), 0.0);
+	if (MaxSeconds > 0.0)
+	{
+		const int32 FrameCap = FMath::Clamp(FMath::FloorToInt(MaxSeconds * (double)SampleRate), 0, TotalFrames);
+		TotalFrames = FrameCap;
+	}
+
+	const bool bDownmix = OptionalBool(Params, TEXT("downmixMono"), false);
+	const int16* Samples = reinterpret_cast<const int16*>(RawPCM.GetData());
+
+	TArray<uint8> OutBytes;
+	int32 OutChannels = NumChannels;
+	if (bDownmix && NumChannels > 1)
+	{
+		OutChannels = 1;
+		OutBytes.SetNumUninitialized(TotalFrames * (int32)sizeof(int16));
+		int16* Dst = reinterpret_cast<int16*>(OutBytes.GetData());
+		for (int32 Frame = 0; Frame < TotalFrames; ++Frame)
+		{
+			int32 Acc = 0;
+			for (int32 Ch = 0; Ch < NumChannels; ++Ch)
+			{
+				Acc += Samples[Frame * NumChannels + Ch];
+			}
+			Dst[Frame] = static_cast<int16>(Acc / NumChannels);
+		}
+	}
+	else
+	{
+		const int32 ByteCount = TotalFrames * NumChannels * (int32)sizeof(int16);
+		OutBytes.Append(RawPCM.GetData(), ByteCount);
+	}
+
+	const FString Base64 = FBase64::Encode(OutBytes);
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("soundPath"), SoundPath);
+	Result->SetNumberField(TEXT("sampleRate"), static_cast<double>(SampleRate));
+	Result->SetNumberField(TEXT("numChannels"), static_cast<double>(OutChannels));
+	Result->SetNumberField(TEXT("numFrames"), static_cast<double>(TotalFrames));
+	Result->SetNumberField(TEXT("durationSeconds"), SampleRate > 0 ? static_cast<double>(TotalFrames) / static_cast<double>(SampleRate) : 0.0);
+	Result->SetStringField(TEXT("format"), TEXT("pcm_s16le"));
+	Result->SetStringField(TEXT("pcmBase64"), Base64);
+	return MCPResult(Result);
+#else
+	return MCPError(TEXT("extract_sound_wave_pcm requires an editor build"));
+#endif
 }
 
 TSharedPtr<FJsonValue> FAudioHandlers::CreateSoundCue(const TSharedPtr<FJsonObject>& Params)

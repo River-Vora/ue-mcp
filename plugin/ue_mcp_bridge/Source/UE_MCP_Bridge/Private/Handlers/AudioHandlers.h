@@ -12,6 +12,8 @@ public:
 private:
 	// ── Assets + playback ──────────────────────────────────────────────
 	static TSharedPtr<FJsonValue> ListSoundAssets(const TSharedPtr<FJsonObject>& Params);
+	// #729: decode a USoundWave's imported audio to in-memory PCM for semantic search.
+	static TSharedPtr<FJsonValue> ExtractSoundWavePCM(const TSharedPtr<FJsonObject>& Params);
 	// #664: import a WAV/OGG file as a USoundWave asset.
 	static TSharedPtr<FJsonValue> ImportAudio(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreateSoundCue(const TSharedPtr<FJsonObject>& Params);

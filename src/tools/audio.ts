@@ -22,7 +22,8 @@ export const audioTool: ToolDef = categoryTool(
   "Audio: sound assets, playback, MetaSound + SoundCue graph authoring, submixes/effects, sound classes/mixes, attenuation, concurrency, spatialization.",
   {
     // ── Assets + playback ──────────────────────────────────────────────
-    list:              bp("List sound assets (SoundWave, SoundCue, MetaSoundSource). Params: directory?, recursive?", "list_sound_assets"),
+    list:              bp("List sound assets (SoundWave, SoundCue, MetaSoundSource) under a directory, paginated. Params: directory? (default /Game), recursive? (default true), maxResults? (default 1000), offset? (default 0). Returns assets, count, total, offset, hasMore, nextOffset (#730).", "list_sound_assets", (p) => ({ directory: p.directory, recursive: p.recursive, maxResults: p.maxResults, offset: p.offset })),
+    extract_pcm:       bp("Decode a USoundWave's imported audio to in-memory PCM (no intermediate file, no reliance on the original source path) for semantic sound search / analysis. Returns sampleRate, numChannels, numFrames, durationSeconds, and 16-bit PCM samples base64-encoded (interleaved). Params: soundPath (required), maxSeconds? (cap the decoded window; default full asset), downmixMono? (default false) (#729).", "extract_sound_wave_pcm", (p) => ({ soundPath: p.soundPath ?? p.assetPath, maxSeconds: p.maxSeconds, downmixMono: p.downmixMono })),
     import_audio:      bp("Import a WAV/OGG/FLAC file as a USoundWave. Returns durationSeconds, numChannels, looping. Params: filePath, name?, packagePath? (default /Game/Audio), looping?, replaceExisting? (default true)", "import_audio", (p) => ({ filePath: p.filePath, name: p.name, packagePath: p.packagePath, looping: p.looping, replaceExisting: p.replaceExisting })),
     play_at_location:  bp("Play a sound in the editor world. Params: soundPath, location, volumeMultiplier?, pitchMultiplier?", "play_sound_at_location"),
     spawn_ambient:     bp("Place an AmbientSound actor. Params: soundPath, location, label?", "spawn_ambient_sound"),
@@ -74,6 +75,10 @@ export const audioTool: ToolDef = categoryTool(
   {
     // shared / assets
     directory: z.string().optional(), recursive: z.boolean().optional(),
+    maxResults: z.number().optional().describe("list: page size (default 1000) (#730)"),
+    offset: z.number().optional().describe("list: pagination offset (default 0) (#730)"),
+    maxSeconds: z.number().optional().describe("extract_pcm: cap decoded window in seconds (#729)"),
+    downmixMono: z.boolean().optional().describe("extract_pcm: average channels to mono (#729)"),
     soundPath: z.string().optional(),
     location: Vec3.optional(),
     volumeMultiplier: z.number().optional(),
