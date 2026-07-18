@@ -9,6 +9,8 @@
  *   create <name> [--dir path]         scaffold a new plugin (superset of every
  *                                      extension shape: inject, provides, flows,
  *                                      and a dormant native C++ module)
+ *   publish [dir] [--private|--public] push a listing (incl. its README) to the
+ *                                      registry; merges over curated fields
  *
  * Editing ue-mcp.yml: js-yaml does not preserve comments. We mitigate by
  * rewriting only the `plugins:` block via a string-level surgery when
@@ -974,6 +976,147 @@ function __dirnameOrCwd(): string {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* publish - push a plugin listing (incl. its README) to the registry  */
+/* ------------------------------------------------------------------ */
+
+interface RegistryRow {
+  slug: string;
+  name: string;
+  packageName?: string;
+  repoUrl?: string;
+  repoPrivate?: boolean;
+  [k: string]: unknown;
+}
+
+/** Normalise package.json's `repository` (string or {url}) to a clean https URL. */
+function repoUrlFromPkg(pkg: { repository?: unknown }): string | undefined {
+  const r = pkg.repository;
+  const raw = typeof r === "string" ? r : (r as { url?: string } | undefined)?.url;
+  if (!raw) return undefined;
+  return raw.replace(/^git\+/, "").replace(/\.git$/, "").replace(/^git@github\.com:/, "https://github.com/");
+}
+
+/** Fetch the current published catalog so publish can merge over curated fields. */
+async function fetchCatalog(base: string): Promise<RegistryRow[]> {
+  try {
+    const res = await fetch(`${base}/api/plugins`);
+    if (!res.ok) return [];
+    const j = (await res.json()) as { plugins?: RegistryRow[] };
+    return j.plugins ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * `ue-mcp plugin publish [dir] [--slug s] [--private|--public] [--token t] [--dry-run]`
+ *
+ * Reads the package at [dir] (default cwd): its README.md becomes the listing's
+ * README (npm model - the docs travel with the package), and package.json fills
+ * packageName / repoUrl / author. Curated marketplace fields (category, pricing,
+ * tagline, tags, featured) are preserved by merging over the existing registry
+ * row, so a re-publish only refreshes what the package owns.
+ */
+async function cmdPublish(): Promise<void> {
+  let dir = process.cwd();
+  let slugFlag: string | undefined;
+  let tokenFlag: string | undefined;
+  let privacy: boolean | undefined;
+  let dryRun = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--slug") slugFlag = args[++i];
+    else if (a === "--token") tokenFlag = args[++i];
+    else if (a === "--private") privacy = true;
+    else if (a === "--public") privacy = false;
+    else if (a === "--dry-run" || a === "--dry") dryRun = true;
+    else if (!a.startsWith("--")) dir = path.resolve(a);
+  }
+
+  const pkgPath = path.join(dir, "package.json");
+  if (!fs.existsSync(pkgPath)) fail(`no package.json in ${dir}`);
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8")) as {
+    name?: string;
+    description?: string;
+    author?: unknown;
+    keywords?: string[];
+    repository?: unknown;
+  };
+  if (!pkg.name) fail(`package.json in ${dir} has no "name"`);
+
+  // README is optional but the whole point - warn loudly if missing.
+  const readmePath = ["README.md", "readme.md", "Readme.md"]
+    .map((f) => path.join(dir, f))
+    .find((f) => fs.existsSync(f));
+  const readme = readmePath ? fs.readFileSync(readmePath, "utf-8").trim() : "";
+  if (!readme) note(`WARNING: no README.md in ${dir}; publishing with an empty README.`);
+
+  const base = (process.env.UE_MCP_REGISTRY ?? "https://plugins.ue-mcp.com").replace(/\/+$/, "");
+  const token = tokenFlag ?? process.env.UE_MCP_PUBLISH_TOKEN ?? process.env.REGISTRY_PUBLISH_TOKEN;
+  if (!token && !dryRun) {
+    fail(
+      "no publish token. Set UE_MCP_PUBLISH_TOKEN (or pass --token). " +
+      "Get it from the registry owner / Render dashboard (REGISTRY_PUBLISH_TOKEN).",
+    );
+  }
+
+  // Default slug: the package name minus the conventional `ue-mcp-` prefix.
+  const slug = slugFlag ?? pkg.name.replace(/^ue-mcp-/, "");
+
+  const catalog = await fetchCatalog(base);
+  const existing = catalog.find((r) => r.slug === slug || r.packageName === pkg.name);
+
+  const authorName =
+    typeof pkg.author === "string"
+      ? pkg.author.replace(/\s*<[^>]*>.*/, "").trim()
+      : (pkg.author as { name?: string } | undefined)?.name;
+
+  // Merge: existing curated fields first, then the package-owned overrides.
+  const manifest: Record<string, unknown> = { ...(existing ?? {}) };
+  delete manifest.status;
+  delete manifest.rating;
+  delete manifest.ratingCount;
+
+  manifest.slug = slug;
+  manifest.packageName = pkg.name;
+  manifest.readme = readme;
+  if (!manifest.name) manifest.name = pkg.name;
+  if (!manifest.author && authorName) manifest.author = authorName;
+  if (!manifest.repoUrl) manifest.repoUrl = repoUrlFromPkg(pkg);
+  if (privacy !== undefined) manifest.repoPrivate = privacy;
+
+  if (!existing) {
+    // New listing: fill the required marketplace fields with sane defaults so
+    // the publish validates; the owner can refine category/pricing on the site.
+    if (!manifest.tagline) manifest.tagline = (pkg.description ?? pkg.name).slice(0, 140);
+    if (!manifest.description) manifest.description = pkg.description ?? "";
+    if (!manifest.category) manifest.category = "other";
+    if (!manifest.pricing) manifest.pricing = "free";
+    if (!manifest.author) manifest.author = authorName ?? pkg.name;
+    if (Array.isArray(pkg.keywords) && !manifest.tags) {
+      manifest.tags = pkg.keywords.filter((k) => k !== "ue-mcp-plugin").slice(0, 12);
+    }
+    note(`no existing listing for '${slug}'; creating a new one with default category/pricing.`);
+  }
+
+  if (dryRun) {
+    note(`dry run - would POST to ${base}/api/publish:`);
+    const preview = { ...manifest, readme: `<${readme.length} chars>` };
+    console.log(JSON.stringify(preview, null, 2));
+    return;
+  }
+
+  const res = await fetch(`${base}/api/publish`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify(manifest),
+  });
+  const text = await res.text();
+  if (!res.ok) fail(`publish failed (HTTP ${res.status}): ${text}`);
+  note(`published '${slug}' to ${base} (README ${readme.length} chars${privacy !== undefined ? `, repoPrivate=${privacy}` : ""}).`);
+}
+
 switch (sub) {
   case "install": cmdInstall(); break;
   case "uninstall":
@@ -985,6 +1128,7 @@ switch (sub) {
   case "create":
   case "new":
   case "init": cmdCreate(); break;
+  case "publish": cmdPublish().catch((e) => fail(e instanceof Error ? e.message : String(e))); break;
   default:
     console.error(
       "Usage:\n" +
@@ -992,7 +1136,8 @@ switch (sub) {
       "  ue-mcp plugin uninstall <name>\n" +
       "  ue-mcp plugin list\n" +
       "  ue-mcp plugin update [name]\n" +
-      "  ue-mcp plugin create <name> [--dir path]",
+      "  ue-mcp plugin create <name> [--dir path]\n" +
+      "  ue-mcp plugin publish [dir] [--slug s] [--private|--public] [--dry-run]",
     );
     process.exit(1);
 }
