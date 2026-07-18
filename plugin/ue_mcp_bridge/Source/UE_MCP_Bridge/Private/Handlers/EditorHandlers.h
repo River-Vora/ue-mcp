@@ -115,6 +115,13 @@ private:
 	static TSharedPtr<FJsonValue> ExecutePython(const TSharedPtr<FJsonObject>& Params);
 	// #142: run a Python file with __file__/__name__ context populated
 	static TSharedPtr<FJsonValue> RunPythonFile(const TSharedPtr<FJsonObject>& Params);
+	// #719: purge cached embedded-Python modules by prefix (tool-dev iteration)
+	static TSharedPtr<FJsonValue> PurgePythonModules(const TSharedPtr<FJsonObject>& Params);
+	// #718: close the currently open Level Sequence editor
+	static TSharedPtr<FJsonValue> CloseSequence(const TSharedPtr<FJsonObject>& Params);
+	// #727: open a registered editor tab / the Project Settings viewer
+	static TSharedPtr<FJsonValue> OpenTab(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> OpenSettings(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetProperty(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetProperty(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> DescribeObject(const TSharedPtr<FJsonObject>& Params);
