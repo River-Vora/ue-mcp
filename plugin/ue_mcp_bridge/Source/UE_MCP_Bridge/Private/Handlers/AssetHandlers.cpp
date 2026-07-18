@@ -171,6 +171,9 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("delete_asset_batch"), &DeleteAssetBatch);
 	Registry.RegisterHandler(TEXT("bulk_rename_assets"), &BulkRename);
 	Registry.RegisterHandler(TEXT("create_data_asset"), &CreateDataAsset);
+	// #726: generic create-any-concrete-UObject-class asset (physical materials,
+	// curves, settings objects) - not restricted to UDataAsset subclasses.
+	Registry.RegisterHandler(TEXT("create_asset_by_class"), &CreateAssetByClass);
 	Registry.RegisterHandler(TEXT("save_asset"), &SaveAsset);
 	Registry.RegisterHandler(TEXT("save_all_dirty"), &SaveAllDirty);
 	Registry.RegisterHandler(TEXT("list_textures"), &ListTextures);
@@ -1862,6 +1865,111 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateDataAsset(const TSharedPtr<FJsonObj
 	}
 
 	// Rollback: delete the newly created asset
+	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Payload->SetStringField(TEXT("assetPath"), FullPath);
+	MCPSetRollback(Result, TEXT("delete_asset"), Payload);
+
+	return MCPResult(Result);
+}
+
+// #726: create an asset of any concrete UObject class. create_data_asset only
+// accepts UDataAsset subclasses, so "settings-object" classes (UPhysicalMaterial
+// subclasses, curves, etc.) had no native route and required execute_python with
+// a hand-picked UFactory. This resolves the class, creates the asset (IAssetTools
+// CreateAsset with a null factory NewObjects the exact class), applies optional
+// properties, and saves.
+TSharedPtr<FJsonValue> FAssetHandlers::CreateAssetByClass(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Name;
+	if (auto Err = RequireString(Params, TEXT("name"), Name)) return Err;
+	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game"));
+	FString ClassName;
+	if (auto Err = RequireStringAlt(Params, TEXT("className"), TEXT("class"), ClassName)) return Err;
+
+	// Resolve the class by path or (loaded) name - same resolution as create_data_asset.
+	UClass* AssetClass = nullptr;
+	if (ClassName.StartsWith(TEXT("/")))
+	{
+		AssetClass = LoadClass<UObject>(nullptr, *ClassName);
+		if (!AssetClass) AssetClass = LoadObject<UClass>(nullptr, *ClassName);
+	}
+	if (!AssetClass)
+	{
+		FString Trimmed = ClassName;
+		Trimmed.RemoveFromEnd(TEXT("_C"));
+		for (TObjectIterator<UClass> It; It; ++It)
+		{
+			if (It->GetName() == Trimmed || It->GetName() == ClassName)
+			{
+				AssetClass = *It;
+				break;
+			}
+		}
+	}
+	if (!AssetClass)
+	{
+		return MCPError(FString::Printf(TEXT("Class not found: %s (pass full /Script/Module.ClassName or a loaded class name)"), *ClassName));
+	}
+
+	// Guard classes that cannot be standalone assets or need a specialized flow.
+	if (AssetClass->HasAnyClassFlags(CLASS_Abstract))
+	{
+		return MCPError(FString::Printf(TEXT("Class %s is abstract and cannot be instantiated as an asset"), *ClassName));
+	}
+	if (AssetClass->IsChildOf(AActor::StaticClass()) || AssetClass->IsChildOf(UActorComponent::StaticClass()))
+	{
+		return MCPError(FString::Printf(TEXT("Class %s is an actor/component, not an asset - use level(place_actor) / level(add_component_to_actor)"), *ClassName));
+	}
+
+	const FString FullPath = FString::Printf(TEXT("%s/%s.%s"), *PackagePath, *Name, *Name);
+	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
+
+	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, AssetClass->GetName(), AssetClass, nullptr);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
+	UObject* NewAsset = Created.Asset;
+
+	// Optional properties (recursive JSON-to-property setter), mirroring create_data_asset.
+	const TSharedPtr<FJsonObject>* PropsObj = nullptr;
+	int32 SetCount = 0;
+	TArray<FString> PropErrors;
+	if (Params->TryGetObjectField(TEXT("properties"), PropsObj) && PropsObj && (*PropsObj).IsValid())
+	{
+		for (const auto& Pair : (*PropsObj)->Values)
+		{
+			FProperty* Prop = AssetClass->FindPropertyByName(FName(*Pair.Key));
+			if (!Prop)
+			{
+				PropErrors.Add(FString::Printf(TEXT("Property not found: %s"), *Pair.Key));
+				continue;
+			}
+			void* Addr = Prop->ContainerPtrToValuePtr<void>(NewAsset);
+			FString SetErr;
+			if (MCPJsonProperty::SetJsonOnProperty(Prop, Addr, Pair.Value, SetErr))
+			{
+				SetCount++;
+			}
+			else
+			{
+				PropErrors.Add(FString::Printf(TEXT("Failed to set %s: %s"), *Pair.Key, *SetErr));
+			}
+		}
+	}
+
+	UEditorAssetLibrary::SaveAsset(FullPath);
+
+	auto Result = MCPSuccess();
+	MCPSetCreated(Result);
+	Result->SetStringField(TEXT("assetPath"), FullPath);
+	Result->SetStringField(TEXT("name"), Name);
+	Result->SetStringField(TEXT("className"), AssetClass->GetName());
+	Result->SetNumberField(TEXT("propertiesSet"), SetCount);
+	if (PropErrors.Num() > 0)
+	{
+		TArray<TSharedPtr<FJsonValue>> Errs;
+		for (const FString& E : PropErrors) Errs.Add(MakeShared<FJsonValueString>(E));
+		Result->SetArrayField(TEXT("propertyErrors"), Errs);
+	}
+
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("assetPath"), FullPath);
 	MCPSetRollback(Result, TEXT("delete_asset"), Payload);
