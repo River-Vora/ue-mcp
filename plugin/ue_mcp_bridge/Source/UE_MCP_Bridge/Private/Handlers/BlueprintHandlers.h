@@ -10,6 +10,11 @@ public:
 	// Register all blueprint handlers
 	static void RegisterHandlers(class FMCPHandlerRegistry& Registry);
 
+	// Reusable type-string -> pin-type resolver. Shared with other categories
+	// (e.g. AssetHandlers UserDefinedStruct authoring, #735) so a single mapping
+	// of "bool"/"int"/"Vector"/"Actor*"/etc. serves every authoring surface.
+	static struct FEdGraphPinType MakePinType(const FString& TypeStr);
+
 private:
 	// Handler implementations
 	static TSharedPtr<FJsonValue> CreateBlueprint(const TSharedPtr<FJsonObject>& Params);
@@ -97,7 +102,6 @@ private:
 
 	// Helper functions
 	static class UBlueprint* LoadBlueprint(const FString& AssetPath);
-	static struct FEdGraphPinType MakePinType(const FString& TypeStr);
 	static class UEdGraph* FindGraph(class UBlueprint* Blueprint, const FString& GraphName);
 	static class UEdGraphNode* FindNodeByGuidOrName(class UEdGraph* Graph, const FString& NodeId);
 };

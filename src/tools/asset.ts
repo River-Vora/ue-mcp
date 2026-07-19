@@ -141,6 +141,10 @@ export const assetTool: ToolDef = categoryTool(
     create_user_defined_enum: bp("Create a UserDefinedEnum content asset, optionally pre-populated with values. Params: name, packagePath? (default /Game), values? ([display-name strings]), onConflict? (#686)", "create_user_defined_enum", (p) => ({ name: p.name, packagePath: p.packagePath, values: p.values, onConflict: p.onConflict })),
     list_enum_values:     bp("List a UEnum's enumerators (index, authored short name, display name, value). Works on native and UserDefinedEnum assets. Params: assetPath (#686)", "list_enum_values", (p) => ({ assetPath: p.assetPath })),
     edit_user_defined_enum: bp("Author a UserDefinedEnum content asset. op=add_value appends an enumerator (authored name is auto-assigned; pass displayName - or name - to set the editable display text). op=rename_value sets a new displayName on the enumerator resolved by index or name (matches short or display name). op=remove_value deletes it. Recompiles dependents automatically. Native UEnums are not editable. Params: assetPath, op (add_value|rename_value|remove_value), displayName?, name?, index? (#686)", "edit_user_defined_enum", (p) => ({ assetPath: p.assetPath, op: p.op, displayName: p.displayName, name: p.name, index: p.index })),
+    create_user_defined_struct: bp("Create a UserDefinedStruct content asset, optionally pre-populated with fields. Each field is {name, type} where type is a MakePinType string (bool|int|int64|float|string|name|text|byte, a struct like Vector, an enum, or an object ref like Actor). Params: name, packagePath? (default /Game), structFields? ([{name, type}]), onConflict? (#735)", "create_user_defined_struct", (p) => ({ name: p.name, packagePath: p.packagePath, fields: p.structFields, onConflict: p.onConflict })),
+    list_struct_fields:   bp("List a UserDefinedStruct's members (index, internal name, friendly/display name, GUID, type label). Use this to find the GUID for a stable rename/retype. Native structs are not editable. Params: assetPath (#735)", "list_struct_fields", (p) => ({ assetPath: p.assetPath ?? p.path })),
+    edit_user_defined_struct: bp("Author a UserDefinedStruct content asset. op=add_field appends a member (type via MakePinType string; pass fieldName for its display name). op=rename_field sets a new newDisplayName on the member resolved by fieldGuid or fieldName - the member GUID is preserved so existing Blueprint pins and DataTable rows survive. op=set_field_type changes a member's type. op=remove_field deletes it. Recompiles dependents automatically. Native structs are not editable. Params: assetPath, op (add_field|rename_field|set_field_type|remove_field), fieldName?, fieldGuid?, newDisplayName?, type? (#735)", "edit_user_defined_struct", (p) => ({ assetPath: p.assetPath ?? p.path, op: p.op, fieldName: p.fieldName, fieldGuid: p.fieldGuid, newDisplayName: p.newDisplayName, type: p.type })),
+    rename_struct_field:  bp("Rename a UserDefinedStruct field's display name while preserving its member GUID, so Blueprint pins and DataTable rows keyed off it survive. Convenience wrapper over edit_user_defined_struct(op=rename_field). Resolve the field by fieldGuid or fieldName (matches friendly or internal name). Params: assetPath, fieldName | fieldGuid, newDisplayName (#735)", "edit_user_defined_struct", (p) => ({ assetPath: p.assetPath ?? p.path, op: "rename_field", fieldName: p.fieldName, fieldGuid: p.fieldGuid, newDisplayName: p.newDisplayName })),
     // Per-asset exclusive locking for concurrent agents. The lock registry
     // lives in the bridge (the shared editor), keyed by asset path with a TTL
     // so a crashed session never wedges an asset. sessionId defaults to this
@@ -196,7 +200,7 @@ export const assetTool: ToolDef = categoryTool(
     keyFilter: z.string().optional().describe("Filter StringTable keys by substring"),
     csvPath: z.string().optional().describe("StringTable CSV import path"),
     mappingIndex: z.number().optional().describe("Index of an IMC mapping for remove_input_mapping (#525)"),
-    fieldName: z.string().optional().describe("DataTable field/column name for set_datatable_cell (#535)"),
+    fieldName: z.string().optional().describe("DataTable field/column name for set_datatable_cell (#535); also resolves a UserDefinedStruct member by friendly/internal name for edit_user_defined_struct/rename_struct_field, or names the new member for add_field (#735)"),
     oldName: z.string().optional().describe("Existing row key for rename_datatable_row (#535)"),
     rows: z.record(z.unknown()).optional().describe("DataTable bulk rows { rowName: {field: value} } for fill_datatable_from_json (#535)"),
     jsonPath: z.string().optional(), jsonString: z.string().optional(),
@@ -247,7 +251,7 @@ export const assetTool: ToolDef = categoryTool(
     hard: z.boolean().optional().describe("get_dependencies: include hard dependencies (default true)"),
     soft: z.boolean().optional().describe("get_dependencies: include soft dependencies (default true)"),
     includeTransforms: z.boolean().optional().describe("list_skeleton_bones: include rest-pose transforms (default true)"),
-    type: z.string().optional().describe("get_primary_asset_ids: FPrimaryAssetType filter (omit for all types) (#579)"),
+    type: z.string().optional().describe("get_primary_asset_ids: FPrimaryAssetType filter (omit for all types) (#579); also the member type (MakePinType string) for edit_user_defined_struct add_field/set_field_type (#735)"),
     // #155
     slots: z.array(z.object({
       slotName: z.string().optional(),
@@ -255,10 +259,16 @@ export const assetTool: ToolDef = categoryTool(
       materialPath: z.string(),
     })).optional().describe("Per-slot material assignments for set_sk_material_slots"),
     path: z.string().optional().describe("Content path (e.g. /Game/Foo) - used by diagnose_registry, create_folder"),
-    op: z.string().optional().describe("edit_user_defined_enum op: add_value | rename_value | remove_value"),
+    op: z.string().optional().describe("edit_user_defined_enum op: add_value | rename_value | remove_value. edit_user_defined_struct op: add_field | rename_field | set_field_type | remove_field"),
     values: z.array(z.string()).optional().describe("create_user_defined_enum: initial value display names"),
     displayName: z.string().optional().describe("edit_user_defined_enum: display text for the enumerator"),
     index: z.number().optional().describe("edit_user_defined_enum: enumerator index for rename/remove"),
+    structFields: z.array(z.object({
+      name: z.string(),
+      type: z.string().optional(),
+    })).optional().describe("create_user_defined_struct: initial members as [{name, type}] (type is a MakePinType string, default bool)"),
+    fieldGuid: z.string().optional().describe("edit_user_defined_struct/rename_struct_field: resolve a field by its member GUID (stable across renames)"),
+    newDisplayName: z.string().optional().describe("edit_user_defined_struct/rename_struct_field: new display name for rename_field"),
     paths: z.array(z.string()).optional().describe("Multiple content paths for create_folder"),
     reconcile: z.boolean().optional().describe("diagnose_registry: force synchronous rescan (evicts pending-kill ghosts)"),
     bHasNavigationData: z.boolean().optional().describe("Toggle nav data generation for set_mesh_nav"),
