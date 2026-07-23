@@ -43,6 +43,40 @@ Two read-only actions on the `plugins` category:
 
 Both reflect the live state of the server, so they're the right tool when something looks wrong - see [Troubleshooting](plugins-troubleshooting.md).
 
+## Configuring a plugin (flow groups)
+
+A plugin that ships many flows organizes them into **groups** by the flow-name prefix - `niagara_fire` and `niagara_smoke` are the `niagara` group, `pcg_scatter_surface` is `pcg`, and so on. (A plugin can override a flow's group explicitly with a `group:` field on the flow entry.) You enable or disable whole groups without installing or uninstalling the plugin:
+
+```bash
+ue-mcp plugin config recipes --list-groups          # show groups + on/off + which layer set each
+ue-mcp plugin config recipes --disable gas,material  # turn groups off
+ue-mcp plugin config recipes --enable niagara        # turn a group back on
+ue-mcp plugin config recipes                         # no flags => interactive menu
+```
+
+Toggles are **opt-out**: a group is on unless you turn it off. They are stored as a map under the layered `ue-mcp:` config block, so they merge across the same `global < project < env < local` cascade as the rest of your config:
+
+```yaml
+ue-mcp:
+  pluginConfig:
+    recipes:            # the plugin slug: its package name minus `ue-mcp-`
+      groups:
+        gas: false
+        material: false
+```
+
+Where the toggle is written depends on the target flag, because this is usually a **personal** preference and `ue-mcp.yml` is source-tracked - putting your taste there would collide with teammates:
+
+| Flag | File | Scope |
+|------|------|-------|
+| *(default)* | `~/.ue-mcp/config.yml` | you, across all your projects (untracked) |
+| `--local` | `ue-mcp.local.yml` | you, this project only (untracked) |
+| `--project` | `ue-mcp.yml` | the whole team, this project (tracked) |
+
+Default is user-global: "I never use GAS recipes" is a person-level trait, and it is the weakest layer so any project can still turn a group back on with `--local`. `--project` is the deliberate act of setting a team-wide default. Keep `ue-mcp.local.yml` out of version control (`ue-mcp init` adds it to `.gitignore`).
+
+Plugin flows are loaded once at server start, so **restart the MCP server** after changing group config.
+
 ## Host UE plugin dependencies
 
 A plugin can declare a single Unreal-side dependency in its manifest:
