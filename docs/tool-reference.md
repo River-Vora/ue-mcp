@@ -2,7 +2,7 @@
 
 This page lists ue-mcp's own category tools and actions. For the official Unreal 5.8 tools that ue-mcp wraps (surfaced inside these same categories), see [Native Tools](native-tools.md).
 
-UE-MCP exposes **<!-- count:tools -->23<!-- /count --> category tools** covering **<!-- count:actions -->682+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
+UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->736+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
 
 !!! tip "First call in any session"
     Start with `project(action="get_status")` to check the connection, then `level(action="get_outliner")` or `asset(action="list")` to explore.
@@ -72,7 +72,7 @@ UE-MCP exposes **<!-- count:tools -->23<!-- /count --> category tools** covering
 | `delete` | Delete asset. On failure returns reason (open_in_editor / has_referencers / in_memory_referenced / package_read_only / package_dirty / unknown) plus referencers, inMemoryReferencers, packageReadOnly, packageDirty diagnostics (#601). Pass force=true to auto-close any open asset editors before deleting (#278). Params: `assetPath, force?` |
 | `delete_batch` | Batch-delete assets. Per-path status (deleted/absent/failed) plus reason+referencers on failed entries (#278). Params: `assetPaths[], force?` |
 | `create_data_asset` | Create UDataAsset instance of custom class. Params: `name, className (/Script/Module.ClassName or loaded name), packagePath?, properties? (key/value map)` |
-| `create_asset_by_class` | Create an asset of ANY concrete UObject class (not just UDataAsset) - physical-material subclasses, curves, settings objects. Params: `name, className, packagePath?, properties?, onConflict?`. Actors/components and specialized assets (Blueprint/Material) have dedicated actions (#726) |
+| `create_asset_by_class` | Create an asset of ANY concrete UObject class (not just UDataAsset) - physical-material subclasses, curves, settings objects. Params: `name, className (/Script/Module.ClassName or loaded name), packagePath?, properties? (key/value map), onConflict? (skip\|replace\|rename)` |
 | `save` | Save asset(s). Params: `assetPath?` |
 | `save_all_dirty` | Flush every dirty package to disk in one call. End-of-workflow shortcut after bulk import/edit. Params: `saveMapPackages? (default true), saveContentPackages? (default true)` |
 | `set_mesh_material` | Assign material to static mesh slot. Params: `assetPath, materialPath, slotIndex?` |
@@ -155,9 +155,9 @@ UE-MCP exposes **<!-- count:tools -->23<!-- /count --> category tools** covering
 | `list_struct_fields` | List a UserDefinedStruct's members (index, internal name, friendly/display name, GUID, type label). Use this to find the GUID for a stable rename/retype. Native structs are not editable. Params: `assetPath (#735)` |
 | `edit_user_defined_struct` | Author a UserDefinedStruct content asset. op=add_field appends a member (type via MakePinType string; pass fieldName for its display name). op=rename_field sets a new newDisplayName on the member resolved by fieldGuid or fieldName - the member GUID is preserved so existing Blueprint pins and DataTable rows survive. op=set_field_type changes a member's type. op=remove_field deletes it. Recompiles dependents automatically. Native structs are not editable. Params: `assetPath, op (add_field\|rename_field\|set_field_type\|remove_field), fieldName?, fieldGuid?, newDisplayName?, type? (#735)` |
 | `rename_struct_field` | Rename a UserDefinedStruct field's display name while preserving its member GUID, so Blueprint pins and DataTable rows keyed off it survive. Convenience wrapper over edit_user_defined_struct(op=rename_field). Resolve the field by fieldGuid or fieldName (matches friendly or internal name). Params: `assetPath, fieldName \| fieldGuid, newDisplayName (#735)` |
-| `lock` | Acquire an exclusive lock on an asset for this session, so concurrent agents don't mutate the same asset at once. The lock registry lives in the shared editor bridge, keyed by asset path with a TTL lease so a crashed session never wedges an asset. Returns acquired=true, or acquired=false with holder{sessionId, ttlSecondsRemaining} when another session holds it. Params: `assetPath, ttlSeconds? (default 300), sessionId?` |
+| `lock` | Acquire an exclusive lock on an asset for this session. Returns acquired=true, or acquired=false with holder{sessionId,ttlSecondsRemaining} when another session holds it. Params: `assetPath, ttlSeconds? (default 300), sessionId?` |
 | `unlock` | Release an asset lock held by this session (or force=true to break any holder's lock). Params: `assetPath, force?, sessionId?` |
-| `list_locks` | List all currently-held asset locks with holder session id, acquiredAt, and ttlSecondsRemaining. |
+| `list_locks` | List all currently-held asset locks with holder session id, acquiredAt, and ttlSecondsRemaining |
 
 ---
 
@@ -174,6 +174,7 @@ UE-MCP exposes **<!-- count:tools -->23<!-- /count --> category tools** covering
 | `read_graph_summary` | Lightweight graph summary (nodes+edges only, ~10KB). Filterable node list. Params: `assetPath, graphName?, titleFilter?, classFilter? (#560)` |
 | `get_execution_flow` | Trace exec pins from an entry point. Params: `assetPath, graphName?, entryPoint?` |
 | `get_dependencies` | Forward (classes/functions/assets) or reverse (referencers) deps. Params: `assetPath, reverse?` |
+| `diff` | Semantic structural diff between two Blueprints (binary uassets are unreviewable in git). Compares parent class, variables (type/default), functions/macros, components, and per-graph node + connection deltas keyed on stable node GUIDs so edits are matched rather than shown as remove+add. Returns a structured delta plus a human summary and changeCount. Params: `assetPath (base/A), otherPath (compare/B)` |
 | `create` | Create Blueprint. Params: `assetPath, parentClass?` |
 | `add_variable` | Add variable. Params: `assetPath, name, varType` |
 | `set_variable_properties` | Edit variable properties. Params: `assetPath, name, instanceEditable?, blueprintReadOnly?, category?, tooltip?, replicationType?, exposeOnSpawn?` |
@@ -225,7 +226,6 @@ UE-MCP exposes **<!-- count:tools -->23<!-- /count --> category tools** covering
 | `connect_pins_batch` | Apply many pin connections in one call (single compile + save). Params: `assetPath, graphName?, connections[]: [{sourceNode, sourcePin, targetNode, targetPin}] (#267)` |
 | `set_node_position` | Move a graph node to (posX, posY). Params: `assetPath, graphName?, nodeId, posX, posY (#277)` |
 | `auto_layout` | Topological layered layout for a graph. Eliminates the (0,0) stack from programmatic add_node. Params: `assetPath, graphName?, columnGap? (default 360), rowGap? (default 200) (#277)` |
-| `diff` | Semantic structural diff between two Blueprints (binary uassets are unreviewable in git). Compares parent class, variables (type/default), functions/macros, components, and per-graph node + connection deltas keyed on stable node GUIDs so edits are matched rather than shown as remove+add. Returns a structured delta plus a human summary and changeCount. Params: `assetPath (base/A), otherPath (compare/B)`. Revision-based diffing via source control is a staged follow-up. |
 
 ---
 
@@ -235,8 +235,8 @@ UE-MCP exposes **<!-- count:tools -->23<!-- /count --> category tools** covering
 
 | Action | Description |
 |--------|-------------|
-| `get_outliner` | List actors (each row includes `editorHidden` - hidden in the viewport but still rendering in game). Params: `classFilter?, nameFilter?, editorHidden? (filter to only hidden/only visible), world? (editor\|pie\|auto), limit?, includeStreaming? (#717)` |
-| `set_editor_visibility` | Bulk set editor-only visibility (temporarily-hidden-in-editor). Target actorLabels[] or all=true. Params: `hidden (required; true=hide, false=show), actorLabels?, all? (#717)` |
+| `get_outliner` | List actors (each row includes editorHidden - hidden in the viewport but still rendering in game). Params: `classFilter?, nameFilter?, editorHidden? (filter to only hidden/only visible), world? (editor\|pie\|auto), limit?, includeStreaming? (#717)` |
+| `set_editor_visibility` | Bulk set editor-only visibility (temporarily-hidden-in-editor) on actors. Targets actorLabels[] or all=true. Params: `hidden (required; true=hide, false=show), actorLabels?, all? (#717)` |
 | `place_actor` | Spawn actor. Pass world:pie to spawn into the running PIE world (#585). Params: `actorClass, label?, location?, rotation?, scale?, staticMesh?, material?, world? (editor\|pie)` |
 | `delete_actor` | Remove actor. Params: `actorLabel` |
 | `get_actor_details` | Inspect actor. Params: `actorLabel OR actorPath, includeProperties?, propertyName?, world? (editor\|pie)` |
@@ -386,7 +386,7 @@ UE-MCP exposes **<!-- count:tools -->23<!-- /count --> category tools** covering
 | `create_sequence` | Create blank AnimSequence. Params: `name, skeletonPath, packagePath?, numFrames?, frameRate?` |
 | `set_bone_keyframes` | Set bone transform keyframes. Params: `assetPath, boneName, keyframes` |
 | `bake_keyframes_batch` | Bake per-bone keyframe arrays for many bones into an AnimSequence in one call. Auto-creates each bone track first (set_bone_keyframes silently leaves a T-pose if the track is missing), wraps the batch in one transaction, and raises if any bone fails instead of reporting hollow success (#540). Params: `assetPath, tracks ([{bone, keyframes:[{location,rotation{x,y,z,w},scale?}]}]), save? (default true)` |
-| `get_bone_transforms` | Read reference pose transforms. Params: `skeletonPath, boneNames?, space? ('local' default, or 'component' for composed parent-chain transforms - retarget-chain / anatomical-scale work) (#245)` |
+| `get_bone_transforms` | Read reference pose transforms for one, many, or ALL bones. Omit boneNames to return every bone with index/parentIndex/location/rotation/scale. With boneNames, returns only the named bones. Params: `skeletonPath, boneNames? (omit = all bones), space? ('local' default, or 'component' for composed parent-chain transforms - retarget-chain / anatomical-scale work) (#245)` |
 | `inspect_anim_nodes` | Deep-dump the FAnimNode_* struct of anim graph nodes (PoseDriver PoseTargets/PoseAsset/RBF params/source bones, etc.) that read_anim_graph omits because it skips the 'Node' property. Params: `assetPath, graphName? (default AnimGraph), nodeClass? (substring filter, e.g. 'PoseDriver') (#657)` |
 | `compare_curves_to_morph_targets` | Compare an AnimSequence/PoseAsset's curve names against a SkeletalMesh's morph target names. Returns curves[], morphTargets[], matched[], curvesWithoutMorph[], morphsWithoutCurve[] - verify authored curves drive morphs without Python. Params: `animPath (AnimSequence or PoseAsset), skeletalMeshPath (#656)` |
 | `set_montage_sequence` | Replace the animation sequence in a montage slot. With segmentIndex, replaces only that one segment; without it, replaces every segment in the slot. Params: `assetPath, animSequencePath, slotIndex? (default 0), segmentIndex? (#626)` |
@@ -400,8 +400,8 @@ UE-MCP exposes **<!-- count:tools -->23<!-- /count --> category tools** covering
 | `read_state_machine` | Read state machine topology. Params: `assetPath, stateMachineName` |
 | `read_anim_graph` | Read AnimBP AnimGraph nodes with properties & pins. Params: `assetPath, graphName?` |
 | `add_curve` | Add float curve to AnimSequence. Params: `assetPath, curveName, curveType?` |
-| `set_anim_curve_keys` | Set float-curve key VALUES on an AnimSequence (add_curve only creates an empty named curve). Adds the curve if missing, then replaces its keys. Use for authoring Distance/Speed/any float curve directly. Params: `assetPath, curveName, keys ([{time, value, interp?('linear'\|'constant'\|'cubic')}]), interpolation? (default 'linear') (#712)` |
-| `apply_animation_modifier` | Instantiate a UAnimationModifier subclass and run it on an AnimSequence. Headline use: modifierClass='DistanceCurveModifier' bakes a Distance curve from the clip's root motion for distance matching (bake root motion first). Registers the modifier on the sequence. DistanceCurveModifier ships in the 'Animation Locomotion Library' plugin (off by default). Params: `assetPath, modifierClass, props? (e.g. {CurveName, Axis, bStopAtEnd, StopSpeedThreshold, SampleRate}) (#712)` |
+| `set_anim_curve_keys` | Set float-curve key VALUES on an AnimSequence (add_curve only creates an empty named curve - it cannot set keyframe values). Adds the curve if missing, then replaces its keys. Use for authoring Distance/Speed/any float curve directly. Params: `assetPath, curveName, keys ([{time, value, interp?('linear'\|'constant'\|'cubic')}]), interpolation? (default 'linear', applied to keys without their own interp) (#712)` |
+| `apply_animation_modifier` | Instantiate a UAnimationModifier subclass and run it on an AnimSequence. Headline use: modifierClass='DistanceCurveModifier' bakes a Distance curve from the clip's root motion for distance matching (needs root motion baked first - see bake_root_motion_from_bone). Registers the modifier on the sequence so it re-applies on reimport. props sets the modifier's EditAnywhere fields (e.g. DistanceCurveModifier: {CurveName, Axis:'XY'\|'X'\|..., bStopAtEnd, StopSpeedThreshold, SampleRate}). Note: DistanceCurveModifier ships in the 'Animation Locomotion Library' plugin (off by default) - enable it first. Params: `assetPath, modifierClass (short name or /Script path), props? (#712)` |
 | `set_montage_slot` | Set slot name on a montage track. Params: `assetPath, slotName, trackIndex?` |
 | `add_montage_section` | Add composite section to montage. Params: `assetPath, sectionName, startTime?, linkedSection?` |
 | `create_ik_rig` | Create IKRigDefinition asset, optionally with retargetRoot + chains[]. Params: `name, skeletalMeshPath, packagePath?, retargetRoot?, chains?: [{name, startBone, endBone, goal?}]` |
@@ -439,8 +439,8 @@ UE-MCP exposes **<!-- count:tools -->23<!-- /count --> category tools** covering
 | `add_motion_matching_node` | Add a Motion Matching node to an AnimBP AnimGraph and point it at a PoseSearchDatabase (the runtime node that searches the database each frame). Connects its output to the Output Pose by default. For chooser-driven database selection, bind an anim-node function that calls SetDatabasesToSearch. Params: `assetPath (AnimBP), databasePath, graphName? (default AnimGraph), connectToOutput? (default true), blendTime? (motion matching)` |
 | `add_pose_history_node` | Add a Pose History (PoseSearchHistoryCollector) node to an AnimBP AnimGraph - the Motion Matching node needs it in the graph to query pose/trajectory history. Defaults to self-generated trajectory (no external trajectory pin needed) and inserts itself into the pose chain feeding the Output Pose. Params: `assetPath (AnimBP), graphName? (default AnimGraph), poseCount?, samplingInterval?, generateTrajectory? (default true), trajectoryHistoryCount?, trajectoryPredictionCount?, insertBeforeOutput? (default true) (motion matching)` |
 | `set_motion_matching_chooser` | Drive the Motion Matching node's Database from a ChooserTable so the database is selected at runtime by character state. Wires a thread-safe EvaluateChooser (result typed to PoseSearchDatabase) into the MM node's Database pin. contextSource selects what the chooser reads its columns from: 'self' (default, the anim instance - choosers branching on AnimBP variables) or 'pawn' (the owning pawn via TryGetPawnOwner - choosers branching on character/pawn state). Params: `assetPath (AnimBP), chooserPath (ChooserTable), graphName? (default AnimGraph), contextSource? ('self'\|'pawn') (motion matching)` |
-| `add_sequence_evaluator` | Add a Sequence Evaluator node (explicit-time player) to an AnimBP graph - the node distance matching drives by setting its ExplicitTime each frame. graphName can be the top-level AnimGraph or a state's inner graph (pass the state name). Defaults bTeleportToExplicitTime=false so time advances and root motion extracts. Connects to the Output Pose / state result by default. Returns nodeGuid for bind_anim_node_function. Params: `assetPath (AnimBP), sequencePath?, graphName? (default AnimGraph), explicitTime?, shouldLoop?, teleportToExplicitTime? (default false), connectToOutput? (default true) (#713)` |
-| `bind_anim_node_function` | Bind a thread-safe anim-node function to an anim graph node's update slot - the mechanism distance matching uses to advance a Sequence Evaluator's explicit time (function calls AnimDistanceMatchingLibrary::DistanceMatchToTarget / AdvanceTimeByDistanceMatching). The function must already exist on the AnimBP as a BlueprintThreadSafe function. Identify the node by nodeGuid. Params: `assetPath (AnimBP), nodeGuid, functionName, graphName? (default AnimGraph), binding? ('update' (default)\|'becomeRelevant'\|'initialUpdate') (#713)` |
+| `add_sequence_evaluator` | Add a Sequence Evaluator node (explicit-time player) to an AnimBP graph - the node distance matching drives by setting its ExplicitTime each frame. graphName can be the top-level AnimGraph or a state's inner graph (pass the state name). Defaults bTeleportToExplicitTime=false so time advances and root motion extracts. Connects to the Output Pose by default. Returns nodeGuid for bind_anim_node_function. Params: `assetPath (AnimBP), sequencePath? (AnimSequence to evaluate), graphName? (default AnimGraph), explicitTime?, shouldLoop?, teleportToExplicitTime? (default false), connectToOutput? (default true) (#713)` |
+| `bind_anim_node_function` | Bind a thread-safe anim-node function to an anim graph node's update slot - the mechanism distance matching uses to advance a Sequence Evaluator's explicit time each frame (function calls AnimDistanceMatchingLibrary::DistanceMatchToTarget / AdvanceTimeByDistanceMatching). The function must already exist on the AnimBP (create it as a BlueprintThreadSafe function first). Identify the node by nodeGuid (from add_sequence_evaluator / add_*_node). Params: `assetPath (AnimBP), nodeGuid, functionName, graphName? (default AnimGraph), binding? ('update' (default)\|'becomeRelevant'\|'initialUpdate') (#713)` |
 | `set_sequence_properties` | Batch-set properties on AnimSequence assets. If a path is a Montage and resolveFromMontages is true (default), resolves to its first AnimSequence. Params: `assetPaths[], properties{enableRootMotion?, forceRootLock?, useNormalizedRootMotionScale?, rootMotionRootLock?}, resolveFromMontages?` |
 | `bake_root_motion_from_bone` | Bake delta translation from a source bone (e.g. pelvis) onto the root bone across the whole sequence; compensates the source bone so world-space position is unchanged. Params: `assetPath, sourceBone, rootBone? (default 'root'), axes? (default ['x','y']), interpolation? ('linear'\|'per_frame', default 'linear')` |
 | `get_bone_transform` | Read a bone or socket transform on a live actor's SkeletalMeshComponent. Wraps GetBoneTransform / GetSocketTransform. Params: `actorLabel, boneName (or socket name), componentName? (default: CharacterMesh0 / Mesh / first SK component), world? (auto\|pie\|game\|editor, default auto), space? (world\|component\|local, default world)` |
@@ -466,8 +466,8 @@ UE-MCP exposes **<!-- count:tools -->23<!-- /count --> category tools** covering
 | `create_layer_info` | Standalone LayerInfo asset creation - no landscape required. Params: `layerName, name? (default LI_<layerName>), packagePath? (default /Game/Landscape/LayerInfos), physMaterial? (asset path), hardness? (#251)` |
 | `create` | Spawn a new ALandscape with a flat heightmap. Defaults match the Editor's Landscape Mode 'create new' (8x8 components, 63 quads/subsection, 2 subsections/component = 1016x1016 quads). Params: `location? (Vec3), scale? (Vec3, default 100,100,100), componentCountX? (default 8), componentCountY? (default 8), subsectionSizeQuads? (one of 7\|15\|31\|63\|127\|255, default 63), numSubsections? (1\|2, default 2), heightOffset? (uint16, default 32768 = mid-elevation), label? (#303)` |
 | `get_material_usage_summary` | Per-proxy summary: landscape/hole material paths + component/grass/nanite counts (#150) |
-| `list_proxies` | Enumerate loaded World Partition LandscapeStreamingProxy actors with per-proxy worldBounds (origin/extent), plus loadedProxies + parentLandscapes counts. Only loaded proxies appear (unloaded are not spawned) - confirm a proxy is streamed in before trusting a layer/height readback (#733) |
-| `find_proxy_at` | Resolve which loaded LandscapeStreamingProxy covers a world X/Y. Returns found/loaded + label, or loaded:false when the covering proxy is streamed out. Params: `worldX, worldY (#733)` |
+| `list_proxies` | Enumerate loaded World Partition LandscapeStreamingProxy actors with per-proxy worldBounds (origin/extent), plus loadedProxies + parentLandscapes counts. Unloaded proxies are not spawned as actors, so only loaded ones appear - use this to confirm a proxy is streamed in before trusting a layer/height readback (#733) |
+| `find_proxy_at` | Resolve which loaded LandscapeStreamingProxy covers a world X/Y. Returns found/loaded + label, or loaded:false when the covering proxy is streamed out (so a 0-weight readback there is ambiguous, not real). Params: `worldX, worldY (#733)` |
 
 ---
 
@@ -552,75 +552,46 @@ UE-MCP exposes **<!-- count:tools -->23<!-- /count --> category tools** covering
 
 ## audio
 
-*Audio: the full UE5 audio stack authored end-to-end - sound assets, playback, MetaSound + SoundCue graph authoring, submixes and effect chains, sound classes/mixes, concurrency, attenuation, and spatialization. Nothing here creates an empty placeholder; every asset is authorable to a working state.*
-
-### Assets and playback
+*Audio: sound assets, playback, MetaSound + SoundCue graph authoring, submixes/effects, sound classes/mixes, attenuation, concurrency, spatialization.*
 
 | Action | Description |
 |--------|-------------|
-| `list` | List sound assets (SoundWave, SoundCue, MetaSoundSource) under a directory, paginated. Params: `directory? (default /Game), recursive? (default true), maxResults? (default 1000), offset? (default 0)`. Returns `assets, count, total, offset, hasMore, nextOffset`. |
-| `extract_pcm` | Decode a USoundWave's imported audio to in-memory PCM (no intermediate file) for semantic sound search / analysis. Returns sampleRate, numChannels, numFrames, durationSeconds, and 16-bit PCM base64 (interleaved). Params: `soundPath, maxSeconds? (cap the decoded window), downmixMono? (default false)` |
+| `list` | List sound assets (SoundWave, SoundCue, MetaSoundSource) under a directory, paginated. Params: `directory? (default /Game), recursive? (default true), maxResults? (default 1000), offset? (default 0)` |
+| `extract_pcm` | Decode a USoundWave's imported audio to in-memory PCM (no intermediate file, no reliance on the original source path) for semantic sound search / analysis. Returns sampleRate, numChannels, numFrames, durationSeconds, and 16-bit PCM samples base64-encoded (interleaved). Params: `soundPath (required), maxSeconds? (cap the decoded window; default full asset), downmixMono? (default false) (#729)` |
 | `import_audio` | Import a WAV/OGG/FLAC file as a USoundWave. Returns durationSeconds, numChannels, looping. Params: `filePath, name?, packagePath? (default /Game/Audio), looping?, replaceExisting? (default true)` |
 | `play_at_location` | Play a sound in the editor world. Params: `soundPath, location, volumeMultiplier?, pitchMultiplier?` |
 | `spawn_ambient` | Place an AmbientSound actor. Params: `soundPath, location, label?` |
-
-### MetaSound graph authoring
-
-Prefer `metasound_author` - it stamps a whole graph in one call. The granular actions are for incremental edits to a graph created with `create_metasound` in the same editor session.
-
-| Action | Description |
-|--------|-------------|
-| `metasound_author` | **One-shot: stamp a whole MetaSound graph from a declarative spec.** Params: `name, packagePath?, format? (mono\|stereo), oneShot?, inputs? [{name,dataType,default?}], outputs? [{name,dataType}], nodes? [{id,class,namespace?,variant?,majorVersion?,inputs?}], connections? [{from,to}]`. Connection endpoints are `nodeId:vertex`, or the special heads `input:<name>`, `output:<name>`, `audioOut:<channel>`. Each element reports its own ok/error; builds and saves at the end. |
-| `create_metasound` | Create an empty MetaSoundSource and open a builder session for incremental authoring. Params: `name, packagePath? (default /Game/Audio/MetaSounds), format?, oneShot?` |
-| `metasound_add_node` | Add a node by registered class name. Params: `assetPath, nodeClassName, nodeNamespace? (default UE), nodeVariant?, majorVersion?` |
-| `metasound_add_input` / `metasound_add_output` | Add a graph input/output. Params: `assetPath, name, dataType, defaultValue?` |
-| `metasound_connect` | Connect node output vertex to node input vertex. Params: `assetPath, fromNodeId, fromOutput, toNodeId, toInput` |
-| `metasound_connect_input` / `metasound_connect_output` / `metasound_connect_audio_out` | Connect a graph input to a node, a node to a graph output, or a node to the source audio output (`channel?`). |
-| `metasound_set_default` | Set a default on a node input or graph input. Params: `assetPath, value, dataType?, (nodeId + inputName) or graphInput` |
-| `metasound_build` | Write the builder document to the asset and save. Params: `assetPath` |
-| `metasound_list_node_classes` | List common MetaSound node classes to add. Params: `filter?` |
-| `metasound_get_graph` | Report a MetaSound's builder-session state. Params: `assetPath` |
-
-### SoundCue graph authoring
-
-| Action | Description |
-|--------|-------------|
-| `cue_author` | **One-shot: create a SoundCue and stamp its whole node tree.** Params: `name, packagePath?, nodes [{id,type,soundWavePath?,properties?}], connections [{parent,child,index?}] (omit parent => root), root?`. Node types: wave_player, mixer, random, modulator, attenuation, looping, concatenator, delay, switch. |
-| `create_cue` | Create a SoundCue, optionally seeded from a wave. Params: `name, packagePath?, soundWavePath?` |
-| `cue_add_node` | Add a node to a cue graph. Params: `cuePath, nodeType, soundWavePath?, properties?` |
-| `cue_connect` | Connect a node as a child of another (or as root). Params: `cuePath, parentNodeId?, childNodeId, childIndex?` |
-| `cue_get_graph` | Read a cue node graph. Params: `cuePath` |
-
-### Mixing, routing, and spatialization
-
-| Action | Description |
-|--------|-------------|
-| `create_submix` | Create a USoundSubmix, optionally parented. Params: `name, packagePath?, parentPath?, outputVolume?, wetLevel?, dryLevel?` |
-| `set_submix_parent` | Reparent a submix. Params: `submixPath, parentPath (empty detaches)` |
-| `add_submix_effect` | Append an effect preset to a submix's chain (creates the preset). Params: `submixPath, effectType (reverb\|eq\|dynamics\|filter\|delay), name?, packagePath?, settings?` |
-| `create_sound_class` | Create a USoundClass. Params: `name, packagePath?, parentPath?, properties?` |
-| `create_sound_mix` | Create a USoundMix with class adjusters. Params: `name, packagePath?, adjusters? [{soundClassPath, volumeAdjuster?, pitchAdjuster?, applyToChildren?}], fadeInTime?, fadeOutTime?` |
-| `create_concurrency` | Create a USoundConcurrency. Params: `name, packagePath?, maxCount?, limitToOwner?, resolutionRule?, volumeScale?` |
-| `create_attenuation` | Create a USoundAttenuation. Params: `name, packagePath?, settings?, falloffDistance?, spatialize?, enableOcclusion?` |
-| `set_sound_submix` | Set a sound's base submix. Params: `soundPath, submixPath` |
-| `add_sound_submix_send` | Add a submix send to a sound. Params: `soundPath, submixPath, sendLevel?` |
-| `set_sound_class` | Assign a sound class. Params: `soundPath, soundClassPath` |
-| `set_sound_attenuation` | Attach an attenuation asset. Params: `soundPath, attenuationPath` |
-| `set_sound_concurrency` | Attach a concurrency asset. Params: `soundPath, concurrencyPath` |
-| `set_property` | Set any UPROPERTY on an audio asset (dotted path, nested structs/arrays/object refs). Params: `assetPath, propertyName, value` |
-
-Example - a one-call sine synth routed through a music submix:
-
-```
-audio(action="metasound_author",
-  name="Hum", packagePath="/Game/Audio/MetaSounds", format="mono", oneShot=false,
-  nodes=[{ "id": "osc", "class": "Sine", "variant": "Audio", "inputs": { "Frequency": 220.0 } }],
-  connections=[{ "from": "osc:Audio", "to": "audioOut:0" }])
-
-audio(action="create_submix", name="Music", packagePath="/Game/Audio/Submixes")
-audio(action="add_submix_effect", submixPath="/Game/Audio/Submixes/Music.Music", effectType="reverb")
-audio(action="set_sound_submix", soundPath="/Game/Audio/MetaSounds/Hum.Hum", submixPath="/Game/Audio/Submixes/Music.Music")
-```
+| `metasound_author` | PREFERRED: stamp a whole MetaSound graph in ONE call from a declarative spec (avoids dozens of add_node/connect round-trips). Params: `name, packagePath?, format? ('mono'\|'stereo'), oneShot?, onConflict?, inputs? [{name,dataType,default?}], outputs? [{name,dataType}], nodes? [{id,class,namespace?,variant?,majorVersion?,inputs?:{vertex:value}}], connections? [{from,to}]` |
+| `create_metasound` | Create an empty MetaSoundSource and open a builder session for INCREMENTAL authoring (add_node/connect/...). For a whole graph at once prefer metasound_author. Params: `name, packagePath? (default /Game/Audio/MetaSounds), format? ('mono'\|'stereo'), oneShot?` |
+| `metasound_list_node_classes` | List common MetaSound node classes to add (name, namespace, variant, notes). Params: `filter? (substring)` |
+| `metasound_get_graph` | Report a MetaSound's builder-session state (active builder, audio outputs, oneShot). Params: `assetPath` |
+| `metasound_add_node` | Add a node to a MetaSound graph by registered class name. Returns nodeId (+ input/output counts). Params: `assetPath, nodeClassName (e.g. 'Sine'), nodeNamespace? (default 'UE'), nodeVariant? (e.g. 'Audio'), majorVersion? (default 1)` |
+| `metasound_add_input` | Add a graph input to a MetaSound. Params: `assetPath, name, dataType ('Float'\|'Int32'\|'Bool'\|'String'\|'Trigger'\|'Audio'\|'Time'\|...), defaultValue?` |
+| `metasound_add_output` | Add a graph output to a MetaSound. Params: `assetPath, name, dataType` |
+| `metasound_connect` | Connect one node's output vertex to another node's input vertex. Params: `assetPath, fromNodeId, fromOutput (vertex name), toNodeId, toInput (vertex name)` |
+| `metasound_connect_input` | Connect a graph input to a node input vertex. Params: `assetPath, graphInput (name), toNodeId, toInput (vertex name)` |
+| `metasound_connect_output` | Connect a node output vertex to a graph output. Params: `assetPath, fromNodeId, fromOutput (vertex name), graphOutput (name)` |
+| `metasound_connect_audio_out` | Connect a node output vertex to the source's audio output. Params: `assetPath, fromNodeId, fromOutput (vertex name, must be Audio type), channel? (0=left/mono, 1=right; default 0)` |
+| `metasound_set_default` | Set a default value on a node input vertex, or on a graph input. Params: `assetPath, value (required), dataType? (Float\|Int32\|Bool\|String hint), then EITHER (nodeId + inputName) OR graphInput` |
+| `metasound_build` | Write the builder document to the MetaSound asset and save. Call after authoring. Params: `assetPath` |
+| `cue_author` | PREFERRED: create a SoundCue and stamp its whole node tree in ONE call. Params: `name, packagePath?, onConflict?, nodes [{id,type,soundWavePath?,properties?}], connections [{parent,child,index?}] (omit parent => root), root? (nodeId)` |
+| `create_cue` | Create a SoundCue, optionally seeded from a wave. For a whole graph prefer cue_author. Params: `name, packagePath?, soundWavePath?` |
+| `cue_add_node` | Add a node to a SoundCue graph. Returns nodeId. Params: `cuePath, nodeType ('wave_player'\|'mixer'\|'random'\|'modulator'\|'attenuation'\|'looping'\|'concatenator'\|'delay'\|'switch'), soundWavePath? (wave_player), properties? (node-specific fields)` |
+| `cue_connect` | Connect a SoundCue node as a child of another (or as the cue root). Params: `cuePath, parentNodeId (omit for root), childNodeId, childIndex? (default append)` |
+| `cue_get_graph` | Read a SoundCue node graph: nodes (id, type, children) and root. Params: `cuePath` |
+| `create_submix` | Create a USoundSubmix, optionally parented. Params: `name, packagePath? (default /Game/Audio/Submixes), parentPath?, outputVolume?, wetLevel?, dryLevel?` |
+| `set_submix_parent` | Reparent a submix (sets ParentSubmix, updating both ends). Params: `submixPath, parentPath (empty detaches to root)` |
+| `add_submix_effect` | Append a submix effect preset to a submix's effect chain (creates the preset asset). Params: `submixPath, effectType ('reverb'\|'eq'\|'dynamics'\|'filter'\|'delay'), name?, packagePath?, settings? (effect Settings struct as JSON)` |
+| `create_sound_class` | Create a USoundClass, optionally parented, with properties. Params: `name, packagePath? (default /Game/Audio/SoundClasses), parentPath?, properties? (FSoundClassProperties JSON: Volume, Pitch, bIsUISound, ...)` |
+| `create_sound_mix` | Create a USoundMix with sound-class adjusters. Params: `name, packagePath? (default /Game/Audio/SoundMixes), adjusters? ([{soundClassPath, volumeAdjuster?, pitchAdjuster?, applyToChildren?}]), fadeInTime?, fadeOutTime?` |
+| `create_concurrency` | Create a USoundConcurrency asset. Params: `name, packagePath? (default /Game/Audio/Concurrency), maxCount?, limitToOwner?, resolutionRule? (e.g. 'StopFarthestThenOldest'), volumeScale?` |
+| `create_attenuation` | Create a USoundAttenuation asset. Params: `name, packagePath? (default /Game/Audio/Attenuation), settings? (FSoundAttenuationSettings JSON), plus shortcuts: falloffDistance?, spatialize?, enableOcclusion?` |
+| `set_sound_submix` | Set a sound's base submix (routing target). Params: `soundPath, submixPath (empty detaches)` |
+| `add_sound_submix_send` | Add a submix send to a sound. Params: `soundPath, submixPath, sendLevel? (default 1.0)` |
+| `set_sound_class` | Assign a sound class to a sound. Params: `soundPath, soundClassPath` |
+| `set_sound_attenuation` | Attach an attenuation asset to a sound. Params: `soundPath, attenuationPath (empty clears)` |
+| `set_sound_concurrency` | Attach a concurrency asset to a sound. Params: `soundPath, concurrencyPath (empty clears)` |
+| `set_property` | Set any UPROPERTY on an audio asset by (dotted) name, value as JSON. Handles nested structs, arrays, object refs. Params: `assetPath, propertyName, value` |
 
 ---
 
@@ -671,9 +642,12 @@ audio(action="set_sound_submix", soundPath="/Game/Audio/MetaSounds/Hum.Hum", sub
 | `restart_editor` | Stop then start the editor |
 | `build_project` | Build the project's C++ code using Unreal Build Tool. Editor should be stopped first |
 | `execute_command` | Run console command. Params: `command` |
-| `execute_python` | GATED LAST RESORT. execute_python is unreachable until a semantic tool search over your taskSummary has been run AND every candidate it returns is EXPLICITLY ruled out with a stated reason. Flow: (1) call with taskSummary (+code) - it returns the candidate actions; (2) re-call with the same taskSummary/code PLUS ruledOut=[{action, reason}] giving a specific reason each candidate does not fit. Python runs only once every candidate is ruled out. Params: `code, taskSummary (required), ruledOut?, resultVariable? (name of a top-level variable to return as result, separate from print()/log; #732) (#704)` |
-| `run_python_file` | Run a Python file from disk with __file__/__name__ populated (#142). Params: `filePath, args?, resultVariable? (return a named top-level variable as result, separate from logs; #732)` |
-| `purge_python_modules` | Purge cached embedded-Python modules whose name starts with a prefix, so the editor drops stale code after you edit a Python tool on disk. Returns the purged names + count. Params: `prefix (required, non-empty) (#719)` |
+| `execute_python` | GATED LAST RESORT. execute_python is unreachable until a semantic tool search over your taskSummary has been run AND every candidate it returns is EXPLICITLY ruled out with a stated reason. Flow: (1) call with taskSummary (+code) - it returns the candidate actions; (2) re-call with the same taskSummary/code PLUS ruledOut=[{action, reason}] giving a specific reason each candidate does not fit. Python runs only once every candidate is ruled out. Params: `code, taskSummary (required), ruledOut?, resultVariable? (name of a top-level variable to return as `result`, separate from print()/log; #732) (#704)` |
+| `run_python_file` | Run a Python file from disk with __file__/__name__ populated (#142). Params: `filePath, args?, resultVariable? (name of a top-level variable to return as `result`, separate from logs; #732)` |
+| `purge_python_modules` | Purge cached embedded-Python modules whose name starts with a prefix, so the editor drops stale code after you edit a Python tool on disk. Returns the purged module names + count. Params: `prefix (required, non-empty) (#719)` |
+| `close_sequence` | Close the currently open Level Sequence editor (Sequencer). Do this before bulk-deleting actors a sequence may possess - open sequences re-resolve possessables by name during destruction and can mis-bind. Returns wasOpen + closedSequence (#718) |
+| `open_tab` | Open a registered editor tab by ID so its UI can be screenshotted as evidence (e.g. 'ProjectSettings', 'OutputLog', 'ContentBrowserTab1'). Params: `tabId (#727)` |
+| `open_settings` | Open (and navigate) a settings viewer for visual settings evidence. Params: `container? (Project\|Editor; default Project), category? (e.g. 'Engine'), section? (e.g. 'Physics', or a combined 'Engine.Physics') (#727)` |
 | `set_property` | Set UObject property. Saves the package to disk by default; pass save=false to leave it dirty in-memory (batch many writes, then editor(save_dirty)/asset(save)) (#674). Params: `objectPath, propertyName, value, save? (default true)` |
 | `get_property` | Read UObject property. Params: `objectPath, propertyName` |
 | `describe_object` | Describe a UObject and optionally list/read properties. Params: `objectPath, includeProperties?, includeValues?, propertyNames?` |
@@ -688,10 +662,10 @@ audio(action="set_sound_submix", soundPath="/Game/Audio/MetaSounds/Hum.Hum", sub
 | `undo` | Undo last transaction |
 | `redo` | Redo last transaction |
 | `get_perf_stats` | Editor performance stats |
-| `run_stat` | Run a stat overlay. A bare `name` (e.g. 'unit','fps','game','gpu') is prefixed with 'stat '; or pass a full `command`. Params: `name? OR command? (#722)` |
+| `run_stat` | Run a stat overlay. Params: `name (bare stat name, e.g. 'unit','fps','game','gpu') OR command (full console command)` |
 | `set_scalability` | Set rendering quality via the Scalability system (actually applies + persists, not just sg.* cvars). Params: `level (Low\|Medium\|High\|Epic\|Cinematic)` |
 | `set_cvars` | Bulk-set console variables. Params: `cvars ({name: value} object OR [{name, value}] array)` |
-| `capture_screenshot` | Screenshot. target=pie captures the actual PIE game viewport with UI + on-screen debug canvas (what the player sees), even in Play-in-New-Window; target=editor captures the level viewport; target=window synchronously captures the whole active Slate window (pixel-true for ALL Slate/UMG UI, works unfocused/off-screen — the reliable mode for agent visual QA of game UI). Returns includesDebugCanvas, and window title + width/height for target=window. Params: `filename?, resolution?, target? (auto\|pie\|editor\|window; auto routes to PIE when running) (#226/#724)` |
+| `capture_screenshot` | Screenshot. target=pie captures the actual PIE game viewport with UI + on-screen debug canvas (what the player sees), even in Play-in-New-Window; target=editor captures the level viewport; target=window synchronously captures the whole active Slate window via FSlateApplication::TakeScreenshot - pixel-true for ALL Slate/UMG UI (painted widgets the compositing paths can miss), returns after the PNG is written, and works while the window is unfocused or off-screen, so it is the reliable mode for agent visual QA of game UI. Params: `filename?, resolution?, target? (auto\|pie\|editor\|window; auto routes to PIE when running)` |
 | `capture_scene_png` | Headless PNG screenshot via SceneCapture2D (works unfocused, guaranteed RGBA8 LDR). focusActorLabel auto-frames the camera on an actor's bounds; world:pie captures the running game world (#599). Params: `outputPath, location?, rotation?, focusActorLabel?, focusDirection?, focusMargin?, world? (editor\|pie), width? (default 1280), height? (default 720), fov? (default 90) (#148/#599)` |
 | `set_realtime` | Toggle realtime update on the level editor viewports so the editor-world sim (Niagara, anims) ticks - otherwise capture_scene_png renders an unticked, empty sim. Params: `enabled (default true) (#537)` |
 | `get_viewport` | Get viewport camera |
@@ -700,9 +674,6 @@ audio(action="set_sound_submix", soundPath="/Game/Audio/MetaSounds/Hum.Hum", sub
 | `set_viewport` | Set viewport camera. Params: `location?, rotation?` |
 | `focus_on_actor` | Focus on actor. Params: `actorLabel` |
 | `create_sequence` | Create Level Sequence. Params: `name, packagePath?` |
-| `close_sequence` | Close the currently open Level Sequence editor (Sequencer) before bulk-deleting actors a sequence may possess. Returns wasOpen + closedSequence (#718) |
-| `open_tab` | Open a registered editor tab by ID so its UI can be screenshotted (e.g. 'ProjectSettings', 'OutputLog'). Params: `tabId (#727)` |
-| `open_settings` | Open (and navigate) a settings viewer for visual settings evidence. Params: `container? (Project\|Editor; default Project), category? (e.g. Engine), section? (e.g. Physics, or a combined Engine.Physics) (#727)` |
 | `get_sequence_info` | Read sequence: bindings (possessable/spawnable) with their Sequencer tags (#556), tracks, and optional section detail. Params: `assetPath, includeSectionDetails? (attach sockets, first transform key values per track)` |
 | `add_sequence_track` | Add an empty track. Params: `assetPath, trackType, actorLabel?` |
 | `add_sequence_section` | Add a section to a track (creating the track if needed), set its start/end in seconds, and for a CameraCut track bind it to a camera. Returns the section index + channel names to key. Params: `sequencePath, trackType (Transform\|Float\|Fade\|CameraCut\|Audio\|Event\|SkeletalAnimation), actorLabel? (binding scope), startSeconds?, endSeconds?, cameraActorLabel? (#548)` |
@@ -766,7 +737,7 @@ audio(action="set_sound_submix", soundPath="/Game/Audio/MetaSounds/Hum.Hum", sub
 | Action | Description |
 |--------|-------------|
 | `set_collision_profile` | Set collision preset. Params: `actorLabel, profileName` |
-| `set_simulate_physics` | Toggle physics. Accepts `simulate` (or legacy `enabled`); errors explicitly when neither is given. Params: `actorLabel, simulate (#721)` |
+| `set_simulate_physics` | Toggle physics. Params: `actorLabel, simulate` |
 | `add_impulse` | Apply an impulse (or force with mode='force') to a (PIE) actor's simulating physics body so its motion can be observed over time - loop level(read_actor_motion) to sample the response. Params: `actorLabel, impulse {x,y,z} (or force/vector), mode? (impulse\|force), componentName?, boneName?, location? (apply at world point), velChange?/accelChange?, world? (editor\|pie\|auto) (#676)` |
 | `set_collision_enabled` | Set collision mode. Params: `actorLabel, collisionEnabled` |
 | `set_collision` | Unified collision authoring for a placed actor (actorLabel) or a Blueprint component template (assetPath+componentName). Apply any of: collisionProfile, collisionEnabled (NoCollision\|QueryOnly\|PhysicsOnly\|QueryAndPhysics), objectType (channel name), responseToAllChannels (Block\|Overlap\|Ignore), responses ({channel: Block\|Overlap\|Ignore}). Profile is applied first, then overrides. componentName optional for actors (defaults to all primitive components), required for Blueprint templates (#545) |
@@ -784,7 +755,7 @@ audio(action="set_sound_submix", soundPath="/Game/Audio/MetaSounds/Hum.Hum", sub
 | `get_applied_imcs` | Read a live PIE player's currently-applied Input Mapping Contexts (with priority + registrationCount). Requires PIE running. Params: `playerIndex? (default 0) (#604)` |
 | `list_input_mappings` | Alias for read_imc. List key→action bindings with triggers/modifiers. Params: `imcPath` |
 | `add_imc_mapping` | Add key mapping to IMC. Params: `imcPath, inputActionPath, key` |
-| `set_mapping_modifiers` | Set modifiers/triggers on an IMC mapping. Each modifier OR trigger is either {type:'<ShortName>', <prop>:<val>} or {class:'/Script/Module.Class', properties:{...}} - the class form resolves any custom UInputModifier/UInputTrigger subclass (e.g. type:'Hold' with HoldTimeThreshold). Unresolvable trigger specs are reported in failedTriggers and never leave a null entry (#649/#725). Params: `imcPath, mappingIndex?, modifiers?, triggers?` |
+| `set_mapping_modifiers` | Set modifiers/triggers on an IMC mapping. Each modifier OR trigger is either {type:'<ShortName>', <prop>:<val>} or {class:'/Script/Module.Class', properties:{...}} - the class form resolves any custom UInputModifier/UInputTrigger subclass (e.g. type:'Hold' \| class:'/Script/EnhancedInput.InputTriggerHold', with HoldTimeThreshold). Unresolvable trigger specs are reported in failedTriggers and never leave a null entry (#649/#725). Params: `imcPath, mappingIndex?, modifiers?, triggers?` |
 | `remove_imc_mapping` | Remove an IMC mapping. Params: `imcPath, mappingIndex? \| (inputActionPath? + key?) (#158)` |
 | `set_imc_mapping_key` | Rebind an IMC mapping to a new key. Params: `imcPath, newKey, mappingIndex? \| key? \| inputActionPath? (#158)` |
 | `set_imc_mapping_action` | Retarget an IMC mapping to a different InputAction. Params: `imcPath, newInputActionPath, mappingIndex? \| key? \| inputActionPath? (#158)` |
@@ -883,11 +854,11 @@ audio(action="set_sound_submix", soundPath="/Game/Audio/MetaSounds/Hum.Hum", sub
 
 ## feedback
 
-*Submit feedback to improve ue-mcp when native tools fall short and execute_python was used as a workaround.*
+*Submit feedback to improve ue-mcp when a native tool falls short: a missing action, a wrong result, a crash, or a gap you had to work around with execute_python. A python workaround is a common trigger but is not required.*
 
 | Action | Description |
 |--------|-------------|
-| `submit` | Submit feedback about a tool gap. Blocks on an MCP elicitation prompt that asks the USER (not the agent) to approve or decline the exact payload before anything is posted to GitHub |
+| `submit` | Submit feedback about a tool gap (missing action, wrong behavior, crash, or a case you had to work around). Provide a specific title and a summary; pythonWorkaround and idealTool are optional enrichment, not prerequisites. Blocks on an MCP elicitation prompt that asks the USER (not the agent) to approve or decline the exact payload before anything is posted to GitHub |
 
 ---
 
@@ -980,15 +951,13 @@ audio(action="set_sound_submix", soundPath="/Game/Audio/MetaSounds/Hum.Hum", sub
 
 *Import Fab (Epic marketplace) content: check plugin/login status, trigger login/logout, sync your owned library into the Content Browser, inspect/clear the download cache, and import owned or local source files into the project.*
 
-Fab's window in the editor is a web frontend: catalog browsing, your library, purchases, and signed-URL resolution all live on Epic's servers behind the browser (there is no official consumer REST API). This category drives the native download+import layer beneath it, so store browsing stays in the Fab window. The workflow: log in (in the Fab window or via `login`), add items to your library, `sync_library`, then `import_file` owned/cached assets into any content path.
-
 | Action | Description |
 |--------|-------------|
-| `status` | Report Fab plugin state: whether the module is loaded, whether the native import/cache API is linked in this build, whether the Fab window has been opened this session, and the download cache location/size. Call this first. |
-| `login` | Trigger the Fab login flow (EOS account portal). Asynchronous - returns once the flow is opened, not once authenticated. |
-| `logout` | Clear the persistent Fab authentication for this device. |
-| `sync_library` | Load the user's owned Fab library ("My Folder") into the Content Browser via TEDS. Requires an active login; items appear asynchronously. Params: `batchSize?` |
-| `list_cached` | List the entries currently in the local Fab download cache (already-downloaded owned assets). |
-| `cache_info` | Report the Fab download cache location, total size, and entry count. |
-| `clear_cache` | Delete the local Fab download cache to reclaim disk. Does not affect assets already imported into the project. |
-| `import_file` | Import a source file into the project through the Fab Interchange import pipeline. Use for owned assets downloaded/cached locally, or any local source file (fbx, textures). Single files import synchronously and report the created asset paths; pack/quixel workflows may run asynchronously. Params: `source (absolute path on disk), destination (content path like /Game/Fab/Imported)` |
+| `status` | Report Fab plugin state: whether the module is loaded, whether the native import/cache API is linked in this build, whether the Fab window has been opened this session, and the download cache location/size. Call this first |
+| `login` | Trigger the Fab login flow (EOS account portal). Asynchronous - returns once the flow is opened, not once authenticated. Complete any prompt, then call status |
+| `logout` | Clear the persistent Fab authentication for this device |
+| `sync_library` | Load the user's owned Fab library ("My Folder") into the Content Browser via TEDS. Requires an active login; items appear asynchronously. Params: `batchSize? (items per sync request)` |
+| `list_cached` | List the entries currently in the local Fab download cache (already-downloaded owned assets). Params: `none` |
+| `cache_info` | Report the Fab download cache location, total size, and entry count |
+| `clear_cache` | Delete the local Fab download cache to reclaim disk. Does not affect assets already imported into the project |
+| `import_file` | Import a source file into the project through the Fab Interchange import pipeline. Use for owned assets that are downloaded/cached locally, or any local source file (fbx, textures). Single files import synchronously and report the created asset paths; pack/quixel workflows may run asynchronously. Params: `source (absolute path to the source file on disk), destination (content path like /Game/Fab/Imported)` |
