@@ -1030,6 +1030,19 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SetRendererProperty(const TSharedPtr<FJ
 		if (!Params->TryGetStringField(TEXT("value"), StringValue)) return MCPError(TEXT("Expected string 'value'"));
 		SP->SetPropertyValue(SP->ContainerPtrToValuePtr<void>(R), StringValue);
 	}
+	else if (FObjectPropertyBase* OP = CastField<FObjectPropertyBase>(Prop))
+	{
+		// Object/asset reference (e.g. a sprite renderer's Material): 'value' is
+		// the asset path.
+		if (!Params->TryGetStringField(TEXT("value"), StringValue)) return MCPError(TEXT("Expected string asset path 'value'"));
+		UObject* Asset = UEditorAssetLibrary::LoadAsset(StringValue);
+		if (!Asset) return MCPError(FString::Printf(TEXT("Asset not found: %s"), *StringValue));
+		if (OP->PropertyClass && !Asset->IsA(OP->PropertyClass))
+		{
+			return MCPError(FString::Printf(TEXT("Asset %s is a %s, not a %s"), *StringValue, *Asset->GetClass()->GetName(), *OP->PropertyClass->GetName()));
+		}
+		OP->SetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(R), Asset);
+	}
 	else
 	{
 		return MCPError(FString::Printf(TEXT("Property type not yet supported: %s"), *Prop->GetCPPType()));
