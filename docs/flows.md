@@ -377,6 +377,20 @@ flow(action="plan", flowName="<name>")
 flow(action="run", flowName="<name>")
 ```
 
+### Niagara Fire
+
+Builds a fire Niagara system from scratch and verifies it emits - a 0-to-1, best-practice starting point rather than a demo. Creates an emitter and system, tunes continuous spawn rate, upward velocity, and an HDR orange colour, then runs the `niagara(action="validate")` verify gate as the final step so the run tells you whether the system actually emits (catching the empty-shell failure).
+
+```
+flow(action="run", flowName="niagara_fire")
+```
+
+Lands at `/Game/VFX/Fire/NS_Fire`. Override the name or location with runtime params:
+
+```
+flow(action="run", flowName="niagara_fire", params={ "name": "NS_Torch", "packagePath": "/Game/VFX/Torches" })
+```
+
 ### Beacon
 
 A 56-step demo that builds a complete shrine scene from scratch — geometry, materials, lighting, atmosphere, and camera.

@@ -345,7 +345,34 @@ function defaultFlows(): Record<string, unknown> {
     targetExpression: "OutColor",
   });
 
+  // niagara_fire — author a valid, emitting flame from scratch and verify it.
+  // Not a demo: a 0-to-1 best-practice starting point for a fire effect. Default
+  // asset domain is a real one (/Game/VFX/Fire); override name/packagePath via
+  // runtime params. The last step is the verify gate — the run surfaces whether
+  // the system actually emits, catching the empty-shell failure.
+  const FIRE_PKG = "/Game/VFX/Fire";
+  const fireSteps: Record<string, unknown> = {
+    1: { task: "niagara.create_emitter", options: { name: "E_Flame", packagePath: FIRE_PKG } },
+    2: { task: "niagara.create", options: { name: "NS_Fire", packagePath: FIRE_PKG } },
+    3: { task: "niagara.add_emitter", options: { systemPath: "${steps.2.path}", emitterPath: "${steps.1.path}" } },
+    // Continuous emission.
+    4: { task: "niagara.set_module_input", options: { systemPath: "${steps.2.path}", moduleName: "SpawnRate", inputName: "SpawnRate", value: "60", stackContext: "EmitterUpdate" } },
+    // Rise: initial upward velocity.
+    5: { task: "niagara.set_module_input", options: { systemPath: "${steps.2.path}", moduleName: "AddVelocity", inputName: "Velocity", value: "0,0,160", stackContext: "ParticleSpawn" } },
+    // Fire colour (HDR orange for an additive/emissive read).
+    6: { task: "niagara.set_module_input", options: { systemPath: "${steps.2.path}", moduleName: "Color", inputName: "Color", value: "4.0,1.2,0.15,1.0", stackContext: "ParticleUpdate" } },
+    // Verify gate: does it emit?
+    7: { task: "niagara.validate", options: { systemPath: "${steps.2.path}" } },
+  };
+
   return {
+    niagara_fire: {
+      description:
+        "Build a fire Niagara system from scratch (spawn rate, upward velocity, HDR " +
+        "orange colour) and verify it emits. A 0-to-1 best-practice starting point, not " +
+        "a demo. Lands at /Game/VFX/Fire/NS_Fire; override name/packagePath via params.",
+      steps: fireSteps,
+    },
     beacon: {
       description:
         "Demo — build a shrine scene from scratch: floor, pedestal, orb, five pillars, " +
