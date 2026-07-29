@@ -94,6 +94,7 @@ void FBlueprintHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("delete_node"), &DeleteNode);
 	Registry.RegisterHandler(TEXT("set_node_property"), &SetNodeProperty);
 	Registry.RegisterHandler(TEXT("list_blueprint_graphs"), &ListGraphs);
+	Registry.RegisterHandler(TEXT("resolve_blueprint_graph"), &ResolveGraph);
 	Registry.RegisterHandler(TEXT("set_blueprint_component_property"), &SetComponentProperty);
 	// #442: dedicated OverrideMaterials writer that takes a materialPaths array
 	// directly, avoiding any value coercion concerns on the generic path.
@@ -440,6 +441,43 @@ UBlueprint* FBlueprintHandlers::LoadBlueprint(const FString& AssetPath)
 // ---------------------------------------------------------------------------
 // list_blueprint_graphs -- List all graphs in a blueprint (EventGraph, AnimGraph, functions, etc.)
 // ---------------------------------------------------------------------------
+namespace
+{
+	TSharedPtr<FJsonObject> MakeGraphDescriptor(
+		UEdGraph* Graph,
+		const TMap<FString, int32>& NameCounts,
+		TMap<FString, int32>& SeenCounts)
+	{
+		const FString Name = Graph->GetName();
+		const int32 DuplicateIndex = SeenCounts.FindOrAdd(Name)++;
+		const int32 DuplicateCount = NameCounts.FindRef(Name);
+		const FString Selector = DuplicateCount > 1
+			? FString::Printf(TEXT("%s[%d]"), *Name, DuplicateIndex)
+			: Name;
+
+		TSharedPtr<FJsonObject> GraphObj = MakeShared<FJsonObject>();
+		GraphObj->SetStringField(TEXT("name"), Name);
+		GraphObj->SetStringField(TEXT("selector"), Selector);
+		GraphObj->SetStringField(TEXT("objectPath"), Graph->GetPathName());
+		GraphObj->SetStringField(TEXT("class"), Graph->GetClass()->GetName());
+		GraphObj->SetNumberField(TEXT("nodeCount"), Graph->Nodes.Num());
+		GraphObj->SetNumberField(TEXT("duplicateIndex"), DuplicateIndex);
+		GraphObj->SetNumberField(TEXT("duplicateCount"), DuplicateCount);
+		return GraphObj;
+	}
+
+	void CountGraphNames(const TArray<UEdGraph*>& Graphs, TMap<FString, int32>& OutNameCounts)
+	{
+		for (UEdGraph* Graph : Graphs)
+		{
+			if (Graph)
+			{
+				++OutNameCounts.FindOrAdd(Graph->GetName());
+			}
+		}
+	}
+}
+
 TSharedPtr<FJsonValue> FBlueprintHandlers::ListGraphs(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
@@ -454,21 +492,114 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ListGraphs(const TSharedPtr<FJsonObje
 	TArray<UEdGraph*> AllGraphs;
 	Blueprint->GetAllGraphs(AllGraphs);
 
+	TMap<FString, int32> NameCounts;
+	TMap<FString, int32> SeenCounts;
+	CountGraphNames(AllGraphs, NameCounts);
+
 	TArray<TSharedPtr<FJsonValue>> GraphsArray;
 	for (UEdGraph* Graph : AllGraphs)
 	{
 		if (!Graph) continue;
-		TSharedPtr<FJsonObject> GraphObj = MakeShared<FJsonObject>();
-		GraphObj->SetStringField(TEXT("name"), Graph->GetName());
-		GraphObj->SetStringField(TEXT("class"), Graph->GetClass()->GetName());
-		GraphObj->SetNumberField(TEXT("nodeCount"), Graph->Nodes.Num());
-		GraphsArray.Add(MakeShared<FJsonValueObject>(GraphObj));
+		GraphsArray.Add(MakeShared<FJsonValueObject>(MakeGraphDescriptor(Graph, NameCounts, SeenCounts)));
 	}
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
 	Result->SetArrayField(TEXT("graphs"), GraphsArray);
 
+	return MCPResult(Result);
+}
+
+// ---------------------------------------------------------------------------
+// resolve_blueprint_graph -- Resolve a graph name to selectors accepted by
+// read_graph/add_node/connect_pins/etc. Duplicate nested AnimBP graphs commonly
+// share names such as "Locomotion" or "Transition"; callers can pass the
+// returned selector (for example "Locomotion[3]") back as graphName.
+// ---------------------------------------------------------------------------
+TSharedPtr<FJsonValue> FBlueprintHandlers::ResolveGraph(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+
+	FString RequestedName;
+	if (auto Err = RequireString(Params, TEXT("graphName"), RequestedName)) return Err;
+
+	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
+	if (!Blueprint)
+	{
+		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	}
+
+	TArray<UEdGraph*> AllGraphs;
+	Blueprint->GetAllGraphs(AllGraphs);
+
+	TMap<FString, int32> NameCounts;
+	CountGraphNames(AllGraphs, NameCounts);
+
+	TArray<UEdGraph*> Matches;
+	const int32 LeftBracket = RequestedName.Find(TEXT("["));
+	const int32 RightBracket = RequestedName.Find(TEXT("]"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+	const bool bIndexedSelector = LeftBracket != INDEX_NONE && RightBracket > LeftBracket;
+
+	if (bIndexedSelector)
+	{
+		if (UEdGraph* Resolved = FindGraph(Blueprint, RequestedName))
+		{
+			Matches.Add(Resolved);
+		}
+	}
+	else
+	{
+		for (UEdGraph* Graph : AllGraphs)
+		{
+			if (Graph && Graph->GetName().Equals(RequestedName, ESearchCase::IgnoreCase))
+			{
+				Matches.Add(Graph);
+			}
+		}
+
+		// Preserve the existing object-path/suffix addressing behavior when the
+		// request is not a bare graph name.
+		if (Matches.IsEmpty())
+		{
+			if (UEdGraph* Resolved = FindGraph(Blueprint, RequestedName))
+			{
+				Matches.Add(Resolved);
+			}
+		}
+	}
+
+	TMap<FString, int32> SeenCounts;
+	TMap<UEdGraph*, TSharedPtr<FJsonObject>> DescriptorsByGraph;
+	for (UEdGraph* Graph : AllGraphs)
+	{
+		if (!Graph) continue;
+		DescriptorsByGraph.Add(Graph, MakeGraphDescriptor(Graph, NameCounts, SeenCounts));
+	}
+
+	TArray<TSharedPtr<FJsonValue>> MatchArray;
+	for (UEdGraph* Graph : Matches)
+	{
+		if (const TSharedPtr<FJsonObject>* Descriptor = DescriptorsByGraph.Find(Graph))
+		{
+			MatchArray.Add(MakeShared<FJsonValueObject>(*Descriptor));
+		}
+	}
+
+	TSharedPtr<FJsonObject> Result = MCPSuccess();
+	Result->SetStringField(TEXT("path"), AssetPath);
+	Result->SetStringField(TEXT("requestedGraphName"), RequestedName);
+	Result->SetNumberField(TEXT("matchCount"), MatchArray.Num());
+	Result->SetBoolField(TEXT("ambiguous"), MatchArray.Num() > 1);
+	Result->SetArrayField(TEXT("matches"), MatchArray);
+	if (MatchArray.IsEmpty())
+	{
+		Result->SetStringField(TEXT("message"), FString::Printf(TEXT("No graph matched: %s"), *RequestedName));
+	}
+	else if (MatchArray.Num() > 1)
+	{
+		Result->SetStringField(TEXT("message"), TEXT("Multiple graphs share this name; pass a returned selector as graphName."));
+	}
 	return MCPResult(Result);
 }
 

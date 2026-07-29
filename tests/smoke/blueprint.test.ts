@@ -125,6 +125,25 @@ describe("blueprint — full lifecycle", () => {
     expect(r.ok, r.error).toBe(true);
   });
 
+  it("resolve_blueprint_graph returns a reusable selector", async () => {
+    const r = await callBridge(bridge, "resolve_blueprint_graph", {
+      path: bpPath,
+      graphName: "EventGraph",
+    });
+    expect(r.ok, r.error).toBe(true);
+    const result = r.result as {
+      matchCount: number;
+      ambiguous: boolean;
+      matches: Array<{ name: string; selector: string; objectPath: string; duplicateCount: number }>;
+    };
+    expect(result.matchCount).toBe(1);
+    expect(result.ambiguous).toBe(false);
+    expect(result.matches[0]?.name).toBe("EventGraph");
+    expect(result.matches[0]?.selector).toBe("EventGraph");
+    expect(result.matches[0]?.objectPath).toContain("EventGraph");
+    expect(result.matches[0]?.duplicateCount).toBe(1);
+  });
+
   it("add_component (SceneComponent)", async () => {
     const r = await callBridge(bridge, "add_component", {
       path: bpPath, componentClass: "SceneComponent", componentName: "MyScene",
