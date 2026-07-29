@@ -2,6 +2,7 @@
 // viewport in Play-in-New-Window and never included the debug canvas. It now
 // captures the actual PIE game viewport with UI + on-screen debug canvas.
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { existsSync } from "node:fs";
 import { getBridge, disconnectBridge, callBridge } from "../setup.js";
 import type { EditorBridge } from "../../src/bridge.js";
 
@@ -13,7 +14,15 @@ afterAll(async () => {
 });
 
 describe("editor — capture_screenshot target=pie (#724)", () => {
-  it("captures the PIE game viewport with the debug canvas", async ({ skip }) => {
+  it("captures the client viewport in networked PIE", async ({ skip }) => {
+    const configured = await callBridge(bridge, "configure_pie", {
+      numClients: 1,
+      netMode: "client",
+      runUnderOneProcess: true,
+      launchSeparateServer: true,
+    });
+    expect(configured.ok, configured.error).toBe(true);
+
     const start = await callBridge(bridge, "pie_control", { action: "start" });
     // PIE can fail to start on a cold AssetRegistry / headless config - skip then.
     if (!start.ok) skip();
@@ -28,8 +37,31 @@ describe("editor — capture_screenshot target=pie (#724)", () => {
     expect(r.ok, r.error).toBe(true);
     const result = r.result as Record<string, unknown>;
     expect(result.target).toBe("pie");
-    // The game-viewport path sets includesDebugCanvas=true; the HighResShot
-    // fallback (no game viewport) would be false.
     expect(result.includesDebugCanvas).toBe(true);
+    expect(typeof result.pieInstance).toBe("number");
+    expect(typeof result.worldPath).toBe("string");
+    expect(Number(result.width)).toBeGreaterThan(0);
+    expect(Number(result.height)).toBeGreaterThan(0);
+    expect(existsSync(String(result.filename))).toBe(true);
+
+    const selected = await callBridge(bridge, "capture_screenshot", {
+      filename: "mcp_pie_724_selected",
+      target: "pie",
+      pieInstance: result.pieInstance,
+    });
+    expect(selected.ok, selected.error).toBe(true);
+    expect((selected.result as Record<string, unknown>).pieInstance).toBe(result.pieInstance);
+
+    const windowCapture = await callBridge(bridge, "capture_screenshot", {
+      filename: "mcp_pie_724_window",
+      target: "window",
+      pieInstance: result.pieInstance,
+    });
+    expect(windowCapture.ok, windowCapture.error).toBe(true);
+    const windowResult = windowCapture.result as Record<string, unknown>;
+    expect(windowResult.target).toBe("window");
+    expect(windowResult.pieInstance).toBe(result.pieInstance);
+    expect(String(windowResult.window).toLowerCase()).toContain("client");
+    expect(existsSync(String(windowResult.filename))).toBe(true);
   });
 });
