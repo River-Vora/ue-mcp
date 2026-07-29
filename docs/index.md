@@ -38,7 +38,7 @@ Start with **[Getting Started](getting-started.md)**. It assumes zero knowledge 
 | **GAS** | Gameplay Ability System - attributes, abilities, effects, cues |
 | **Networking** | Replication, dormancy, relevancy, net priority |
 | **Editor** | Console commands, Python escape hatch, PIE, viewport, sequencer, build pipeline, logs |
-| **Reflection** | Class/struct/enum introspection, gameplay tags |
+| **Reflection** | Class/struct/enum introspection, gameplay tags, SaveGame inspection |
 | **Project** | Status, INI config, C++ source/header parsing, build |
 | **Demo** | Built-in 19-step Neon Shrine procedural scene |
 | **Feedback** | Submit tool-gap reports as GitHub issues |

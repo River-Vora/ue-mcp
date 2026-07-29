@@ -3,7 +3,7 @@ import { categoryTool, bp, type ToolDef } from "../types.js";
 
 export const reflectionTool: ToolDef = categoryTool(
   "reflection",
-  "UE reflection: classes, structs, enums, gameplay tags.",
+  "UE reflection: classes, structs, enums, gameplay tags, and SaveGame instances.",
   {
     reflect_class:  bp("Reflect UClass. Params: className, includeInherited?", "reflect_class"),
     reflect_struct: bp("Reflect UScriptStruct. Params: structName", "reflect_struct"),
@@ -16,12 +16,15 @@ export const reflectionTool: ToolDef = categoryTool(
     is_class_loaded: bp("Report whether a UClass is currently loaded in the editor (loaded), whether it exists/is loadable (exists), and its owning module + that module's load state. Distinguishes 'not loaded yet' from 'does not exist'. Params: className (short name, /Script/<Module>.<Class>, or BP class path) (#689)", "is_class_loaded", (p) => ({ className: p.className })),
     is_module_loaded: bp("Report whether a named module is currently loaded. Params: moduleName (#689)", "is_module_loaded", (p) => ({ moduleName: p.moduleName })),
     list_loaded_modules: bp("Enumerate modules with runtime load state. Params: filter? (case-insensitive substring), loadedOnly? (default false). Returns modules[{name, loaded, gameModule}] + totalLoaded/totalModules (#689)", "list_loaded_modules", (p) => ({ filter: p.filter, loadedOnly: p.loadedOnly })),
+    inspect_save_game: bp("Load a SaveGame slot read-only and return its reflected UPROPERTY(SaveGame) values. Params: slotName, userIndex? (default 0)", "inspect_save_game", (p) => ({ slotName: p.slotName, userIndex: p.userIndex })),
   },
   undefined,
   {
     className: z.string().optional(),
     moduleName: z.string().optional().describe("is_module_loaded: module name (#689)"),
     loadedOnly: z.boolean().optional().describe("list_loaded_modules: only loaded modules (#689)"),
+    slotName: z.string().min(1).max(128).optional().describe("inspect_save_game: logical save slot name without a path"),
+    userIndex: z.number().int().nonnegative().optional().describe("inspect_save_game: platform user index (default 0)"),
     includeInherited: z.boolean().optional(),
     structName: z.string().optional(),
     enumName: z.string().optional(),

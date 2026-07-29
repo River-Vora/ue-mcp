@@ -24,6 +24,7 @@ private:
 	static TSharedPtr<FJsonValue> IsClassLoaded(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> IsModuleLoaded(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ListLoadedModules(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> InspectSaveGame(const TSharedPtr<FJsonObject>& Params);
 
 	// Helper functions
 	static UClass* FindClass(const FString& ClassName);

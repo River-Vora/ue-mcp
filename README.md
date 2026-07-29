@@ -74,7 +74,7 @@ If you prefer to configure manually, add to your MCP client config:
 | **Networking** | Replication, dormancy, relevancy, net priority |
 | **UI** | UMG widgets, editor utility widgets and blueprints, runtime delegate inspection |
 | **Editor** | Console, Python, PIE, viewport, sequencer, build pipeline, logs |
-| **Reflection** | Class/struct/enum introspection, gameplay tags |
+| **Reflection** | Class/struct/enum introspection, gameplay tags, SaveGame inspection |
 
 ## Supported Platforms
 

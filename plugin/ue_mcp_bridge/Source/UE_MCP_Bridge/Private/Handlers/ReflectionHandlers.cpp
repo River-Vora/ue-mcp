@@ -20,6 +20,9 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "JsonSerializer.h"
+#include "JsonObjectConverter.h"
+#include "GameFramework/SaveGame.h"
+#include "Kismet/GameplayStatics.h"
 #include "HAL/PlatformFileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -39,6 +42,7 @@ void FReflectionHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("is_class_loaded"), &IsClassLoaded);
 	Registry.RegisterHandler(TEXT("is_module_loaded"), &IsModuleLoaded);
 	Registry.RegisterHandler(TEXT("list_loaded_modules"), &ListLoadedModules);
+	Registry.RegisterHandler(TEXT("inspect_save_game"), &InspectSaveGame);
 }
 
 // #689: report whether a UClass is currently loaded, and (separately) whether
@@ -129,6 +133,77 @@ TSharedPtr<FJsonValue> FReflectionHandlers::ListLoadedModules(const TSharedPtr<F
 	Result->SetNumberField(TEXT("count"), Out.Num());
 	Result->SetNumberField(TEXT("totalLoaded"), LoadedCount);
 	Result->SetNumberField(TEXT("totalModules"), Statuses.Num());
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FReflectionHandlers::InspectSaveGame(const TSharedPtr<FJsonObject>& Params)
+{
+	MCP_CHECK_GAME_THREAD();
+
+	FString SlotName;
+	if (auto Err = RequireString(Params, TEXT("slotName"), SlotName)) return Err;
+	int32 UserIndex = 0;
+	if (Params->HasField(TEXT("userIndex")))
+	{
+		double RawUserIndex = 0.0;
+		if (!Params->TryGetNumberField(TEXT("userIndex"), RawUserIndex) ||
+			!FMath::IsFinite(RawUserIndex) || RawUserIndex < 0.0 ||
+			RawUserIndex > static_cast<double>(MAX_int32) || FMath::TruncToDouble(RawUserIndex) != RawUserIndex)
+		{
+			return MCPError(TEXT("userIndex must be a non-negative integer"));
+		}
+		UserIndex = static_cast<int32>(RawUserIndex);
+	}
+
+	if (SlotName.Len() > 128 || SlotName != SlotName.TrimStartAndEnd() ||
+		SlotName == TEXT(".") || SlotName == TEXT("..") || SlotName.Contains(TEXT("..")) ||
+		SlotName != FPaths::MakeValidFileName(SlotName))
+	{
+		return MCPError(TEXT("Invalid slotName: use a plain filename without path separators, traversal, or surrounding whitespace"));
+	}
+	if (!UGameplayStatics::DoesSaveGameExist(SlotName, UserIndex))
+	{
+		return MCPError(FString::Printf(TEXT("Save game slot does not exist: %s (userIndex %d)"), *SlotName, UserIndex));
+	}
+
+	USaveGame* SaveGame = UGameplayStatics::LoadGameFromSlot(SlotName, UserIndex);
+	if (!SaveGame)
+	{
+		return MCPError(FString::Printf(TEXT("Failed to load save game slot: %s (userIndex %d)"), *SlotName, UserIndex));
+	}
+
+	TSharedPtr<FJsonObject> Properties = MakeShared<FJsonObject>();
+	int32 PropertyCount = 0;
+	for (TFieldIterator<FProperty> It(SaveGame->GetClass(), EFieldIteratorFlags::IncludeSuper); It; ++It)
+	{
+		FProperty* Property = *It;
+		if (!Property || !Property->HasAnyPropertyFlags(CPF_SaveGame) ||
+			Property->HasAnyPropertyFlags(CPF_Transient | CPF_DuplicateTransient))
+		{
+			continue;
+		}
+
+		const void* Value = Property->ContainerPtrToValuePtr<void>(SaveGame);
+		TSharedPtr<FJsonValue> JsonValue = FJsonObjectConverter::UPropertyToJsonValue(
+			Property, Value, 0, CPF_Transient | CPF_DuplicateTransient);
+		if (!JsonValue.IsValid())
+		{
+			return MCPError(FString::Printf(
+				TEXT("Failed to serialize SaveGame property '%s' on class '%s'"),
+				*Property->GetName(), *SaveGame->GetClass()->GetPathName()));
+		}
+
+		Properties->SetField(Property->GetName(), JsonValue);
+		++PropertyCount;
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("slotName"), SlotName);
+	Result->SetNumberField(TEXT("userIndex"), UserIndex);
+	Result->SetStringField(TEXT("className"), SaveGame->GetClass()->GetName());
+	Result->SetStringField(TEXT("classPath"), SaveGame->GetClass()->GetPathName());
+	Result->SetNumberField(TEXT("propertyCount"), PropertyCount);
+	Result->SetObjectField(TEXT("properties"), Properties);
 	return MCPResult(Result);
 }
 
