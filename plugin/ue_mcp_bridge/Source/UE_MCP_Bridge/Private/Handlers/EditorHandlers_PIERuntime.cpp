@@ -263,13 +263,27 @@ namespace
 			FProperty* P = *It;
 			if (P->PropertyFlags & (CPF_ReturnParm | CPF_OutParm))
 			{
-				// An object out-param may have been collected during the call.
+				// An object out-param may have been collected during the call:
+				// ParamBuf is raw bytes and invisible to GC, so exporting it
+				// would dereference freed memory. Check first, then export
+				// through the same path as every other property so the wire
+				// format does not diverge between call actions.
 				if (FObjectPropertyBase* OP = CastField<FObjectPropertyBase>(P))
 				{
 					UObject* Out = OP->GetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(ParamBuf.GetData()));
-					OutVals->SetStringField(P->GetName(),
-						(Out && IsValid(Out)) ? Out->GetPathName() : FString());
-					continue;
+					if (!Out)
+					{
+						OutVals->SetStringField(P->GetName(), TEXT("None"));
+						continue;
+					}
+					if (!IsValid(Out))
+					{
+						// Distinct from "None": the call returned an object and
+						// then something destroyed it. Reporting an empty string
+						// for both would read as a null return.
+						OutVals->SetStringField(P->GetName(), TEXT("(collected during the call)"));
+						continue;
+					}
 				}
 				FString S;
 				P->ExportTextItem_Direct(S, P->ContainerPtrToValuePtr<void>(ParamBuf.GetData()), nullptr, CallTarget, PPF_None);
@@ -502,9 +516,18 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 			TEXT("SkeletalMeshComponent '%s' on '%s' has no bone transform data (not registered)."),
 			*Mesh->GetName(), *ActorLabel));
 	}
-	if (!bFollowsLeader)
 	{
-		const TArray<FTransform>& Spaces = Mesh->GetComponentSpaceTransforms();
+		// A follower's own array is empty by design; the pose it resolves comes
+		// from the leader, so that is what has to have been evaluated.
+		const USkinnedMeshComponent* PoseSource =
+			bFollowsLeader ? Mesh->LeaderPoseComponent.Get() : static_cast<const USkinnedMeshComponent*>(Mesh);
+		if (!PoseSource)
+		{
+			return MCPError(FString::Printf(
+				TEXT("SkeletalMeshComponent '%s' on '%s' follows a leader pose component that no longer exists."),
+				*Mesh->GetName(), *ActorLabel));
+		}
+		const TArray<FTransform>& Spaces = PoseSource->GetComponentSpaceTransforms();
 		bool bAnyPosed = Spaces.Num() <= 1;
 		const int32 Probe = FMath::Min(Spaces.Num(), 32);
 		for (int32 i = 0; i < Probe && !bAnyPosed; ++i)
@@ -514,8 +537,9 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 		if (!bAnyPosed)
 		{
 			return MCPError(FString::Printf(
-				TEXT("SkeletalMeshComponent '%s' on '%s' has not evaluated its bone transforms yet - every bone reads as identity, which would be reported as real measurement data. Is PIE running, and has the mesh ticked?"),
-				*Mesh->GetName(), *ActorLabel));
+				TEXT("SkeletalMeshComponent '%s' on '%s' has not evaluated its bone transforms yet - every bone reads as identity, which would be reported as real measurement data. Is PIE running, and has the mesh ticked?%s"),
+				*Mesh->GetName(), *ActorLabel,
+				bFollowsLeader ? TEXT(" (the pose comes from its leader pose component, which is the one that has not evaluated)") : TEXT("")));
 		}
 	}
 
