@@ -35,9 +35,11 @@ export class BridgeTask extends UeMcpTask {
       return { success: true, data: { result: raw } };
     }
 
-    const { rollback, ...rest } = raw as Record<string, unknown>;
-    const result: TaskResult = { success: true, data: rest };
-    const record = liftRollback(rollback);
+    // Pass the response through intact; the rollback descriptor is part of the
+    // documented response shape, not an internal field to be consumed here.
+    const obj = raw as Record<string, unknown>;
+    const result: TaskResult = { success: true, data: obj };
+    const record = liftRollback(obj.rollback);
     if (record) result.rollback = record;
     return result;
   }

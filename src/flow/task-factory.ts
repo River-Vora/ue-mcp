@@ -26,9 +26,16 @@ export function bridgeTaskClass(
       // Handlers attach `rollback` to their response. This class never lifted
       // it, so every rollback emitted by a registered action was silently
       // dropped and rollback_on_failure had nothing to undo.
-      const { rollback, ...rest } = raw as Record<string, unknown>;
-      const result: TaskResult = { success: true, data: rest };
-      const record = liftRollback(rollback);
+      //
+      // The response is passed through INTACT, rollback descriptor included.
+      // Every MCP category-tool call routes through this class, not just
+      // flows, and data is serialized as the whole tool result - stripping the
+      // key here deleted the rollback descriptor from ~90 handlers' documented
+      // responses, and left bridge-backed actions inconsistent with
+      // handler-backed ones, which pass data through untouched.
+      const raw2 = raw as Record<string, unknown>;
+      const result: TaskResult = { success: true, data: raw2 };
+      const record = liftRollback(raw2.rollback);
       if (record) result.rollback = record;
       return result;
     }
