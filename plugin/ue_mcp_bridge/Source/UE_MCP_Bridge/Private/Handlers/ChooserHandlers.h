@@ -23,4 +23,7 @@ private:
 	static TSharedPtr<FJsonValue> AddRow(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetRow(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> DeleteRow(const TSharedPtr<FJsonObject>& Params);
+	// #754: read and repoint object references inside nested chooser tables.
+	static TSharedPtr<FJsonValue> ListObjectReferences(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> RemapObjectReferences(const TSharedPtr<FJsonObject>& Params);
 };

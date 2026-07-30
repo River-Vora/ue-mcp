@@ -2,7 +2,7 @@
 
 This page lists ue-mcp's own category tools and actions. For the official Unreal 5.8 tools that ue-mcp wraps (surfaced inside these same categories), see [Native Tools](native-tools.md).
 
-UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->755+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
+UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->757+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
 
 !!! tip "First call in any session"
     Start with `project(action="get_status")` to check the connection, then `level(action="get_outliner")` or `asset(action="list")` to explore.
@@ -939,6 +939,8 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `add_row` | Append a row. Set the output via `output` (asset path) + outputType ('asset' hard ref default \| 'soft_asset' \| 'evaluate' for a nested ChooserTable). Set input-column conditions via `cells` (array aligned to column order) and/or `inputs` (object keyed by column index or name). Cell values are struct text like '(Value=2)' - partial fields are allowed and unspecified ones keep defaults; a bare number/bool works for scalar columns. Params: `table, output?, outputType?, cells?, inputs? (#685)` |
 | `set_row` | Edit an existing row by index: optionally replace the output (output + outputType), toggle disabled, and/or update column cells (cells / inputs, same format as add_row). Params: `table, index, output?, outputType?, disabled?, cells?, inputs? (#685)` |
 | `delete_row` | Delete a row by index (removes its output plus the per-row cell from every column). Params: `table, index (#685)` |
+| `list_object_references` | List every leaf object reference reachable from a chooser, descending through nested chooser tables. list_rows renders those as an opaque resultType:NestedChooser with an empty output, so the actual PoseSearchDatabase/asset paths were invisible. Each entry reports the owning table, the exact location (e.g. ResultsStructs[3].Asset), the struct type and the current object path. Params: `assetPath, classFilter? (match the referenced object's class), pathFilter? (substring on the path) (#754)` |
+| `remap_object_references` | Repoint object references throughout a chooser's nested structure. Either an exact swap (from + to) or a folder rewrite (fromPrefix + toPrefix), which is the 'adopt vendor choosers into our namespace' case. DRY RUN BY DEFAULT - pass dryRun=false to apply. Object-typed targets are class-checked before assignment; the chooser is recompiled and left dirty rather than saved. Params: `assetPath, from?+to? \| fromPrefix?+toPrefix?, dryRun? (default true) (#754)` |
 
 ---
 
