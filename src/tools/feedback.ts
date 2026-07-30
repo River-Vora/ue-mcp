@@ -465,6 +465,11 @@ export const feedbackTool: ToolDef = categoryTool(
         // NOTE: ctx.elicit is guaranteed defined here because the
         // mode === "interactive" + !ctx.elicit case returned above.
         let elicitResult;
+        // #772: a client that never renders the form still answers, and it
+        // answers instantly. Time the round trip so an auto-decline can be
+        // reported as "no form was shown" instead of being blamed on the user,
+        // who in the reported case never saw anything at all.
+        const elicitStartedAt = Date.now();
         try {
           elicitResult = await ctx.elicit!({
             message: buildApprovalMessage(payload, authorPromptLine),
@@ -529,6 +534,42 @@ export const feedbackTool: ToolDef = categoryTool(
         // form-level Accept = submit. form-level Decline/cancel = discard.
         // Revisions text presence routes to the rewrite path on Accept.
         if (elicitResult.action !== "accept") {
+          // #772: no human reads a form and clicks Decline in under a second.
+          // A response that fast means the client resolved the elicitation
+          // itself without presenting anything, so saying "the user reviewed
+          // the prompt and clicked Decline" is a false statement about someone
+          // who was never asked - and it told the agent not to retry, leaving
+          // no way to submit at all.
+          const elapsedMs = Date.now() - elicitStartedAt;
+          // Overridable so both branches are testable without sleeping, and so
+          // an operator on a slow-but-real client can tune it. 0 disables the
+          // heuristic entirely.
+          const configured = Number(process.env.UE_MCP_ELICIT_MIN_HUMAN_MS);
+          const NoHumanCouldRespondMs = Number.isFinite(configured) && configured >= 0 ? configured : 1000;
+          if (NoHumanCouldRespondMs > 0 && elapsedMs < NoHumanCouldRespondMs) {
+            return directive(
+              [
+                `[FEEDBACK NOT SUBMITTED - NO APPROVAL FORM WAS SHOWN]`,
+                `The MCP client answered "${elicitResult.action}" in ${elapsedMs}ms, which is too fast for a human to have seen a form.`,
+                `Treat this as the client not supporting or not rendering elicitation, NOT as the user refusing.`,
+                ``,
+                `Ask the user directly, in plain text, whether to submit this feedback.`,
+                `If they say yes, re-run feedback(submit) with autoApprove: true.`,
+              ].join("\n"),
+              {
+                submitted: false,
+                code: "form_not_presented",
+                action: elicitResult.action,
+                elapsedMs,
+              },
+              {
+                kind: "feedback.blocked",
+                requiredActions: ["ask_user_in_text", "may_retry_with_auto_approve"],
+                context: { code: "form_not_presented", action: elicitResult.action, elapsedMs },
+              },
+            );
+          }
+
           const reasonCode =
             elicitResult.action === "decline"
               ? "user_declined_form"

@@ -176,10 +176,12 @@ Details: [Guards](https://ue-mcp.com/docs/plugins-guards/) and [Handler Conventi
 
 | | |
 |---|---|
-| **Unreal Engine** | 5.4-5.8 (Windows), 5.6+ (Linux). `epic` category needs 5.8+. |
+| **Unreal Engine** | 5.4-5.8 (Windows), 5.6+ (Linux and macOS). `epic` category needs 5.8+. |
 | **Node.js** | 18 or newer |
 | **UE plugins** | `PythonScriptPlugin` (ships with the engine); `init` enables the rest for you |
-| **C++ toolchain** | Required - the bridge is a C++ plugin and compiles on first editor launch. On Windows that means Visual Studio with the C++ workload. |
+| **C++ toolchain** | Required - the bridge is a C++ plugin and compiles on first editor launch. On Windows that means Visual Studio with the C++ workload; on macOS, Xcode command line tools. |
+
+Editor process control (`editor(start_editor)` / `stop_editor` / `restart_editor`) is Windows-only. Everything else, including `ue-mcp build`, works on macOS and Linux; launch the editor yourself and the bridge connects normally.
 
 ## Documentation
 

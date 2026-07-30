@@ -126,6 +126,12 @@ describe("feedback(submit) elicitation gate", () => {
     expect(postedLabels).toContain("blueprint");
   });
 
+  // #772: these two exercise a REAL human decline. The auto-decline case (a
+  // client that answers without rendering a form) is covered separately below;
+  // disabling the timing heuristic here keeps both deterministic.
+  beforeEach(() => { process.env.UE_MCP_ELICIT_MIN_HUMAN_MS = "0"; });
+  afterEach(() => { delete process.env.UE_MCP_ELICIT_MIN_HUMAN_MS; });
+
   it("does NOT submit when user declines the prompt", async () => {
     const elicit = vi.fn<ElicitFn>().mockResolvedValue({ action: "decline" } as ElicitResult);
     const ctx = makeCtx(elicit);
@@ -138,6 +144,28 @@ describe("feedback(submit) elicitation gate", () => {
     if (!isDirectiveResponse(r)) return;
     expect(r.machine?.kind).toBe("feedback.declined");
     expect((r.result as { code?: string }).code).toBe("user_declined_form");
+    expect(mockSubmitFeedback).not.toHaveBeenCalled();
+  });
+
+  it("reports form_not_presented when the client auto-declines without showing a form (#772)", async () => {
+    // Codex Desktop returned action=decline in ~116ms with no form ever
+    // rendered. Blaming that on the user is a false statement about someone
+    // who was never asked, and the old directive told the agent never to
+    // retry - so there was no way to submit at all.
+    delete process.env.UE_MCP_ELICIT_MIN_HUMAN_MS;
+    const elicit = vi.fn<ElicitFn>().mockResolvedValue({ action: "decline" } as ElicitResult);
+    const ctx = makeCtx(elicit);
+    const r = await call(ctx, {
+      title: realTitle,
+      summary: realSummary,
+      pythonWorkaround: realPy,
+    });
+    expect(isDirectiveResponse(r)).toBe(true);
+    if (!isDirectiveResponse(r)) return;
+    expect(r.machine?.kind).toBe("feedback.blocked");
+    expect((r.result as { code?: string }).code).toBe("form_not_presented");
+    // The agent must be told it MAY retry, unlike a real decline.
+    expect(r.machine?.requiredActions).toContain("ask_user_in_text");
     expect(mockSubmitFeedback).not.toHaveBeenCalled();
   });
 
