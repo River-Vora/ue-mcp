@@ -2466,20 +2466,14 @@ namespace
 // Params:
 //   actorLabel? (single) OR actorLabels? (string[])
 //   world?: "pie" | "editor" (default: "pie" with editor fallback)
+//   pieInstance?: which PIE world when several are running
 TSharedPtr<FJsonValue> FLevelHandlers::ReadActorMotion(const TSharedPtr<FJsonObject>& Params)
 {
-	FString WorldArg = OptionalString(Params, TEXT("world"), TEXT("pie"));
-	UWorld* TargetWorld = nullptr;
-	auto EditorWorld = []() -> UWorld* { return GEditor ? GEditor->GetEditorWorldContext().World() : nullptr; };
-	if (WorldArg.Equals(TEXT("editor"), ESearchCase::IgnoreCase))
-	{
-		TargetWorld = EditorWorld();
-	}
-	else
-	{
-		TargetWorld = GetPIEWorld();
-		if (!TargetWorld) TargetWorld = EditorWorld();
-	}
+	// Shared resolver so pieInstance selects the client, matching every other
+	// PIE-aware read. Bare GetPIEWorld() always returned the first (server)
+	// context, which reads as success while sampling the wrong actor.
+	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("pie"));
+	UWorld* TargetWorld = ResolveWorldFromParams(Params, *WorldScope);
 	if (!TargetWorld) return MCPError(TEXT("No world available (editor + PIE both null)"));
 
 	TArray<FString> Labels;
