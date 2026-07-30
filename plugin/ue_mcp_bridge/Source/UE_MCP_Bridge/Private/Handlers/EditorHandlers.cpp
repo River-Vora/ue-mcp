@@ -57,6 +57,7 @@
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "EditorValidatorSubsystem.h"
+#include "Containers/Ticker.h"
 #include "SceneView.h"
 #include "Components/PrimitiveComponent.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
@@ -80,6 +81,50 @@
 
 namespace
 {
+	struct FDirtyEditorPackages
+	{
+		TArray<FString> Content;
+		TArray<FString> Maps;
+	};
+
+	FDirtyEditorPackages CollectDirtyEditorPackages()
+	{
+		FDirtyEditorPackages Dirty;
+		TArray<UPackage*> DirtyPackages;
+		FEditorFileUtils::GetDirtyContentPackages(DirtyPackages);
+		FEditorFileUtils::GetDirtyWorldPackages(DirtyPackages);
+		for (UPackage* Package : DirtyPackages)
+		{
+			if (!Package || !Package->IsDirty())
+			{
+				continue;
+			}
+
+			const FString PackageName = Package->GetName();
+			if (PackageName.StartsWith(TEXT("/Script/")))
+			{
+				continue;
+			}
+
+			(Package->ContainsMap() ? Dirty.Maps : Dirty.Content).AddUnique(PackageName);
+		}
+
+		Dirty.Content.Sort();
+		Dirty.Maps.Sort();
+		return Dirty;
+	}
+
+	TArray<TSharedPtr<FJsonValue>> PackageNamesToJson(const TArray<FString>& PackageNames)
+	{
+		TArray<TSharedPtr<FJsonValue>> Values;
+		Values.Reserve(PackageNames.Num());
+		for (const FString& PackageName : PackageNames)
+		{
+			Values.Add(MakeShared<FJsonValueString>(PackageName));
+		}
+		return Values;
+	}
+
 	bool ResolveEditorObjectFromPath(const FString& ObjectPath, UObject*& OutObject, FString& OutResolvedKind, FString& OutError)
 	{
 		UObject* Object = LoadObject<UObject>(nullptr, *ObjectPath);
@@ -181,6 +226,7 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("save_asset"), &SaveAsset);
 	Registry.RegisterHandler(TEXT("save_dirty"), &SaveDirty);
 	Registry.RegisterHandler(TEXT("list_dirty_packages"), &ListDirtyPackages);
+	Registry.RegisterHandler(TEXT("request_editor_shutdown"), &RequestEditorShutdown);
 	Registry.RegisterHandler(TEXT("build_lighting"), &BuildLighting);
 	Registry.RegisterHandler(TEXT("build_all"), &BuildAll);
 	Registry.RegisterHandler(TEXT("validate_assets"), &ValidateAssets);
@@ -1586,27 +1632,22 @@ TSharedPtr<FJsonValue> FEditorHandlers::SaveDirty(const TSharedPtr<FJsonObject>&
 // without the Python escape.
 TSharedPtr<FJsonValue> FEditorHandlers::ListDirtyPackages(const TSharedPtr<FJsonObject>& Params)
 {
+	const FDirtyEditorPackages Dirty = CollectDirtyEditorPackages();
 	TArray<TSharedPtr<FJsonValue>> Content;
 	TArray<TSharedPtr<FJsonValue>> Maps;
-	for (TObjectIterator<UPackage> It; It; ++It)
+	Content.Reserve(Dirty.Content.Num());
+	Maps.Reserve(Dirty.Maps.Num());
+	for (const FString& PackageName : Dirty.Content)
 	{
-		UPackage* Pkg = *It;
-		if (!Pkg || !Pkg->IsDirty()) continue;
-		const FString Name = Pkg->GetName();
-		if (Name.StartsWith(TEXT("/Script/"))) continue;
-		if (Name.StartsWith(TEXT("/Temp/"))) continue;
-		if (!FPackageName::IsValidLongPackageName(Name)) continue;
-
 		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
-		Entry->SetStringField(TEXT("package"), Name);
-		if (Pkg->ContainsMap())
-		{
-			Maps.Add(MakeShared<FJsonValueObject>(Entry));
-		}
-		else
-		{
-			Content.Add(MakeShared<FJsonValueObject>(Entry));
-		}
+		Entry->SetStringField(TEXT("package"), PackageName);
+		Content.Add(MakeShared<FJsonValueObject>(Entry));
+	}
+	for (const FString& PackageName : Dirty.Maps)
+	{
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("package"), PackageName);
+		Maps.Add(MakeShared<FJsonValueObject>(Entry));
 	}
 
 	auto Result = MCPSuccess();
@@ -1614,6 +1655,73 @@ TSharedPtr<FJsonValue> FEditorHandlers::ListDirtyPackages(const TSharedPtr<FJson
 	Result->SetNumberField(TEXT("mapCount"), Maps.Num());
 	Result->SetArrayField(TEXT("content"), Content);
 	Result->SetArrayField(TEXT("maps"), Maps);
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FEditorHandlers::RequestEditorShutdown(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!GEditor)
+	{
+		return MCPError(TEXT("Editor not available"));
+	}
+
+	const bool bRequireClean = OptionalBool(Params, TEXT("requireClean"), true);
+	const bool bEndPIE = OptionalBool(Params, TEXT("endPIE"), true);
+	const bool bPIEWasActive = GEditor->PlayWorld != nullptr || GEditor->bIsSimulatingInEditor;
+	const FDirtyEditorPackages Dirty = CollectDirtyEditorPackages();
+
+	auto Result = MCPSuccess();
+	Result->SetBoolField(TEXT("scheduled"), false);
+	Result->SetBoolField(TEXT("requireClean"), bRequireClean);
+	Result->SetBoolField(TEXT("endPIE"), bEndPIE);
+	Result->SetBoolField(TEXT("pieWasActive"), bPIEWasActive);
+	Result->SetBoolField(TEXT("pieEndRequested"), false);
+	Result->SetNumberField(TEXT("dirtyContentCount"), Dirty.Content.Num());
+	Result->SetNumberField(TEXT("dirtyMapCount"), Dirty.Maps.Num());
+	Result->SetArrayField(TEXT("dirtyContentPackages"), PackageNamesToJson(Dirty.Content));
+	Result->SetArrayField(TEXT("dirtyMapPackages"), PackageNamesToJson(Dirty.Maps));
+
+	if (bPIEWasActive && !bEndPIE)
+	{
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), TEXT("PIE is active and endPIE is false; editor shutdown was not scheduled"));
+		return MCPResult(Result);
+	}
+
+	if (bRequireClean && (Dirty.Content.Num() > 0 || Dirty.Maps.Num() > 0))
+	{
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), TEXT("Editor has dirty content or map packages; save or discard them before requesting shutdown"));
+		return MCPResult(Result);
+	}
+
+	if (bPIEWasActive)
+	{
+		GEditor->RequestEndPlayMap();
+		Result->SetBoolField(TEXT("pieEndRequested"), true);
+	}
+
+	// Use a positive delay because a zero-delay ticker added while the core
+	// ticker is pumping can execute in the same pass. If PIE/SIE was active,
+	// keep polling until the editor has actually finished ending play.
+	FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateLambda([](float) -> bool
+		{
+			if (!GEditor)
+			{
+				return false;
+			}
+			if (GEditor->PlayWorld != nullptr || GEditor->bIsSimulatingInEditor)
+			{
+				return true;
+			}
+			UKismetSystemLibrary::QuitEditor();
+			return false;
+		}),
+		1.0f);
+
+	Result->SetBoolField(TEXT("scheduled"), true);
+	Result->SetStringField(TEXT("message"), TEXT("Graceful editor shutdown scheduled; active PIE/SIE will end before close"));
 	return MCPResult(Result);
 }
 
