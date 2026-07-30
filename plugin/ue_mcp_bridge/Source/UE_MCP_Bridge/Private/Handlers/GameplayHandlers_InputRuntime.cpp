@@ -225,7 +225,10 @@ TSharedPtr<FJsonValue> FGameplayHandlers::GetInputMappingContexts(const TSharedP
 			Players.Add(MakeShared<FJsonValueObject>(Entry));
 		}
 		WorldObj->SetArrayField(TEXT("players"), Players);
+		// Reported = how many are in this response; total = how many the world
+		// actually has, which differs whenever playerIndex filtered the list.
 		WorldObj->SetNumberField(TEXT("playerCount"), Players.Num());
+		WorldObj->SetNumberField(TEXT("totalPlayerCount"), World->GetNumPlayerControllers());
 		Worlds.Add(MakeShared<FJsonValueObject>(WorldObj));
 	}
 

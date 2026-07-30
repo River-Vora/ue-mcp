@@ -166,6 +166,9 @@ describe("feedback(submit) elicitation gate", () => {
     expect((r.result as { code?: string }).code).toBe("form_not_presented");
     // The agent must be told it MAY retry, unlike a real decline.
     expect(r.machine?.requiredActions).toContain("ask_user_in_text");
+    // Must never tell the agent it may self-approve past the human gate.
+    expect(r.machine?.requiredActions).toContain("do_not_self_approve");
+    expect(JSON.stringify(r.machine?.requiredActions)).not.toContain("auto_approve");
     expect(mockSubmitFeedback).not.toHaveBeenCalled();
   });
 

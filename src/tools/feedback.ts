@@ -554,7 +554,8 @@ export const feedbackTool: ToolDef = categoryTool(
                 `Treat this as the client not supporting or not rendering elicitation, NOT as the user refusing.`,
                 ``,
                 `Ask the user directly, in plain text, whether to submit this feedback.`,
-                `If they say yes, re-run feedback(submit) with autoApprove: true.`,
+                `Do NOT set autoApprove yourself - that bypasses the approval gate. If the user`,
+                `says yes, they can re-run with it, or fix their client's elicitation support.`,
               ].join("\n"),
               {
                 submitted: false,
@@ -564,7 +565,7 @@ export const feedbackTool: ToolDef = categoryTool(
               },
               {
                 kind: "feedback.blocked",
-                requiredActions: ["ask_user_in_text", "may_retry_with_auto_approve"],
+                requiredActions: ["ask_user_in_text", "do_not_self_approve"],
                 context: { code: "form_not_presented", action: elicitResult.action, elapsedMs },
               },
             );

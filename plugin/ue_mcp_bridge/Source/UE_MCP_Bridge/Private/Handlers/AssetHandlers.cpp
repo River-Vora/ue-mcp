@@ -441,6 +441,14 @@ TSharedPtr<FJsonValue> FAssetHandlers::ListAssets(const TSharedPtr<FJsonObject>&
 	TArray<FAssetData> Found;
 	Registry.GetAssetsByPath(FName(*Directory), Found, bRecursive);
 
+	// AssetRegistry order is not a stable contract, so paging over it could
+	// overlap or skip entries between calls. Sort so offset/limit paging is
+	// genuinely deterministic, which is what the action advertises.
+	Found.Sort([](const FAssetData& A, const FAssetData& B)
+	{
+		return A.PackageName.LexicalLess(B.PackageName);
+	});
+
 	TArray<TSharedPtr<FJsonValue>> Out;
 	int32 TotalMatched = 0;
 	for (const FAssetData& Data : Found)
@@ -2086,10 +2094,17 @@ TSharedPtr<FJsonValue> FAssetHandlers::SaveAsset(const TSharedPtr<FJsonObject>& 
 	}
 	else
 	{
-		// Save all dirty assets
+		// No assetPath: this is the save-everything branch. 'force' has no
+		// meaning here (SaveDirectory is dirty-only), so say so rather than
+		// accepting a flag that silently does nothing.
+		if (OptionalBool(Params, TEXT("force"), false))
+		{
+			return MCPError(TEXT("'force' requires an assetPath - it forces one package to disk. To flush everything, use asset(save_all_dirty), which reports exactly which packages were written."));
+		}
 		UEditorAssetLibrary::SaveDirectory(TEXT("/Game"));
 		auto Result = MCPSuccess();
-		Result->SetStringField(TEXT("message"), TEXT("All modified assets saved"));
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("message"), TEXT("All modified assets under /Game saved (dirty only). Use save_all_dirty for a per-package report."));
 		return MCPResult(Result);
 	}
 }

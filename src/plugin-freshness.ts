@@ -106,7 +106,22 @@ function findCompiledBinary(pluginDir: string): { file: string; mtimeMs: number 
  * shipped in this npm package. Never throws: a freshness check must not be able
  * to stop the server from starting.
  */
+// get_status is the first call of every session and gets polled, so the walk
+// below must not run per call. Cache by project path for a short window.
+const CACHE_TTL_MS = 60_000;
+const cache = new Map<string, { at: number; value: PluginFreshness }>();
+
 export function checkPluginFreshness(uprojectPath: string | null): PluginFreshness {
+  if (uprojectPath) {
+    const hit = cache.get(uprojectPath);
+    if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
+  }
+  const computed = computePluginFreshness(uprojectPath);
+  if (uprojectPath) cache.set(uprojectPath, { at: Date.now(), value: computed });
+  return computed;
+}
+
+function computePluginFreshness(uprojectPath: string | null): PluginFreshness {
   if (!uprojectPath) {
     return { checked: false, stale: false, reason: "no project loaded" };
   }

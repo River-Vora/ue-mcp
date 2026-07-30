@@ -30,7 +30,6 @@ export const networkingTool: ToolDef = categoryTool(
     replicationType: z.string().optional().describe("set_property_replicated: None | Replicated | RepNotify (#768)"),
     replicates: z.boolean().optional(),
     replicated: z.boolean().optional(),
-    replicationCondition: z.string().optional(),
     repNotify: z.boolean().optional(),
     netUpdateFrequency: z.number().optional(),
     minNetUpdateFrequency: z.number().optional(),

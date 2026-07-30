@@ -82,6 +82,8 @@ namespace
 		TArray<FChooserObjectRef>& OutRefs,
 		int32 Depth)
 	{
+		// Deep nesting is truncated rather than followed forever; the caller is
+		// told via truncatedDepth on the response so partial is not read as complete.
 		if (!Struct || !StructMemory || Depth > 6) return;
 
 		for (TFieldIterator<FProperty> It(Struct); It; ++It)
@@ -126,6 +128,34 @@ namespace
 			{
 				CollectRefsInStruct(StructProp->Struct, Value, Owner, ChooserPath, Location,
 					StructTypeName, OutRefs, Depth + 1);
+			}
+			else if (FMapProperty* MapProp = CastField<FMapProperty>(Prop))
+			{
+				FScriptMapHelper Helper(MapProp, Value);
+				for (FScriptMapHelper::FIterator MapIt = Helper.CreateIterator(); MapIt; ++MapIt)
+				{
+					if (FStructProperty* ValueStruct = CastField<FStructProperty>(MapProp->ValueProp))
+					{
+						CollectRefsInStruct(ValueStruct->Struct, Helper.GetValuePtr(MapIt), Owner,
+							ChooserPath, Location + TEXT("[map]"), StructTypeName, OutRefs, Depth + 1);
+					}
+					else if (FObjectPropertyBase* ValueObj = CastField<FObjectPropertyBase>(MapProp->ValueProp))
+					{
+						UObject* Referenced = ValueObj->GetObjectPropertyValue(Helper.GetValuePtr(MapIt));
+						if (Referenced && !Referenced->IsA<UChooserTable>())
+						{
+							FChooserObjectRef Ref;
+							Ref.ChooserPath = ChooserPath;
+							Ref.Location = Location + TEXT("[map]");
+							Ref.StructType = StructTypeName;
+							Ref.ObjectPath = Referenced->GetPathName();
+							Ref.Property = MapProp->ValueProp;
+							Ref.ValueAddr = Helper.GetValuePtr(MapIt);
+							Ref.Owner = Owner;
+							OutRefs.Add(Ref);
+						}
+					}
+				}
 			}
 			else if (FArrayProperty* ArrayProp = CastField<FArrayProperty>(Prop))
 			{
@@ -342,6 +372,10 @@ TSharedPtr<FJsonValue> FChooserHandlers::RemapObjectReferences(const TSharedPtr<
 	TArray<FChooserObjectRef> Refs;
 	GatherAllRefs(Chooser, Refs);
 
+	// Resolve every replacement target BEFORE any write. ValueAddr points into
+	// TArray storage inside an FInstancedStruct, and LoadObject can run PostLoad
+	// and editor callbacks that resize those arrays - which would leave every
+	// later ValueAddr dangling mid-loop.
 	const FString NormFrom = NormalizeObjectPath(From);
 	TArray<TSharedPtr<FJsonValue>> Changes;
 	TSet<UObject*> Touched;
@@ -405,7 +439,10 @@ TSharedPtr<FJsonValue> FChooserHandlers::RemapObjectReferences(const TSharedPtr<
 			}
 			else if (FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(Ref.Property))
 			{
-				UObject* NewTarget = LoadObject<UObject>(nullptr, *NewPath);
+				// Prefer an already-loaded object so the common case performs no
+				// load at all, and therefore cannot invalidate ValueAddr.
+				UObject* NewTarget = FindObject<UObject>(nullptr, *NewPath);
+				if (!NewTarget) NewTarget = LoadObject<UObject>(nullptr, *NewPath);
 				if (!NewTarget)
 				{
 					Change->SetStringField(TEXT("error"), FString::Printf(TEXT("Target not found: %s"), *NewPath));

@@ -2289,11 +2289,13 @@ TSharedPtr<FJsonValue> FEditorHandlers::RunAutomationTests(const TSharedPtr<FJso
 	const FString NameFilter = OptionalString(Params, TEXT("filter"));
 	const int32 MaxTests = OptionalInt(Params, TEXT("maxTests"), 50);
 
-	// #765: with the editor window unfocused, the CPU throttle drops it to a
-	// few FPS and the automation framework's interactive-frame-rate gate never
-	// opens, so tests sat in the queue indefinitely. An agent driving the
-	// editor is unfocused BY DEFINITION. Suspend the throttle for the duration
-	// of the run and restore whatever the user had afterwards.
+	// #765: this handler runs tests SYNCHRONOUSLY via StartTestByName inside a
+	// single tick, so it never depended on the interactive-frame-rate gate that
+	// blocks the console "Automation RunTests" queue - that is the actual fix
+	// for the reported hang. The throttle is still suspended here because the
+	// latent-command flush below can span frames if the editor does tick, and
+	// an agent-driven editor is unfocused by definition. It is a belt-and-braces
+	// measure, not the mechanism.
 	UEditorPerformanceSettings* PerfSettings = GetMutableDefault<UEditorPerformanceSettings>();
 	const bool bPrevThrottle = PerfSettings && PerfSettings->bThrottleCPUWhenNotForeground;
 	if (PerfSettings && bPrevThrottle)

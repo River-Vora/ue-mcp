@@ -23,14 +23,12 @@
 #include "LandscapeLayerInfoObject.h"
 #include "LandscapeProxy.h"
 #include "LandscapeEditLayer.h"
-#include "EditorScriptingUtilities/Public/EditorAssetLibrary.h"
 #include "ScopedTransaction.h"
 
 namespace
 {
 	// Landscape heights are uint16 with 32768 as "zero". One unit of height is
 	// LANDSCAPE_ZSCALE (1/128) cm before the actor's own Z scale.
-	constexpr uint16 LandscapeMidHeight = 32768;
 
 	/** The landscape to edit: by actor label, else the only one in the world. */
 	ALandscape* ResolveLandscape(UWorld* World, const FString& ActorLabel, FString& OutError)
@@ -207,6 +205,16 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::Sculpt(const TSharedPtr<FJsonObject>&
 
 	const int32 Width = X2 - X1 + 1;
 	const int32 Height = Y2 - Y1 + 1;
+	// Cap the working rect: the extent clamp alone lets an 8k landscape with a
+	// huge radius allocate hundreds of MB and iterate tens of millions of verts.
+	const int64 VertexCount = (int64)Width * (int64)Height;
+	const int64 MaxVertices = (int64)FMath::Clamp(OptionalInt(Params, TEXT("maxVertices"), 4'000'000), 1024, 64'000'000);
+	if (VertexCount > MaxVertices)
+	{
+		return MCPError(FString::Printf(
+			TEXT("Brush covers %lld vertices, above the %lld limit. Reduce 'radius' or raise 'maxVertices' deliberately."),
+			VertexCount, MaxVertices));
+	}
 	TArray<uint16> Heights;
 	Heights.SetNumZeroed(Width * Height);
 
@@ -240,6 +248,9 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::Sculpt(const TSharedPtr<FJsonObject>&
 		FlattenTarget = (double)Heights[(CY - Y1) * Width + (CX - X1)];
 	}
 
+	// Resolve the mode once instead of comparing strings per vertex.
+	const int32 SculptMode = Mode == TEXT("raise") ? 0 : (Mode == TEXT("lower") ? 1 : 2);
+
 	int32 Touched = 0;
 	for (int32 Y = Y1; Y <= Y2; ++Y)
 	{
@@ -254,9 +265,9 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::Sculpt(const TSharedPtr<FJsonObject>&
 			const int32 Index = (Y - Y1) * Width + (X - X1);
 			const double Current = (double)Heights[Index];
 			double Next = Current;
-			if (Mode == TEXT("raise"))       Next = Current + Amount * ZScale * Weight;
-			else if (Mode == TEXT("lower"))  Next = Current - Amount * ZScale * Weight;
-			else                             Next = FMath::Lerp(Current, FlattenTarget, Weight);
+			if (SculptMode == 0)      Next = Current + Amount * ZScale * Weight;
+			else if (SculptMode == 1) Next = Current - Amount * ZScale * Weight;
+			else                      Next = FMath::Lerp(Current, FlattenTarget, Weight);
 
 			Heights[Index] = (uint16)FMath::Clamp(FMath::RoundToInt(Next), 0, 65535);
 			++Touched;

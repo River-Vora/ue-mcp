@@ -125,7 +125,10 @@ namespace
 			Obj->TryGetNumberField(TEXT("z"), Z);
 			return FVector(X, Y, Z);
 		};
-		OutBox = FBox(ReadVec(*MinObj), ReadVec(*MaxObj));
+		const FVector Min = ReadVec(*MinObj);
+		const FVector Max = ReadVec(*MaxObj);
+		// An inverted box silently matches nothing, which reads as "no actors".
+		OutBox = FBox(FVector::Min(Min, Max), FVector::Max(Min, Max));
 		return true;
 	}
 
@@ -345,7 +348,10 @@ TSharedPtr<FJsonValue> FLevelHandlers::LoadActorDescs(const TSharedPtr<FJsonObje
 	Result->SetStringField(TEXT("mode"), Mode);
 	Result->SetBoolField(TEXT("dryRun"), bDryRun);
 	Result->SetNumberField(TEXT("matched"), Matches.Num());
-	Result->SetNumberField(TEXT("affected"), bDryRun ? 0 : Guids.Num());
+	// Report what actually changed, not what was requested: PinActors is a
+	// no-op when the world partition has no pinned-actor adapter.
+	Result->SetNumberField(TEXT("requested"), Guids.Num());
+	Result->SetNumberField(TEXT("affected"), bDryRun ? 0 : (Mode == TEXT("pin") ? ResidentAfter : Guids.Num()));
 	Result->SetNumberField(TEXT("residentAfter"), ResidentAfter);
 	Result->SetArrayField(TEXT("actors"), Affected);
 	return MCPResult(Result);

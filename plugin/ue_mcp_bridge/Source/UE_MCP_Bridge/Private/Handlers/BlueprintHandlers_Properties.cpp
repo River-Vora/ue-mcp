@@ -76,7 +76,12 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetVariableProperties(const TSharedPt
 	}
 
 	// Capture previous values for rollback
-	const bool bPrevInstanceEditable = (FoundVar->PropertyFlags & CPF_Edit) != 0;
+	// Must match list_variables' definition (#744): CPF_Edit alone is also set
+	// by EditDefaultsOnly, so the distinguishing flag is CPF_DisableEditOnInstance.
+	const bool bPrevInstanceEditable =
+		(FoundVar->PropertyFlags & CPF_Edit) != 0 &&
+		(FoundVar->PropertyFlags & CPF_DisableEditOnInstance) == 0 &&
+		!FoundVar->HasMetaData(FBlueprintMetadata::MD_Private);
 	FString PrevCategory;
 	if (FoundVar->HasMetaData(FBlueprintMetadata::MD_FunctionCategory))
 	{
@@ -114,11 +119,18 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetVariableProperties(const TSharedPt
 		if (bInstanceEditable)
 		{
 			FoundVar->PropertyFlags |= CPF_Edit;
+			// Without clearing this, an EditDefaultsOnly variable stayed
+			// EditDefaultsOnly and list_variables kept reporting false right
+			// after this call reported updated: true.
+			FoundVar->PropertyFlags &= ~CPF_DisableEditOnInstance;
 			FoundVar->RemoveMetaData(FBlueprintMetadata::MD_Private);
 		}
 		else
 		{
-			FoundVar->PropertyFlags &= ~CPF_Edit;
+			// "Not instance editable" means EditDefaultsOnly, not "not editable
+			// at all" - clearing CPF_Edit would also hide it from class defaults.
+			FoundVar->PropertyFlags |= CPF_Edit;
+			FoundVar->PropertyFlags |= CPF_DisableEditOnInstance;
 		}
 	}
 

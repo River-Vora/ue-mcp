@@ -1024,7 +1024,17 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SetRendererProperty(const TSharedPtr<FJ
 	else if (FNumericProperty* NP = CastField<FNumericProperty>(Prop))
 	{
 		if (!Params->TryGetNumberField(TEXT("value"), NumValue)) return MCPError(TEXT("Expected numeric 'value'"));
-		NP->SetFloatingPointPropertyValue(NP->ContainerPtrToValuePtr<void>(R), NumValue);
+		// SetFloatingPointPropertyValue is only implemented for float/double
+		// properties; integer and enum-backed numerics need the integer setter.
+		void* Addr = NP->ContainerPtrToValuePtr<void>(R);
+		if (NP->IsFloatingPoint())
+		{
+			NP->SetFloatingPointPropertyValue(Addr, NumValue);
+		}
+		else
+		{
+			NP->SetIntPropertyValue(Addr, (int64)FMath::RoundToDouble(NumValue));
+		}
 	}
 	else if (FStrProperty* SP = CastField<FStrProperty>(Prop))
 	{
@@ -1417,6 +1427,26 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::ListModuleInputs(const TSharedPtr<FJson
 					TSharedPtr<FJsonObject> InObj = MakeShared<FJsonObject>();
 					InObj->SetStringField(TEXT("name"), ShortName);
 					InObj->SetStringField(TEXT("qualifiedName"), FullName);
+					// Two inputs can share a leaf name (Module.Position.X and
+					// Module.Velocity.X both shorten to "X"), and the leaf is
+					// what set_module_input matches on - so flag when the short
+					// name is not uniquely addressable.
+					{
+						int32 SameLeaf = 0;
+						for (const FNiagaraVariable& Other : InputVars)
+						{
+							const FString OtherFull = Other.GetName().ToString();
+							FString OH, OL;
+							const FString OtherShort = OtherFull.Split(TEXT("."), &OH, &OL,
+								ESearchCase::IgnoreCase, ESearchDir::FromEnd) ? OL : OtherFull;
+							if (OtherShort == ShortName) ++SameLeaf;
+						}
+						if (SameLeaf > 1)
+						{
+							InObj->SetBoolField(TEXT("ambiguousShortName"), true);
+							InObj->SetStringField(TEXT("addressAs"), FullName);
+						}
+					}
 					InObj->SetStringField(TEXT("type"), Var.GetType().GetName());
 
 					// Whether set_module_input can bind this input through the

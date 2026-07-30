@@ -12,7 +12,7 @@
 
 #include "HandlerUtils.h"
 
-#include "EditorScriptingUtilities/Public/EditorAssetLibrary.h"
+#include "EditorAssetLibrary.h"
 #include "Engine/Blueprint.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/UObjectHash.h"
@@ -54,6 +54,11 @@ namespace
 		// Struct pins expand into sub-pins; that nesting IS the wiring for
 		// things like a transform's individual channels, so keep it, bounded.
 		const TArray<URigVMPin*>& SubPins = Pin->GetSubPins();
+		if (SubPins.Num() > 0 && Depth >= 3)
+		{
+			// Say so rather than returning a partial pin tree that reads complete.
+			Obj->SetBoolField(TEXT("subPinsTruncated"), true);
+		}
 		if (SubPins.Num() > 0 && Depth < 3)
 		{
 			TArray<TSharedPtr<FJsonValue>> SubArray;
@@ -153,7 +158,9 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ReadControlRigGraph(const TSharedPtr<
 			NodesArray.Add(MakeShared<FJsonValueObject>(NodeObj));
 		}
 		GraphObj->SetArrayField(TEXT("nodes"), NodesArray);
-		GraphObj->SetBoolField(TEXT("nodesTruncated"), NodesArray.Num() < Nodes.Num());
+		// Compare against the node limit, not the raw count: a graph containing a
+		// null node would otherwise report truncation that never happened.
+		GraphObj->SetBoolField(TEXT("nodesTruncated"), NodesArray.Num() >= NodeLimit && Nodes.Num() > NodeLimit);
 
 		if (bIncludeLinks)
 		{
