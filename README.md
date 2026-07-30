@@ -1,4 +1,7 @@
 # UE-MCP
+[![npm downloads](https://img.shields.io/npm/dt/ue-mcp)](https://www.npmjs.com/package/ue-mcp)
+[![stars](https://img.shields.io/github/stars/db-lyon/ue-mcp)](https://github.com/db-lyon/ue-mcp/stargazers)
+[![MIT](https://img.shields.io/npm/l/ue-mcp)](LICENSE)
 
 **Unreal Engine Model Context Protocol Server** - gives AI assistants deep read/write access to the Unreal Editor through <!-- count:tools -->24<!-- /count --> category tools covering <!-- count:actions -->736+<!-- /count --> actions, plus a YAML flow engine for multi-step workflows.
 
@@ -84,6 +87,12 @@ If you prefer to configure manually, add to your MCP client config:
 Requires `PythonScriptPlugin` (ships with UE 4.26+).
 
 If you clone this repo to contribute, install [git-lfs](https://git-lfs.com) first - the bundled test project stores `.uasset` / `.umap` via LFS and plain `git clone` will leave them as pointer files.
+
+## Sponsor
+
+UE-MCP is MIT licensed and maintained independently. If it saves you time in
+production, [sponsorship](https://github.com/sponsors/db-lyon) funds native
+handler coverage and UE version testing.
 
 ## Contributing
 
