@@ -1,4 +1,5 @@
-import type { TaskResult, RollbackRecord } from "@db-lyon/flowkit";
+import type { TaskResult } from "@db-lyon/flowkit";
+import { liftRollback } from "./rollback.js";
 import { UeMcpTask } from "../task.js";
 
 /**
@@ -36,21 +37,8 @@ export class BridgeTask extends UeMcpTask {
 
     const { rollback, ...rest } = raw as Record<string, unknown>;
     const result: TaskResult = { success: true, data: rest };
-
-    if (rollback && typeof rollback === "object") {
-      const rb = rollback as { method?: unknown; payload?: unknown };
-      if (typeof rb.method === "string") {
-        const record: RollbackRecord = {
-          taskName: rb.method,
-          payload:
-            rb.payload && typeof rb.payload === "object"
-              ? (rb.payload as Record<string, unknown>)
-              : {},
-        };
-        result.rollback = record;
-      }
-    }
-
+    const record = liftRollback(rollback);
+    if (record) result.rollback = record;
     return result;
   }
 }

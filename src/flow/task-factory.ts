@@ -1,6 +1,7 @@
 import type { TaskResult, TaskConstructor } from "@db-lyon/flowkit";
 import { UeMcpTask } from "../task.js";
 import type { FlowContext } from "./context.js";
+import { liftRollback } from "./rollback.js";
 
 /**
  * Create a TaskConstructor for a bridge-delegation action.
@@ -18,13 +19,18 @@ export function bridgeTaskClass(
       const params = mapParams
         ? mapParams(this.options as Record<string, unknown>)
         : this.options as Record<string, unknown>;
-      const data = await this.bridge.call(method, params, timeoutMs);
-      return {
-        success: true,
-        data: typeof data === "object" && data !== null
-          ? (data as Record<string, unknown>)
-          : { result: data },
-      };
+      const raw = await this.bridge.call(method, params, timeoutMs);
+      if (typeof raw !== "object" || raw === null) {
+        return { success: true, data: { result: raw } };
+      }
+      // Handlers attach `rollback` to their response. This class never lifted
+      // it, so every rollback emitted by a registered action was silently
+      // dropped and rollback_on_failure had nothing to undo.
+      const { rollback, ...rest } = raw as Record<string, unknown>;
+      const result: TaskResult = { success: true, data: rest };
+      const record = liftRollback(rollback);
+      if (record) result.rollback = record;
+      return result;
     }
   }
   Object.defineProperty(FactoryBridgeTask, "name", { value: `BridgeTask_${name}` });
