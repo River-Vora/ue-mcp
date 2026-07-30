@@ -34,7 +34,6 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/GCObjectScopeGuard.h"
-#include "Misc/ScopeExit.h"
 
 namespace
 {
@@ -247,26 +246,15 @@ namespace
 			}
 		}
 
-		// ProcessEvent can run arbitrary game code - including one that tears
-		// down the world and collects garbage - and the target is read again
+		// ProcessEvent can run arbitrary game code, including code that tears
+		// down the world and collects garbage, and CallTarget is read again
 		// below to export out params.
 		FGCObjectScopeGuard TargetGuard(CallTarget);
-		// ParamBuf is raw bytes, invisible to GC. Any UObject* out-param written
-		// into it during the call would dangle if ProcessEvent collected
-		// garbage, and it is dereferenced below to export return values.
-		TArray<FGCObjectScopeGuard*> ArgGuards;
-		ON_SCOPE_EXIT { for (FGCObjectScopeGuard* G : ArgGuards) delete G; };
 		CallTarget->ProcessEvent(Func, ParamBuf.GetData());
-		for (TFieldIterator<FProperty> It(Func); It && (It->PropertyFlags & CPF_Parm); ++It)
-		{
-			if (FObjectPropertyBase* OP = CastField<FObjectPropertyBase>(*It))
-			{
-				if (UObject* Out = OP->GetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(ParamBuf.GetData())))
-				{
-					ArgGuards.Add(new FGCObjectScopeGuard(Out));
-				}
-			}
-		}
+		// NOTE: UObject* out-params live in ParamBuf, which is raw bytes and
+		// invisible to GC. Guarding them after the fact cannot help - by then a
+		// collection has already happened - so out-param objects are validated
+		// with IsValid() at export time instead.
 
 		TSharedPtr<FJsonObject> OutVals = MakeShared<FJsonObject>();
 		for (TFieldIterator<FProperty> It(Func); It && (It->PropertyFlags & CPF_Parm); ++It)
@@ -274,6 +262,14 @@ namespace
 			FProperty* P = *It;
 			if (P->PropertyFlags & (CPF_ReturnParm | CPF_OutParm))
 			{
+				// An object out-param may have been collected during the call.
+				if (FObjectPropertyBase* OP = CastField<FObjectPropertyBase>(P))
+				{
+					UObject* Out = OP->GetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(ParamBuf.GetData()));
+					OutVals->SetStringField(P->GetName(),
+						(Out && IsValid(Out)) ? Out->GetPathName() : FString());
+					continue;
+				}
 				FString S;
 				P->ExportTextItem_Direct(S, P->ContainerPtrToValuePtr<void>(ParamBuf.GetData()), nullptr, CallTarget, PPF_None);
 				OutVals->SetStringField(P->GetName(), S);
@@ -393,7 +389,14 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 		{
 			continue;
 		}
-		if (Count >= MaxProperties) { ++Skipped; continue; }
+		if (Count >= MaxProperties)
+		{
+			// Record it as seen so a capped-but-real property is not reported
+			// under missingProperties, which means "no such property".
+			Emitted.Add(P->GetName().ToLower());
+			++Skipped;
+			continue;
+		}
 		FString S;
 		P->ExportTextItem_Direct(S, P->ContainerPtrToValuePtr<void>(Target), nullptr, Target, PPF_None);
 		if (S.Len() > MaxValueChars)
@@ -480,15 +483,25 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 	// (bHasValidBoneTransform / AreBoneTransformsValid) is protected and not
 	// reflected, so detect the pathological signature directly: a multi-bone
 	// skeleton whose component-space transforms are ALL exactly identity has
-	// not been posed. A posed mesh - including a leader-pose-driven one, which
-	// a flag check would have wrongly rejected - exits on the first
-	// non-identity bone and costs nothing.
-	if (!Mesh->GetSkinnedAsset() || Mesh->GetNumComponentSpaceTransforms() == 0)
+	// not been posed. A posed mesh exits on the first non-identity bone.
+	// A leader-pose follower deliberately has an EMPTY component-space array
+	// (AllocateTransformData skips it when a leader is set) yet resolves
+	// transforms correctly through the leader, which is what GetSocketTransform
+	// below actually uses. Only validate components that own their pose.
+	const bool bFollowsLeader = Mesh->LeaderPoseComponent.IsValid();
+	if (!Mesh->GetSkinnedAsset())
 	{
 		return MCPError(FString::Printf(
-			TEXT("SkeletalMeshComponent '%s' on '%s' has no bone transform data (no skinned asset, or not registered)."),
+			TEXT("SkeletalMeshComponent '%s' on '%s' has no skinned asset."),
 			*Mesh->GetName(), *ActorLabel));
 	}
+	if (!bFollowsLeader && Mesh->GetNumComponentSpaceTransforms() == 0)
+	{
+		return MCPError(FString::Printf(
+			TEXT("SkeletalMeshComponent '%s' on '%s' has no bone transform data (not registered)."),
+			*Mesh->GetName(), *ActorLabel));
+	}
+	if (!bFollowsLeader)
 	{
 		const TArray<FTransform>& Spaces = Mesh->GetComponentSpaceTransforms();
 		bool bAnyPosed = Spaces.Num() <= 1;

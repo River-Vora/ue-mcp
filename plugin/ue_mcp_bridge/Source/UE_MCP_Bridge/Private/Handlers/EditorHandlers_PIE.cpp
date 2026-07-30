@@ -6,6 +6,8 @@
 #include "EditorHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+
+#include "UObject/GCObjectScopeGuard.h"
 #include "HandlerJsonProperty.h"
 #include "JsonSerializer.h"
 #include "Containers/Ticker.h"
@@ -952,6 +954,9 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 		}
 	}
 
+	// ProcessEvent can run arbitrary game code, including code that tears down
+	// the world and collects garbage, and CallTarget is read again below.
+	FGCObjectScopeGuard CallTargetGuard(CallTarget);
 	CallTarget->ProcessEvent(Func, ParamBuf.GetData());
 
 	auto Result = MCPSuccess();
@@ -1134,6 +1139,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeStaticFunction(const TSharedPtr<FJ
 		}
 	}
 
+	FGCObjectScopeGuard CDOGuard(CDO);
 	CDO->ProcessEvent(Func, ParamBuf.GetData());
 
 	auto Result = MCPSuccess();
