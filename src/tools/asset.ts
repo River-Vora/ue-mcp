@@ -152,6 +152,8 @@ export const assetTool: ToolDef = categoryTool(
     lock:                 bp("Acquire an exclusive lock on an asset for this session. Returns acquired=true, or acquired=false with holder{sessionId,ttlSecondsRemaining} when another session holds it. Params: assetPath, ttlSeconds? (default 300), sessionId?", "acquire_lock", (p) => ({ path: p.assetPath ?? p.path, sessionId: p.sessionId ?? SESSION_ID, ttlSeconds: p.ttlSeconds })),
     unlock:               bp("Release an asset lock held by this session (or force=true to break any holder's lock). Params: assetPath, force?, sessionId?", "release_lock", (p) => ({ path: p.assetPath ?? p.path, sessionId: p.sessionId ?? SESSION_ID, force: p.force })),
     list_locks:           bp("List all currently-held asset locks with holder session id, acquiredAt, and ttlSecondsRemaining.", "list_locks"),
+    unlock_all:           bp("Release every lock held by one session in a single call, returning the number released. Defaults to this server process's session; pass sessionId to clear a different one (for example after a crashed session left assets wedged). Params: sessionId?", "release_session_locks", (p) => ({ sessionId: p.sessionId ?? SESSION_ID })),
+    diff:                 bp("Semantic structural diff between two assets of any type, dispatching on the asset's class. Blueprints are diffed structurally (parent class, variables, functions, components, per-graph node and connection deltas); other asset types report that diffing is not supported yet rather than failing opaquely. Params: assetPath, otherPath", "diff_asset", (p) => ({ assetPath: p.assetPath ?? p.path, otherPath: p.otherPath })),
   },
   undefined,
   {
@@ -274,5 +276,10 @@ export const assetTool: ToolDef = categoryTool(
     bHasNavigationData: z.boolean().optional().describe("Toggle nav data generation for set_mesh_nav"),
     clearNavCollision: z.boolean().optional().describe("Remove NavCollision from mesh for set_mesh_nav"),
     force: z.boolean().optional().describe("delete / delete_batch: auto-close any open asset editors before deleting (#278). delete_folder: also delete assets contained in the folder."),
+    otherPath: z.string().optional().describe("diff: the asset to compare assetPath against"),
+    // lock / unlock / unlock_all all default this to the server process's own
+    // session id; it is only passed explicitly to coordinate across processes.
+    sessionId: z.string().optional().describe("lock / unlock / unlock_all: owning session id (defaults to this server process)"),
+    ttlSeconds: z.number().optional().describe("lock: seconds before the lock auto-expires (default 300)"),
   },
 );
