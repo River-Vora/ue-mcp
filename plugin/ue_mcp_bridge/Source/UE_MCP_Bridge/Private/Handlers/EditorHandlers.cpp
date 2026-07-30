@@ -180,7 +180,9 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("undo"), &Undo);
 	Registry.RegisterHandler(TEXT("redo"), &Redo);
 	Registry.RegisterHandler(TEXT("reload_handlers"), &ReloadHandlers);
-	Registry.RegisterHandler(TEXT("save_asset"), &SaveAsset);
+	// save_asset is owned by FAssetHandlers (#768: adds force, file size, mtime).
+	// Registering it here too meant the winner was decided by registration
+	// order in BridgeServer.cpp, which is not a contract.
 	Registry.RegisterHandler(TEXT("save_dirty"), &SaveDirty);
 	Registry.RegisterHandler(TEXT("list_dirty_packages"), &ListDirtyPackages);
 	Registry.RegisterHandler(TEXT("list_pie_instances"), &ListPIEInstances);
@@ -1488,24 +1490,6 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReloadHandlers(const TSharedPtr<FJsonObj
 {
 	// No-op in C++ bridge - this was used in the Python bridge to reload Python handler modules.
 	auto Result = MCPSuccess();
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FEditorHandlers::SaveAsset(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
-
-	bool bSuccess = UEditorAssetLibrary::SaveAsset(AssetPath);
-
-	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-	Result->SetStringField(TEXT("path"), AssetPath);
-	Result->SetBoolField(TEXT("success"), bSuccess);
-	if (!bSuccess)
-	{
-		Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Failed to save asset: %s"), *AssetPath));
-	}
-
 	return MCPResult(Result);
 }
 

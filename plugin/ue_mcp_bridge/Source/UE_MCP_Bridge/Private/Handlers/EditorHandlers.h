@@ -140,7 +140,6 @@ private:
 	static TSharedPtr<FJsonValue> Undo(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> Redo(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReloadHandlers(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> SaveAsset(const TSharedPtr<FJsonObject>& Params);
 	// #378: flush dirty packages and report per-package success/failure
 	static TSharedPtr<FJsonValue> SaveDirty(const TSharedPtr<FJsonObject>& Params);
 	// #340: enumerate currently-dirty content/map packages
