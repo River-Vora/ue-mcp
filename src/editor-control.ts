@@ -5,6 +5,7 @@ import * as net from "net";
 import WebSocket from "ws";
 import type { ProjectContext } from "./project.js";
 import { findEngineInstall } from "./deployer.js";
+import { invalidatePluginFreshness } from "./plugin-freshness.js";
 
 // Process control is cross-platform: the editor binary path and the running-
 // process probe differ per OS, and stopping goes through the bridge (#790).
@@ -432,6 +433,10 @@ export async function buildProject(
     if (proc.stderr) proc.stderr.on("data", forward);
 
     proc.on("close", (code) => {
+      // A build is the only event that can turn a "stale plugin" verdict fresh
+      // ahead of the cache TTL, so drop the cached answer here rather than
+      // making the next get_status report a binary that no longer exists.
+      invalidatePluginFreshness();
       resolve(
         code === 0
           ? { success: true, exitCode: 0, message: "Build succeeded" }

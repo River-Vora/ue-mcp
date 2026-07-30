@@ -111,7 +111,8 @@ function findCompiledBinary(pluginDir: string): { file: string; mtimeMs: number 
 const CACHE_TTL_MS = 10_000;
 const cache = new Map<string, { at: number; value: PluginFreshness }>();
 
-/** Drop the cached verdict, e.g. straight after a rebuild. */
+/** Drop the cached verdict. Called after a build, which is the only thing that
+ *  can flip a stale verdict to fresh sooner than the TTL. */
 export function invalidatePluginFreshness(): void {
   cache.clear();
 }
