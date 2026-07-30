@@ -661,15 +661,19 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	const FString PhysMaterialPath = OptionalString(Params, TEXT("physMaterial"));
 	if (!PhysMaterialPath.IsEmpty())
 	{
-		UObject* PhysMat = LoadObject<UObject>(nullptr, *PhysMaterialPath);
+		UObject* PhysMat = LoadAssetByPath<UObject>(PhysMaterialPath);
 		if (!PhysMat)
 		{
+			// Both failure paths here run after the package and object exist, so
+			// bail out without leaving a half-made asset in memory.
+			LayerInfo->MarkAsGarbage();
 			return MCPError(FString::Printf(TEXT("physMaterial not found: %s"), *PhysMaterialPath));
 		}
 		FObjectProperty* Prop = CastField<FObjectProperty>(
 			ULandscapeLayerInfoObject::StaticClass()->FindPropertyByName(TEXT("PhysMaterial")));
 		if (!Prop || !Prop->PropertyClass || !PhysMat->IsA(Prop->PropertyClass))
 		{
+			LayerInfo->MarkAsGarbage();
 			return MCPError(FString::Printf(
 				TEXT("'%s' is a %s, not a PhysicalMaterial."),
 				*PhysMaterialPath, *PhysMat->GetClass()->GetName()));

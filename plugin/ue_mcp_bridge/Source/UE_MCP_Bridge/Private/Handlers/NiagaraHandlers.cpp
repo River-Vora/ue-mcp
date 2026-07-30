@@ -1,6 +1,8 @@
 #include "NiagaraHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+
+#include "UObject/StrongObjectPtr.h"
 #include "HandlerJsonProperty.h"
 #include "HandlerAssetCreate.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -278,14 +280,28 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::CreateNiagaraEmitter(const TSharedPtr<F
 	// caller only found out when the new emitter did none of what the template
 	// does. The factory's copy path is the same one the content browser's
 	// "create from template" uses.
+	TStrongObjectPtr<UNiagaraEmitter> TemplateGuard;
 	const FString TemplatePath = OptionalString(Params, TEXT("templatePath"));
+	if (TemplatePath.IsEmpty() && OptionalBool(Params, TEXT("inherit"), false))
+	{
+		return MCPError(TEXT("inherit=true needs a templatePath - there is nothing to inherit from otherwise."));
+	}
 	if (!TemplatePath.IsEmpty())
 	{
-		UNiagaraEmitter* Template = LoadObject<UNiagaraEmitter>(nullptr, *TemplatePath);
+		// LoadAssetByPath, not a bare LoadObject: asset(list)/asset(search)
+		// return "/Game/VFX/E_Fire" and only "/Game/VFX/E_Fire.E_Fire" loads,
+		// so the documented path form failed with a misleading type error.
+		UNiagaraEmitter* Template = LoadAssetByPath<UNiagaraEmitter>(TemplatePath);
 		if (!Template)
 		{
-			return MCPError(FString::Printf(TEXT("templatePath is not a NiagaraEmitter: %s"), *TemplatePath));
+			return MCPError(FString::Printf(
+				TEXT("templatePath did not resolve to a NiagaraEmitter: %s"), *TemplatePath));
 		}
+		// EmitterToCopy is a TWeakObjectPtr and nothing else references a
+		// freshly loaded asset. If it goes stale before FactoryCreateNew runs,
+		// the factory silently falls into its empty-emitter branch and produces
+		// the default asset this parameter exists to avoid.
+		TemplateGuard.Reset(Template);
 		Factory->EmitterToCopy = Template;
 		// Copy rather than inherit: an inherited emitter tracks the template and
 		// refuses local edits to inherited modules, which is not what a caller
@@ -1609,9 +1625,17 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SetModuleInput(const TSharedPtr<FJsonOb
 							// reported success, and reaching the end reported
 							// "input not found", which sends the caller after the
 							// wrong problem entirely.
+							//
+							// With stackContext=all an earlier context may already
+							// have been written, so returning a bare error here
+							// would report failure for a call that did mutate.
+							// Say so instead of implying nothing happened.
 							return MCPError(FString::Printf(
-								TEXT("Cannot use value '%s' for input '%s' (type %s): %s"),
-								*Value, *InputName, *Found->GetType().GetName(), *VErr));
+								TEXT("Cannot use value '%s' for input '%s' (type %s): %s%s"),
+								*Value, *InputName, *Found->GetType().GetName(), *VErr,
+								SetCount > 0
+									? TEXT(" NOTE: this input was already written in an earlier stack context before the failure - the asset is modified and unsaved; re-set it explicitly or discard the change.")
+									: TEXT("")));
 						}
 						{
 							FC->Modify();

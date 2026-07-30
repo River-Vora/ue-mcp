@@ -706,7 +706,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `cook_content` | Cook content. Params: `platform?` |
 | `get_log` | Read output log. Params: `maxLines?, filter?, category?` |
 | `search_log` | Search log. Params: `query` |
-| `get_message_log` | Read a Message Log listing (BlueprintLog, MapCheck, AssetCheck, PIE, LoadErrors, LightingResults). Returns messages with severity plus whole-listing total/errors/warnings counts, so a truncated read still tells you honestly whether the log is clean. An unknown logName is an error, not an empty log. Params: `logName? (default BlueprintLog), maxLines? (default 200), filter? (severity substring)` |
+| `get_message_log` | Read a Message Log listing (MapCheck, AssetCheck, PIE, LoadErrors, LightingResults...). Call with NO logName to list the registered listings with their error/warning counts, then read one. Counts come from the listing itself; message bodies come from the current page and honour the Message Log tab's severity checkboxes, so when fewer are readable than exist the response says so instead of reading clean. An unknown logName is an error, not an empty log. Blueprint COMPILE results are not here - the compiler makes a listing per Blueprint; use blueprint(compile). Params: `logName?, maxLines? (default 200), severity? (severity-name substring)` |
 | `list_crashes` | List crash reports |
 | `get_crash_info` | Get crash details. Params: `crashFolder` |
 | `check_for_crashes` | Check for recent crashes |
