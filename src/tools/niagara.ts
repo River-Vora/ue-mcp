@@ -73,7 +73,11 @@ export const niagaraTool: ToolDef = categoryTool(
     rotation: Rotator.optional(),
     label: z.string().optional(),
     parameterName: z.string().optional(),
-    value: z.union([z.string(), z.number(), z.boolean()]).optional(),
+    // Shared across set_renderer_property / set_parameter / set_module_input.
+    // Must stay unknown: the renderer/parameter paths accept structs and arrays
+    // via the JSON property setter (#783). set_module_input stringifies in its
+    // own mapper because its handler takes a string.
+    value: z.unknown().optional(),
     parameterType: z.string().optional(),
     name: z.string().optional(),
     packagePath: z.string().optional(),
