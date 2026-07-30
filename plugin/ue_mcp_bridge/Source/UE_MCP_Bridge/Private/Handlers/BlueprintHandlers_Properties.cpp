@@ -110,6 +110,44 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetVariableProperties(const TSharedPt
 	const bool bWasEditableAtAll = (FoundVar->PropertyFlags & CPF_Edit) != 0;
 	const bool bWasPrivate = FoundVar->HasMetaData(FBlueprintMetadata::MD_Private);
 
+	// `instanceEditable` is a boolean over a three-state setting, so it cannot
+	// express (and therefore cannot restore) every state a variable can be in:
+	// a variable that was EditAnywhere AND private, or one that was not exposed
+	// at all, both round-trip wrong. `editFlag` mirrors exactly what
+	// list_variables reports, which makes read -> write -> read closed, and
+	// makes the rollback below able to name the state it is restoring.
+	const FString PrevEditFlag =
+		!bWasEditableAtAll                                            ? TEXT("none") :
+		(FoundVar->PropertyFlags & CPF_DisableEditOnInstance) != 0    ? TEXT("EditDefaultsOnly") :
+		(FoundVar->PropertyFlags & CPF_DisableEditOnTemplate) != 0    ? TEXT("EditInstanceOnly") :
+		                                                                TEXT("EditAnywhere");
+	// MD_Private is orthogonal to the edit flags - the Blueprint editor's
+	// "Private" checkbox does not clear EditAnywhere - so it is its own param
+	// rather than a fifth enum value. Folding it in would lose a bit, which is
+	// exactly what made the old rollback unable to restore the original state.
+	bool bPrivate = false;
+	const bool bHasPrivate = Params->TryGetBoolField(TEXT("private"), bPrivate);
+	FString EditFlag = OptionalString(Params, TEXT("editFlag"));
+	if (!EditFlag.IsEmpty())
+	{
+		const FString L = EditFlag.ToLower();
+		if      (L == TEXT("editanywhere"))      EditFlag = TEXT("EditAnywhere");
+		else if (L == TEXT("editdefaultsonly"))  EditFlag = TEXT("EditDefaultsOnly");
+		else if (L == TEXT("editinstanceonly"))  EditFlag = TEXT("EditInstanceOnly");
+		else if (L == TEXT("none"))              EditFlag = TEXT("none");
+		else
+		{
+			return MCPError(FString::Printf(
+				TEXT("Unknown editFlag '%s'. Expected EditAnywhere, EditDefaultsOnly, EditInstanceOnly or none (the values list_variables reports)."),
+				*EditFlag));
+		}
+	}
+	const bool bHasEditFlag = !EditFlag.IsEmpty();
+	if (bHasEditFlag && bHasInstanceEditable)
+	{
+		return MCPError(TEXT("Pass editFlag or instanceEditable, not both - instanceEditable is the two-state shorthand for editFlag."));
+	}
+
 	FString CategoryStr;
 	const bool bHasCategory = Params->TryGetStringField(TEXT("category"), CategoryStr);
 	FString TooltipStr;
@@ -122,6 +160,8 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetVariableProperties(const TSharedPt
 	const bool bAnyChanged =
 		(bHasExposeOnSpawn && bExposeOnSpawn != bPrevExposeOnSpawn) ||
 		(bHasInstanceEditable && bInstanceEditable != bPrevInstanceEditable) ||
+		(bHasEditFlag && EditFlag != PrevEditFlag) ||
+		(bHasPrivate && bPrivate != bWasPrivate) ||
 		(bHasCategory && CategoryStr != PrevCategory) ||
 		(bHasTooltip && TooltipStr != PrevTooltip);
 	if (!bAnyChanged)
@@ -153,6 +193,31 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetVariableProperties(const TSharedPt
 	if (bHasTooltip)
 	{
 		FoundVar->SetMetaData(FBlueprintMetadata::MD_Tooltip, *TooltipStr);
+	}
+	if (bHasEditFlag)
+	{
+		// Write the flag pair and MD_Private directly. Every state is reachable
+		// from every other, which is what makes the rollback exact.
+		FoundVar->PropertyFlags &= ~(CPF_Edit | CPF_DisableEditOnInstance | CPF_DisableEditOnTemplate);
+		if (EditFlag == TEXT("EditAnywhere"))
+		{
+			FoundVar->PropertyFlags |= CPF_Edit;
+		}
+		else if (EditFlag == TEXT("EditDefaultsOnly"))
+		{
+			FoundVar->PropertyFlags |= CPF_Edit | CPF_DisableEditOnInstance;
+		}
+		else if (EditFlag == TEXT("EditInstanceOnly"))
+		{
+			FoundVar->PropertyFlags |= CPF_Edit | CPF_DisableEditOnTemplate;
+		}
+		// "none" leaves every edit flag clear: the variable is not exposed on
+		// the details panel at all.
+	}
+	if (bHasPrivate)
+	{
+		if (bPrivate) FoundVar->SetMetaData(FBlueprintMetadata::MD_Private, TEXT("true"));
+		else          FoundVar->RemoveMetaData(FBlueprintMetadata::MD_Private);
 	}
 	if (bHasInstanceEditable)
 	{
@@ -190,13 +255,19 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetVariableProperties(const TSharedPt
 	Payload->SetStringField(TEXT("path"), AssetPath);
 	Payload->SetStringField(TEXT("name"), VarName);
 	if (bHasExposeOnSpawn) Payload->SetBoolField(TEXT("exposeOnSpawn"), bPrevExposeOnSpawn);
-	if (bHasInstanceEditable)
+	// Always restore via editFlag, never via instanceEditable: the boolean
+	// cannot express "was EditAnywhere and private" or "was not exposed", so
+	// replaying it left the variable promoted into the class-defaults panel.
+	if (bHasInstanceEditable || bHasEditFlag)
 	{
-		Payload->SetBoolField(TEXT("instanceEditable"), bPrevInstanceEditable);
-		// Replaying instanceEditable=false alone cannot restore a variable that
-		// was private/not-editable, so carry that state explicitly.
-		Payload->SetBoolField(TEXT("wasPrivate"), bWasPrivate);
-		Payload->SetBoolField(TEXT("wasEditable"), bWasEditableAtAll);
+		Payload->SetStringField(TEXT("editFlag"), PrevEditFlag);
+		// instanceEditable=true drops MD_Private as a side effect, so the undo
+		// has to put it back even when the caller never mentioned it.
+		Payload->SetBoolField(TEXT("private"), bWasPrivate);
+	}
+	else if (bHasPrivate)
+	{
+		Payload->SetBoolField(TEXT("private"), bWasPrivate);
 	}
 	if (bHasCategory) Payload->SetStringField(TEXT("category"), PrevCategory);
 	if (bHasTooltip) Payload->SetStringField(TEXT("tooltip"), PrevTooltip);
