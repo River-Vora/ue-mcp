@@ -1491,6 +1491,11 @@ TSharedPtr<FJsonValue> FGameplayHandlers::AddBlackboardKey(const TSharedPtr<FJso
 			// at runtime.
 			for (int32 EnumIdx = 0; EnumIdx < Enum->NumEnums(); ++EnumIdx)
 			{
+				// NumEnums() counts the synthetic trailing _MAX entry, whose
+				// value is one past the last real one. An enum whose largest
+				// value is 255 would therefore be rejected for a 256 nobody can
+				// select. It is not a usable key value, so skip it.
+				if (Enum->GetNameStringByIndex(EnumIdx).EndsWith(TEXT("_MAX"))) continue;
 				if (Enum->HasMetaData(TEXT("Hidden"), EnumIdx)) continue;
 				const int64 EnumValue = Enum->GetValueByIndex(EnumIdx);
 				if (EnumValue < 0 || EnumValue > 255)
