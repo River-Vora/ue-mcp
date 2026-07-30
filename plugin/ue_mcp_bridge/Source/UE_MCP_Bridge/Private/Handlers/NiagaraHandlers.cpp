@@ -1345,44 +1345,8 @@ namespace
 		return false;
 	}
 
-	// Inverse of FillNiagaraValueBytes: render an override-map value back into
-	// the same comma-separated string the setter accepts, so a read can be fed
-	// straight back into set_module_input (#784).
-	FString NiagaraValueBytesToString(const FNiagaraTypeDefinition& T, const TArray<uint8>& Bytes)
-	{
-		auto Floats = [&Bytes](int32 N) -> FString
-		{
-			if (Bytes.Num() < (int32)(sizeof(float) * N)) return FString();
-			TArray<FString> Parts;
-			for (int32 i = 0; i < N; ++i)
-			{
-				float V = 0.0f;
-				FMemory::Memcpy(&V, Bytes.GetData() + i * sizeof(float), sizeof(float));
-				Parts.Add(FString::SanitizeFloat(V));
-			}
-			return FString::Join(Parts, TEXT(","));
-		};
-
-		if (T == FNiagaraTypeDefinition::GetFloatDef())  return Floats(1);
-		if (T == FNiagaraTypeDefinition::GetVec2Def())   return Floats(2);
-		if (T == FNiagaraTypeDefinition::GetVec3Def())   return Floats(3);
-		if (T == FNiagaraTypeDefinition::GetVec4Def() ||
-			T == FNiagaraTypeDefinition::GetColorDef())  return Floats(4);
-		if (T == FNiagaraTypeDefinition::GetIntDef())
-		{
-			if (Bytes.Num() < (int32)sizeof(int32)) return FString();
-			int32 V = 0; FMemory::Memcpy(&V, Bytes.GetData(), sizeof(int32));
-			return FString::FromInt(V);
-		}
-		if (T == FNiagaraTypeDefinition::GetBoolDef())
-		{
-			if (Bytes.Num() < (int32)sizeof(FNiagaraBool)) return FString();
-			FNiagaraBool B; FMemory::Memcpy(&B, Bytes.GetData(), sizeof(FNiagaraBool));
-			return B.GetValue() ? TEXT("true") : TEXT("false");
-		}
-		return FString();
-	}
 }
+
 
 TSharedPtr<FJsonValue> FNiagaraHandlers::ListModuleInputs(const TSharedPtr<FJsonObject>& Params)
 {
@@ -1455,28 +1419,22 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::ListModuleInputs(const TSharedPtr<FJson
 					InObj->SetStringField(TEXT("qualifiedName"), FullName);
 					InObj->SetStringField(TEXT("type"), Var.GetType().GetName());
 
+					// Whether set_module_input can bind this input through the
+					// override map. FNiagaraStackFunctionInputBinder::GetData is
+					// not exported from NiagaraEditor, so the current value
+					// cannot be read back from here; the binding check still
+					// tells the caller which inputs are writable, and the name
+					// is what set_module_input takes.
 					FNiagaraStackFunctionInputBinder Binder;
 					FText BindErr;
-					if (Emitter && Binder.TryBind(Slot.Script, Dependents, Resolver,
-							Emitter->GetUniqueEmitterName(), FC, FName(*ShortName),
-							TOptional<FNiagaraTypeDefinition>(Var.GetType()), true, BindErr))
+					const bool bBound = Emitter && Binder.TryBind(
+						Slot.Script, Dependents, Resolver,
+						Emitter->GetUniqueEmitterName(), FC, FName(*ShortName),
+						TOptional<FNiagaraTypeDefinition>(Var.GetType()), true, BindErr);
+					InObj->SetBoolField(TEXT("settable"), bBound);
+					if (!bBound && !BindErr.IsEmpty())
 					{
-						const TArray<uint8> Data = Binder.GetData();
-						const FString Rendered = NiagaraValueBytesToString(Var.GetType(), Data);
-						InObj->SetBoolField(TEXT("settable"), true);
-						if (!Rendered.IsEmpty())
-						{
-							InObj->SetStringField(TEXT("value"), Rendered);
-						}
-					}
-					else
-					{
-						// Still worth listing: the name is what set_module_input
-						// takes, even when this build cannot render the value.
-						InObj->SetBoolField(TEXT("settable"), false);
-						InObj->SetStringField(TEXT("note"), BindErr.IsEmpty()
-							? TEXT("Could not bind this input for reading")
-							: BindErr.ToString());
+						InObj->SetStringField(TEXT("note"), BindErr.ToString());
 					}
 					Inputs.Add(MakeShared<FJsonValueObject>(InObj));
 				}
@@ -1592,15 +1550,14 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SetModuleInput(const TSharedPtr<FJsonOb
 						{
 							FC->Modify();
 							Graph->Modify();
-							// #769: read the current override before overwriting it, so
-							// previousValue is a real value the caller can restore rather
-							// than the placeholder "(override)" that used to be reported.
-							const FString ExistingValue =
-								NiagaraValueBytesToString(Found->GetType(), Binder.GetData());
 							Binder.SetData(Bytes.GetData(), Bytes.Num());
 							if (SetCount == 0)
 							{
-								PrevValue = ExistingValue;
+								// The binder's value reader is not exported from
+								// NiagaraEditor, so the prior override value cannot be
+								// captured here; say so rather than reporting a
+								// placeholder that looks like a real value (#769).
+								PrevValue = TEXT("(unread: override map)");
 								WritePath = TEXT("overrideMap");
 							}
 							MatchedContext = Slot.Context;

@@ -1274,6 +1274,16 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ReadIKRig(const TSharedPtr<FJsonObjec
 	}
 	Result->SetArrayField(TEXT("retargetChains"), ChainsArray);
 
+	// #766: the retarget root (pelvis) and skeleton root drive how a retargeter
+	// moves the whole character. Omitting them meant a caller inspecting a rig
+	// could not tell whether the root was set at all, and had to open the
+	// editor to find out.
+	Result->SetStringField(TEXT("retargetRoot"), IKRig->GetPelvis().ToString());
+	if (RigSkeleton.BoneNames.Num() > 0)
+	{
+		Result->SetStringField(TEXT("rootBone"), RigSkeleton.BoneNames[0].ToString());
+	}
+
 	// Solvers — enumerate via reflection since GetSolverArray not available in all UE versions
 	TArray<TSharedPtr<FJsonValue>> SolversArray;
 	FProperty* SolversProp = IKRig->GetClass()->FindPropertyByName(TEXT("Solvers"));
@@ -1355,6 +1365,20 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreateIKRetargeter(const TSharedPtr<F
 			if (Controller)
 			{
 #if UE_MCP_HAS_5_5_API
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7)
+				// #753/#766: the factory creates a retargeter with an EMPTY ops
+				// stack. On 5.7+ the chain mappings live ON the ops, so both
+				// AssignIKRigToAllOps and AutoMapChains below have nothing to
+				// map into and silently no-op - the handler reported
+				// chainsMapped: 0 and produced a retargeter that animates
+				// nothing. The IK Retargeter editor masks this because opening
+				// the asset adds the default ops for you. Install them here so
+				// the native path produces a working retargeter.
+				if (Controller->GetNumRetargetOps() == 0)
+				{
+					Controller->AddDefaultOps();
+				}
+#endif
 				if (!SourceRigPath.IsEmpty())
 				{
 					if (UIKRigDefinition* SrcRig = Cast<UIKRigDefinition>(LoadObject<UObject>(nullptr, *SourceRigPath)))

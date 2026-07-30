@@ -24,7 +24,9 @@
 
 #if WITH_EDITOR
 #include "WorldPartition/WorldPartition.h"
+#include "WorldPartition/WorldPartitionActorDescInstance.h"
 #include "WorldPartition/WorldPartitionBlueprintLibrary.h"
+#include "WorldPartition/WorldPartitionHelpers.h"
 #endif
 
 namespace
@@ -134,16 +136,33 @@ namespace
 		TArray<FActorDesc>& OutMatches,
 		FString& OutError)
 	{
+		UWorldPartition* WorldPartition = World ? World->GetWorldPartition() : nullptr;
+		if (!WorldPartition)
+		{
+			OutError = TEXT("The current editor world has no World Partition");
+			return false;
+		}
+
+		// UWorldPartitionBlueprintLibrary is MinimalAPI, so its statics cannot be
+		// linked from another module. FWorldPartitionHelpers is exported and
+		// gives the same traversal.
 		TArray<FActorDesc> AllDescs;
 		FBox Box(ForceInit);
 		const bool bHasBounds = TryReadBounds(Params, Box);
-		const bool bGathered = bHasBounds
-			? UWorldPartitionBlueprintLibrary::GetIntersectingActorDescs(Box, AllDescs)
-			: UWorldPartitionBlueprintLibrary::GetActorDescs(AllDescs);
-		if (!bGathered)
+		auto Collect = [&AllDescs](const FWorldPartitionActorDescInstance* Instance) -> bool
 		{
-			OutError = TEXT("Failed to read World Partition actor descriptors for the current editor world");
-			return false;
+			if (Instance) AllDescs.Emplace(*Instance);
+			return true;
+		};
+		if (bHasBounds)
+		{
+			FWorldPartitionHelpers::ForEachIntersectingActorDescInstance(
+				WorldPartition, Box, AActor::StaticClass(), Collect);
+		}
+		else
+		{
+			FWorldPartitionHelpers::ForEachActorDescInstance(
+				WorldPartition, AActor::StaticClass(), Collect);
 		}
 
 		TSet<FString> WantedGuids;
@@ -249,13 +268,21 @@ TSharedPtr<FJsonValue> FLevelHandlers::LoadActorDescs(const TSharedPtr<FJsonObje
 	TSharedPtr<FJsonValue> Err;
 	if (!RequirePartitionedWorld(World, Err)) return Err;
 
-	// "load" | "unload" | "pin" | "unpin". Pin keeps an actor resident
-	// regardless of the current streaming source, which is what a measurement
-	// pass wants; plain load can be dropped again by the streaming system.
-	const FString Mode = OptionalString(Params, TEXT("mode"), TEXT("load")).ToLower();
-	if (Mode != TEXT("load") && Mode != TEXT("unload") && Mode != TEXT("pin") && Mode != TEXT("unpin"))
+	// Pinning is the exported, durable way to make an unloaded actor resident:
+	// it keeps the actor loaded regardless of the current streaming sources,
+	// which is exactly what a measurement or edit pass needs. (The engine's
+	// transient "load" path lives on a MinimalAPI Blueprint library that cannot
+	// be linked from here, and would be dropped again by streaming anyway.)
+	const FString Mode = OptionalString(Params, TEXT("mode"), TEXT("pin")).ToLower();
+	if (Mode != TEXT("pin") && Mode != TEXT("unpin"))
 	{
-		return MCPError(TEXT("'mode' must be one of: load, unload, pin, unpin"));
+		return MCPError(TEXT("'mode' must be 'pin' (make resident) or 'unpin' (release)"));
+	}
+
+	UWorldPartition* WorldPartition = World->GetWorldPartition();
+	if (!WorldPartition)
+	{
+		return MCPError(TEXT("The current editor world has no World Partition"));
 	}
 
 	TArray<FActorDesc> Matches;
@@ -301,10 +328,8 @@ TSharedPtr<FJsonValue> FLevelHandlers::LoadActorDescs(const TSharedPtr<FJsonObje
 
 	if (!bDryRun)
 	{
-		if (Mode == TEXT("load"))        UWorldPartitionBlueprintLibrary::LoadActors(Guids);
-		else if (Mode == TEXT("unload")) UWorldPartitionBlueprintLibrary::UnloadActors(Guids);
-		else if (Mode == TEXT("pin"))    UWorldPartitionBlueprintLibrary::PinActors(Guids);
-		else                             UWorldPartitionBlueprintLibrary::UnpinActors(Guids);
+		if (Mode == TEXT("pin")) WorldPartition->PinActors(Guids);
+		else                     WorldPartition->UnpinActors(Guids);
 	}
 
 	// Read the world back so the caller sees what actually became resident

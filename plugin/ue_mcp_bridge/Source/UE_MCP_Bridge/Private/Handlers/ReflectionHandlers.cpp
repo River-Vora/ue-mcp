@@ -492,6 +492,9 @@ TSharedPtr<FJsonValue> FReflectionHandlers::ReflectStruct(const TSharedPtr<FJson
 	return MCPResult(Result);
 }
 
+// Defined below, next to FindEnum.
+static TArray<FString> SuggestEnumNames(const FString& EnumName, int32 MaxSuggestions = 8);
+
 TSharedPtr<FJsonValue> FReflectionHandlers::ReflectEnum(const TSharedPtr<FJsonObject>& Params)
 {
 	FString EnumName;
@@ -810,7 +813,7 @@ UEnum* FReflectionHandlers::FindEnum(const FString& EnumName)
 }
 
 /** Enum short names close to a failed lookup, so the error can name alternatives. */
-static TArray<FString> SuggestEnumNames(const FString& EnumName, int32 MaxSuggestions = 8)
+static TArray<FString> SuggestEnumNames(const FString& EnumName, int32 MaxSuggestions)
 {
 	TArray<FString> Suggestions;
 	const FString Needle = EnumName.ToLower();
