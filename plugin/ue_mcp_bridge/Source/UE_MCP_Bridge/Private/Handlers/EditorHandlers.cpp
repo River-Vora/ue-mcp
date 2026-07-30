@@ -1,6 +1,10 @@
 #include "EditorHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+
+#include "MessageLogModule.h"
+#include "IMessageLogListing.h"
+#include "Logging/TokenizedMessage.h"
 #include "Editor/EditorPerformanceSettings.h"
 #include "Misc/ScopeExit.h"
 #include "Engine/World.h"
@@ -1213,13 +1217,69 @@ TSharedPtr<FJsonValue> FEditorHandlers::SearchLog(const TSharedPtr<FJsonObject>&
 	return MCPResult(Result);
 }
 
+// Read a Message Log listing (Blueprint compiler results, map check, asset
+// check, PIE...). This returned an empty array unconditionally and ignored
+// logName, so "no messages" was indistinguishable from "not implemented" -
+// callers used it to confirm a clean compile and got a clean answer either way.
 TSharedPtr<FJsonValue> FEditorHandlers::GetMessageLog(const TSharedPtr<FJsonObject>& Params)
 {
-	// FMessageLog does not expose a simple API to read back entries in C++.
-	// Return success with an empty messages array as a baseline implementation.
-	auto Result = MCPSuccess();
+	FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>(TEXT("MessageLog"));
+
+	const FString LogName = OptionalString(Params, TEXT("logName"), TEXT("BlueprintLog"));
+	if (!MessageLogModule.IsRegisteredLogListing(FName(*LogName)))
+	{
+		// Naming a listing that does not exist would otherwise create an empty
+		// one and report a clean log, which is the same false negative.
+		return MCPError(FString::Printf(
+			TEXT("No message log listing named '%s'. Common listings: BlueprintLog, MapCheck, AssetCheck, PIE, LoadErrors, LightingResults."),
+			*LogName));
+	}
+
+	TSharedRef<IMessageLogListing> Listing = MessageLogModule.GetLogListing(FName(*LogName));
+	const int32 Limit = FMath::Max(1, OptionalInt(Params, TEXT("maxLines"), 200));
+	const FString SeverityFilter = OptionalString(Params, TEXT("filter")).ToLower();
+
+	auto SeverityName = [](EMessageSeverity::Type S) -> FString
+	{
+		switch (S)
+		{
+			case EMessageSeverity::Error:           return TEXT("Error");
+			case EMessageSeverity::PerformanceWarning: return TEXT("PerformanceWarning");
+			case EMessageSeverity::Warning:         return TEXT("Warning");
+			case EMessageSeverity::Info:            return TEXT("Info");
+			default:                                return TEXT("Unknown");
+		}
+	};
+
 	TArray<TSharedPtr<FJsonValue>> MessagesArray;
+	int32 Errors = 0, Warnings = 0, Total = 0;
+	bool bTruncated = false;
+	for (const TSharedRef<FTokenizedMessage>& Message : Listing->GetFilteredMessages())
+	{
+		const FString Severity = SeverityName(Message->GetSeverity());
+		if (Message->GetSeverity() == EMessageSeverity::Error) ++Errors;
+		else if (Message->GetSeverity() == EMessageSeverity::Warning ||
+		         Message->GetSeverity() == EMessageSeverity::PerformanceWarning) ++Warnings;
+		++Total;
+
+		if (!SeverityFilter.IsEmpty() && !Severity.ToLower().Contains(SeverityFilter)) continue;
+		if (MessagesArray.Num() >= Limit) { bTruncated = true; continue; }
+
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("severity"), Severity);
+		Obj->SetStringField(TEXT("text"), Message->ToText().ToString());
+		MessagesArray.Add(MakeShared<FJsonValueObject>(Obj));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("logName"), LogName);
 	Result->SetArrayField(TEXT("messages"), MessagesArray);
+	// Counts are over the whole listing, not the returned page, so a truncated
+	// read still reports honestly whether the log is clean.
+	Result->SetNumberField(TEXT("total"), Total);
+	Result->SetNumberField(TEXT("errors"), Errors);
+	Result->SetNumberField(TEXT("warnings"), Warnings);
+	Result->SetBoolField(TEXT("truncated"), bTruncated);
 	return MCPResult(Result);
 }
 

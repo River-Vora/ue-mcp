@@ -1,6 +1,8 @@
 #include "SequencerHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+
+#include "Subsystems/AssetEditorSubsystem.h"
 #include "HandlerAssetCreate.h"
 #include "LevelSequence.h"
 #include "LevelSequenceActor.h"
@@ -505,7 +507,27 @@ TSharedPtr<FJsonValue> FSequencerHandlers::SequenceControl(const TSharedPtr<FJso
 		return MCPError(FString::Printf(TEXT("Unknown action: '%s'. Use play, pause, or stop."), *Action));
 	}
 
-	// Execute via console command
+	// The Sequencer.* console commands act on whatever sequence the editor
+	// currently has open, so a caller naming a sequence was silently driving a
+	// different one. Open the named sequence first; anything else is a
+	// wrong-target success, which is worse than an error.
+	FString RequestedPath = OptionalString(Params, TEXT("sequencePath"), OptionalString(Params, TEXT("assetPath")));
+	FString OpenedPath;
+	if (!RequestedPath.IsEmpty())
+	{
+		ULevelSequence* Sequence = LoadObject<ULevelSequence>(nullptr, *RequestedPath);
+		if (!Sequence)
+		{
+			return MCPError(FString::Printf(TEXT("Level Sequence not found: %s"), *RequestedPath));
+		}
+		if (!GEditor || !GEditor->GetEditorSubsystem<UAssetEditorSubsystem>())
+		{
+			return MCPError(TEXT("Asset editor subsystem not available"));
+		}
+		GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAsset(Sequence);
+		OpenedPath = Sequence->GetPathName();
+	}
+
 	UWorld* World = GEditor->GetEditorWorldContext().World();
 	if (World)
 	{
@@ -515,6 +537,16 @@ TSharedPtr<FJsonValue> FSequencerHandlers::SequenceControl(const TSharedPtr<FJso
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("action"), Action);
 	Result->SetStringField(TEXT("command"), Command);
+	if (!OpenedPath.IsEmpty())
+	{
+		Result->SetStringField(TEXT("sequencePath"), OpenedPath);
+	}
+	else
+	{
+		// Say which sequence this applied to, rather than implying it was the
+		// caller's. There is no way to name one without opening it.
+		Result->SetStringField(TEXT("target"), TEXT("whichever Level Sequence is currently open in Sequencer - pass sequencePath to target a specific one"));
+	}
 
 	return MCPResult(Result);
 }

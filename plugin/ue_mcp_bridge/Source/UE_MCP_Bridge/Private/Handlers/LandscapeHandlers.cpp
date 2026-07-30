@@ -653,8 +653,29 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	LayerInfo->LayerName = FName(*LayerName);
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
-	// Optional hardness; physics material is settable via set_actor_property
-	// against the asset path (PhysicsCore is not a hard dep of this module).
+	// physMaterial was documented here and never applied - the caller had to
+	// discover for themselves that it needed a second call. PhysicsCore is not
+	// a hard dependency of this module, so the class is reached by path and the
+	// property set through reflection rather than a link-time include.
+	const FString PhysMaterialPath = OptionalString(Params, TEXT("physMaterial"));
+	if (!PhysMaterialPath.IsEmpty())
+	{
+		UObject* PhysMat = LoadObject<UObject>(nullptr, *PhysMaterialPath);
+		if (!PhysMat)
+		{
+			return MCPError(FString::Printf(TEXT("physMaterial not found: %s"), *PhysMaterialPath));
+		}
+		FObjectProperty* Prop = CastField<FObjectProperty>(
+			ULandscapeLayerInfoObject::StaticClass()->FindPropertyByName(TEXT("PhysMaterial")));
+		if (!Prop || !Prop->PropertyClass || !PhysMat->IsA(Prop->PropertyClass))
+		{
+			return MCPError(FString::Printf(
+				TEXT("'%s' is a %s, not a PhysicalMaterial."),
+				*PhysMaterialPath, *PhysMat->GetClass()->GetName()));
+		}
+		Prop->SetObjectPropertyValue_InContainer(LayerInfo, PhysMat);
+	}
+
 	double Hardness = 0.0;
 	if (Params->TryGetNumberField(TEXT("hardness"), Hardness))
 	{
@@ -670,6 +691,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	Result->SetStringField(TEXT("path"), LayerInfo->GetPathName());
 	Result->SetStringField(TEXT("layerName"), LayerName);
 	Result->SetStringField(TEXT("packagePath"), PackagePath);
+	if (!PhysMaterialPath.IsEmpty()) Result->SetStringField(TEXT("physMaterial"), PhysMaterialPath);
 	MCPSetDeleteAssetRollback(Result, LayerInfo->GetPathName());
 
 	return MCPResult(Result);

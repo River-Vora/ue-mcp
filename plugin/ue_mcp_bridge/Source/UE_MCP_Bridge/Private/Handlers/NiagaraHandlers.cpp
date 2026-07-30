@@ -273,6 +273,26 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::CreateNiagaraEmitter(const TSharedPtr<F
 	UNiagaraEmitterFactoryNew* Factory = NewObject<UNiagaraEmitterFactoryNew>();
 	FGCRootScope FactoryRoot(Factory);
 
+	// templatePath was documented and never read, so "create an emitter from
+	// this template" silently produced an empty default emitter instead - the
+	// caller only found out when the new emitter did none of what the template
+	// does. The factory's copy path is the same one the content browser's
+	// "create from template" uses.
+	const FString TemplatePath = OptionalString(Params, TEXT("templatePath"));
+	if (!TemplatePath.IsEmpty())
+	{
+		UNiagaraEmitter* Template = LoadObject<UNiagaraEmitter>(nullptr, *TemplatePath);
+		if (!Template)
+		{
+			return MCPError(FString::Printf(TEXT("templatePath is not a NiagaraEmitter: %s"), *TemplatePath));
+		}
+		Factory->EmitterToCopy = Template;
+		// Copy rather than inherit: an inherited emitter tracks the template and
+		// refuses local edits to inherited modules, which is not what a caller
+		// asking for a starting point wants, and is not reversible from here.
+		Factory->bUseInheritance = OptionalBool(Params, TEXT("inherit"), false);
+	}
+
 	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, TEXT("NiagaraEmitter"), EmitterClass, Factory);
 	if (Created.EarlyReturn) return Created.EarlyReturn;
 
@@ -282,6 +302,11 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::CreateNiagaraEmitter(const TSharedPtr<F
 	MCPSetCreated(Result);
 	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
 	Result->SetStringField(TEXT("name"), Name);
+	if (!TemplatePath.IsEmpty())
+	{
+		Result->SetStringField(TEXT("templatePath"), TemplatePath);
+		Result->SetBoolField(TEXT("inherited"), Factory->bUseInheritance);
+	}
 	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
 	return MCPResult(Result);
 }

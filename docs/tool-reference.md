@@ -440,7 +440,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `add_pose_search_schema_pose_channel` | Add a Pose feature channel to a schema (samples named bones for velocity/position/rotation/phase). Params: `schemaPath, bones ([{bone, flags?:['velocity','position','rotation','phase'], weight?}] - a bare bone-name string defaults to position), weight? (motion matching)` |
 | `add_pose_search_schema_trajectory_channel` | Add a Trajectory feature channel to a schema (past/future motion samples). Params: `schemaPath, samples ([{offset (seconds; negative=history, positive=prediction), flags?:['position','velocity','facingDirection','velocityDirection', ...XY variants], weight?}]), weight? (motion matching)` |
 | `read_pose_search_schema` | Inspect a PoseSearchSchema: skeleton(s), mirror table, sample rate, feature channels. Params: `schemaPath (motion matching)` |
-| `create_mirror_data_table` | Create a MirrorDataTable for a skeleton (needed for mirrored poses in motion matching / mirror nodes). Auto-derives bone-pair rows from find/replace expressions (defaults to UE mannequin _l/_r suffix swap). Params: `name, skeletonPath, packagePath?, expressions? ([{find, replace, method?:'suffix'\|'prefix'\|'regex'}]), mirrorAxis? (motion matching)` |
+| `create_mirror_data_table` | Create a MirrorDataTable for a skeleton (needed for mirrored poses in motion matching / mirror nodes). Auto-derives bone-pair rows from find/replace expressions (defaults to UE mannequin _l/_r suffix swap). Params: `name, skeletonPath, packagePath?, expressions? ([{find, replace, method?:'suffix'\|'prefix'\|'regex'}]), mirrorAxis? (X\|Y\|Z, default X), mirrorRootMotion? (default true)` |
 | `read_mirror_data_table` | Inspect a MirrorDataTable: skeleton and bone-pair rows (name -> mirroredName). Params: `assetPath (motion matching)` |
 | `create_pose_search_normalization_set` | Create a PoseSearchNormalizationSet grouping databases so they normalize their cost space together (consistent blending across a locomotion set). Assign it via set_pose_search_database_settings(normalizationSetPath). Params: `name, packagePath?, databases? ([PoseSearchDatabase paths]) (motion matching)` |
 | `add_motion_matching_node` | Add a Motion Matching node to an AnimBP AnimGraph and point it at a PoseSearchDatabase (the runtime node that searches the database each frame). Connects its output to the Output Pose by default. For chooser-driven database selection, bind an anim-node function that calls SetDatabasesToSearch. Params: `assetPath (AnimBP), databasePath, graphName? (default AnimGraph), connectToOutput? (default true), blendTime? (motion matching)` |
@@ -536,7 +536,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `reactivate` | Reset + reactivate the NiagaraComponent on a placed actor (replay a burst before capturing). Params: `actorLabel (#537)` |
 | `set_parameter` | Set parameter. Params: `actorLabel, parameterName, value, parameterType?` |
 | `create` | Create system. Params: `name, packagePath?` |
-| `create_emitter` | Create Niagara emitter. Params: `name, packagePath?, templatePath?` |
+| `create_emitter` | Create a Niagara emitter asset. templatePath copies an existing emitter as the starting point (the content browser's create-from-template path); omit it for the default empty emitter with the standard modules and a sprite renderer. inherit=true makes it a child that tracks the template instead, which then refuses local edits to inherited modules. Params: `name, packagePath?, templatePath?, inherit? (default false), onConflict?` |
 | `add_emitter` | Add emitter to system. Params: `systemPath, emitterPath` |
 | `remove_emitter` | Remove an emitter from a system (CRUD delete). Params: `systemPath, emitterName? or emitterIndex?` |
 | `list_emitters` | List emitters in system. Params: `systemPath` |
@@ -697,7 +697,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `add_sequence_section` | Add a section to a track (creating the track if needed), set its start/end in seconds, and for a CameraCut track bind it to a camera. Returns the section index + channel names to key. Params: `sequencePath, trackType (Transform\|Float\|Fade\|CameraCut\|Audio\|Event\|SkeletalAnimation), actorLabel? (binding scope), startSeconds?, endSeconds?, cameraActorLabel? (#548)` |
 | `set_sequence_keyframes` | Add keyframes to a section channel. Transform channels: Location.X/Y/Z, Rotation.X/Y/Z (or friendly x/y/z, yaw/pitch/roll); Fade/Float: the float channel. Params: `sequencePath, trackType, actorLabel?, sectionIndex? (default 0), channel, keyframes ([{seconds, value}]), interpolation? (cubic\|linear) (#548)` |
 | `set_sequence_playback_range` | Set a Level Sequence's playback range in seconds. Params: `sequencePath, startSeconds, endSeconds (#548)` |
-| `play_sequence` | Play/stop/pause sequence. Params: `assetPath, sequenceAction` |
+| `play_sequence` | Play/stop/pause a Level Sequence in Sequencer. Pass sequencePath (or assetPath) to target a specific sequence - it is opened first, because the underlying Sequencer commands act on whatever is currently open. Omit it and the call applies to the open sequence and says so. Params: `sequencePath? (or assetPath), sequenceAction? (play\|pause\|stop, default play)` |
 | `build_all` | Build all (geometry, lighting, paths, HLOD) |
 | `build_geometry` | Rebuild BSP geometry |
 | `build_hlod` | Build HLODs |
@@ -706,7 +706,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `cook_content` | Cook content. Params: `platform?` |
 | `get_log` | Read output log. Params: `maxLines?, filter?, category?` |
 | `search_log` | Search log. Params: `query` |
-| `get_message_log` | Read message log. Params: `logName?` |
+| `get_message_log` | Read a Message Log listing (BlueprintLog, MapCheck, AssetCheck, PIE, LoadErrors, LightingResults). Returns messages with severity plus whole-listing total/errors/warnings counts, so a truncated read still tells you honestly whether the log is clean. An unknown logName is an error, not an empty log. Params: `logName? (default BlueprintLog), maxLines? (default 200), filter? (severity substring)` |
 | `list_crashes` | List crash reports |
 | `get_crash_info` | Get crash details. Params: `crashFolder` |
 | `check_for_crashes` | Check for recent crashes |
