@@ -42,7 +42,7 @@ namespace
 
 	FString NodeTypeLabel(USoundNode* N)
 	{
-    	return N ? N->GetClass()->GetName() : FString();
+		return N ? N->GetClass()->GetName() : FString();
 	}
 
 	/** Construct a cue node by friendly type name. Returns null for unknown types. */
