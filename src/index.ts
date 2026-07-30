@@ -28,6 +28,7 @@ import yaml from "js-yaml";
 
 import { ALL_TOOLS } from "./tools.js";
 import { enrichToolsWithEpicCatalog, type EpicCatalog } from "./epic-enrich.js";
+import { checkPluginFreshness } from "./plugin-freshness.js";
 import { saveCatalogCache, loadCatalogCache, loadBakedCatalog } from "./epic-cache.js";
 
 type TextBlock = { type: "text"; text: string };
@@ -70,6 +71,15 @@ async function main() {
       // Source deployment is reserved for `ue-mcp init` / `ue-mcp deploy`.
       const result = attach(project);
       console.error(`[ue-mcp] ${attachSummary(result)}`);
+
+      // #785: say loudly, once at startup, when the compiled plugin is older
+      // than its source. Otherwise the only signal is an "Unknown method"
+      // error later, which reads as "not implemented yet" and sends people
+      // hand-authoring around handlers that already work.
+      const freshness = checkPluginFreshness(project.projectPath);
+      if (freshness.stale && freshness.message) {
+        console.error(`[ue-mcp] WARNING: ${freshness.message}`);
+      }
     } catch (e) {
       console.error(`[ue-mcp] Failed to initialize project: ${e instanceof Error ? e.message : e}`);
     }

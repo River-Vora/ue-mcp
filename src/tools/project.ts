@@ -1,3 +1,4 @@
+import { checkPluginFreshness } from "../plugin-freshness.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { z } from "zod";
@@ -53,13 +54,19 @@ export const projectTool: ToolDef = categoryTool(
   "Project status and editor connection: get_status (is the editor connected?), set_project (switch/redirect the bridge to another .uproject), get_info. Also config INI files, module load state, and C++ source inspection. Call project(get_status) first in any session.",
   {
     get_status: {
-      description: "Check server mode and editor connection",
+      description: "Check server mode and editor connection. Also reports pluginBuildStale when the compiled bridge is older than its source, which is the real cause of 'Unknown method' on handlers that do exist (#785)",
       handler: async (ctx) => {
         const flows = ctx.getFlows?.() ?? [];
         const bridgeApiVersion = ctx.project.projectDir
           ? readDeployedBridgeApiVersion(ctx.project.projectDir)
           : null;
+        // #785: surface staleness on the first call agents make, so an
+        // "Unknown method" later is read as a stale build rather than a
+        // missing feature.
+        const freshness = checkPluginFreshness(ctx.project.projectPath ?? null);
         return {
+          pluginBuildStale: freshness.checked ? freshness.stale : undefined,
+          pluginBuildWarning: freshness.stale ? freshness.message : undefined,
           mode: ctx.bridge.isConnected ? "live" : "disconnected",
           editorConnected: ctx.bridge.isConnected,
           project: ctx.project.isLoaded ? { name: ctx.project.projectName, path: ctx.project.projectPath, contentDir: ctx.project.contentDir, engineAssociation: ctx.project.engineAssociation, config: Object.keys(ctx.project.config).length > 0 ? ctx.project.config : undefined } : null,
