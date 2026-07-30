@@ -2472,8 +2472,10 @@ TSharedPtr<FJsonValue> FLevelHandlers::ReadActorMotion(const TSharedPtr<FJsonObj
 	// Shared resolver so pieInstance selects the client, matching every other
 	// PIE-aware read. Bare GetPIEWorld() always returned the first (server)
 	// context, which reads as success while sampling the wrong actor.
-	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("pie"));
-	UWorld* TargetWorld = ResolveWorldFromParams(Params, *WorldScope);
+	// "auto", not "pie": ResolveWorldScope only falls back to the editor world
+	// for "auto", and this action has always documented a PIE-preferred read
+	// that still answers with the editor world when PIE is not running.
+	UWorld* TargetWorld = ResolveWorldFromParams(Params, TEXT("auto"));
 	if (!TargetWorld) return MCPError(TEXT("No world available (editor + PIE both null)"));
 
 	TArray<FString> Labels;
