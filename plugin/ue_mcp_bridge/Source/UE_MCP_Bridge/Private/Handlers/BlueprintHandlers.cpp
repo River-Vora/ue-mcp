@@ -1719,8 +1719,29 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ListBlueprintVariables(const TSharedP
 			VarObj->SetStringField(TEXT("tooltip"), Var.GetMetaData(FBlueprintMetadata::MD_Tooltip));
 		}
 
+		// #744: CPF_Edit alone is set by BOTH EditAnywhere and EditDefaultsOnly,
+		// so testing it reported instanceEditable=true for variables the
+		// Blueprint deliberately locks to class defaults - an actively wrong
+		// answer, not a missing one. What "Instance Editable" unticks is
+		// CPF_DisableEditOnInstance. Report the raw specifier too so callers
+		// never have to infer it from a boolean again.
+		const bool bEditable = (Var.PropertyFlags & CPF_Edit) != 0;
+		const bool bNoInstanceEdit = (Var.PropertyFlags & CPF_DisableEditOnInstance) != 0;
+		const bool bNoTemplateEdit = (Var.PropertyFlags & CPF_DisableEditOnTemplate) != 0;
+		const bool bPrivate = Var.HasMetaData(FBlueprintMetadata::MD_Private);
+
 		VarObj->SetBoolField(TEXT("instanceEditable"),
-			!Var.HasMetaData(FBlueprintMetadata::MD_Private) && (Var.PropertyFlags & CPF_Edit) != 0);
+			bEditable && !bNoInstanceEdit && !bPrivate);
+
+		const TCHAR* EditFlag = TEXT("none");
+		if (bEditable)
+		{
+			if (bNoInstanceEdit)      EditFlag = TEXT("EditDefaultsOnly");
+			else if (bNoTemplateEdit) EditFlag = TEXT("EditInstanceOnly");
+			else                      EditFlag = TEXT("EditAnywhere");
+		}
+		VarObj->SetStringField(TEXT("editFlag"), EditFlag);
+		VarObj->SetBoolField(TEXT("blueprintReadOnly"), (Var.PropertyFlags & CPF_BlueprintReadOnly) != 0);
 
 		VarObj->SetBoolField(TEXT("exposeOnSpawn"),
 			Var.HasMetaData(FBlueprintMetadata::MD_ExposeOnSpawn) || (Var.PropertyFlags & CPF_ExposeOnSpawn) != 0);
