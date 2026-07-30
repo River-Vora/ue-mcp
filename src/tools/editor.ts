@@ -10,9 +10,10 @@ export const editorTool: ToolDef = categoryTool(
   "Editor commands, Python execution, PIE, undo/redo, hot reload, viewport, performance, sequencer, build pipeline, logs, editor control.",
   {
     start_editor: {
-      description: "Launch Unreal Editor with the current project and reconnect bridge",
-      handler: async (ctx: ToolContext) => {
-        const result = await startEditor(ctx.project);
+      description: "Launch Unreal Editor with the current project and reconnect bridge. Waits for the bridge on the project's actual published port, not a fixed default. Params: timeout? (seconds, default 120) (#758)",
+      handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
+        const timeout = typeof p?.timeout === "number" && p.timeout > 0 ? p.timeout : 120;
+        const result = await startEditor(ctx.project, timeout);
         if (result.success) {
           try { await ctx.bridge.connect(5000); } catch { /* reconnect timer handles it */ }
         }
@@ -237,6 +238,7 @@ export const editorTool: ToolDef = categoryTool(
     functionName: z.string().optional(),
     count: z.number().optional().describe("invoke_function_repeating: total number of calls (default 5) (#583)"),
     intervalSeconds: z.number().optional().describe("invoke_function_repeating: seconds between calls (default 1.0) (#583)"),
+    timeout: z.number().optional().describe("start_editor: seconds to wait for the bridge (default 120) (#758)"),
     pieInstance: z.number().optional().describe("Select which PIE world to target: 0 = server/primary, 1..N = clients. See list_pie_instances (#778)"),
     subsystemClass: z.string().optional().describe("invoke_object_function/get_object_properties: subsystem class name or /Script path (#739)"),
     bones: z.array(z.string()).optional().describe("sample_bone_transforms: bone OR socket names; omit for every bone (#756)"),

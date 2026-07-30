@@ -152,21 +152,38 @@ async function isBridgeAvailable(host = process.env.UE_MCP_HOST ?? "127.0.0.1", 
   });
 }
 
-async function waitForBridge(maxWaitSeconds = 120, checkIntervalMs = 2000): Promise<boolean> {
+// #758: the readiness probe used to poll a hardcoded 9877 while the bridge
+// binds a per-project port and publishes it to Saved/UE_MCP_Bridge/port.json.
+// On any project not on the default port this waited out the whole timeout and
+// reported failure even though the editor and bridge were up - which the very
+// next tool call would then prove by succeeding immediately. The lockfile does
+// not exist until the bridge starts, so the port must be re-read every poll
+// rather than resolved once up front.
+async function waitForBridge(
+  projectDir: string | undefined,
+  maxWaitSeconds = 120,
+  checkIntervalMs = 2000,
+): Promise<boolean> {
   const startTime = Date.now();
   const maxWaitMs = maxWaitSeconds * 1000;
 
   while (Date.now() - startTime < maxWaitMs) {
-    if (await isBridgeAvailable()) {
+    if (await isBridgeAvailable(undefined, resolveBridgePort(projectDir))) {
       return true;
     }
     await new Promise((resolve) => setTimeout(resolve, checkIntervalMs));
   }
 
-  return false;
+  // One last look before declaring failure: the bridge may have come up during
+  // the final sleep, and reporting "not available" for a bridge that is in fact
+  // serving sends the caller off debugging a problem that does not exist.
+  return isBridgeAvailable(undefined, resolveBridgePort(projectDir));
 }
 
-export async function startEditor(project: ProjectContext): Promise<{ success: boolean; message: string }> {
+export async function startEditor(
+  project: ProjectContext,
+  timeoutSeconds = 120,
+): Promise<{ success: boolean; message: string }> {
   if (!IS_WINDOWS) return { success: false, message: WINDOWS_ONLY_MSG };
   if (isEditorRunning()) {
     return { success: false, message: "Editor is already running" };
@@ -193,11 +210,12 @@ export async function startEditor(project: ProjectContext): Promise<{ success: b
     editorProcess.unref();
 
     // Wait for bridge to become available (editor fully started)
-    const bridgeAvailable = await waitForBridge(120, 2000);
+    const projectDir = path.dirname(project.projectPath);
+    const bridgeAvailable = await waitForBridge(projectDir, timeoutSeconds, 2000);
     if (!bridgeAvailable) {
       return {
         success: false,
-        message: "Editor launched but bridge did not become available within 120 seconds. Editor may still be starting up.",
+        message: `Editor launched but bridge did not become available within ${timeoutSeconds} seconds (polled port ${resolveBridgePort(projectDir)}). Editor may still be starting up.`,
       };
     }
 
@@ -363,16 +381,26 @@ export async function buildProject(
   const target = `${projectName}Editor`;
   const platform = getPlatformString();
 
-  const buildArgs = [target, platform, "Development", `-Project="${resolvedPath}"`, "-WaitMutex", "-FromMsBuild"];
+  // #740: the quotes around the project path are SHELL syntax, not part of the
+  // value. On Windows the args are joined into a single `cmd /c` string, so
+  // they are required. Off Windows the args go straight into argv with no shell
+  // to strip them, so UnrealBuildTool received a path containing literal quote
+  // characters and reported "Unable to find project file" for a file that was
+  // plainly there - while the same command pasted into a terminal worked,
+  // because the shell removed them first.
+  const commonArgs = [target, platform, "Development"];
+  const tailArgs = ["-WaitMutex", "-FromMsBuild"];
+  const windowsArgs = [...commonArgs, `-Project="${resolvedPath}"`, ...tailArgs];
+  const posixArgs = [...commonArgs, `-Project=${resolvedPath}`, ...tailArgs];
 
   return new Promise((resolve) => {
     let proc;
     if (IS_WINDOWS) {
       const quotedCommand = `"${buildTool}"`;
-      const fullCommand = `cmd /c "${quotedCommand} ${buildArgs.join(" ")}"`;
+      const fullCommand = `cmd /c "${quotedCommand} ${windowsArgs.join(" ")}"`;
       proc = spawn(fullCommand, [], { shell: true, stdio: "pipe" });
     } else {
-      proc = spawn(buildTool, buildArgs, { stdio: "pipe" });
+      proc = spawn(buildTool, posixArgs, { stdio: "pipe" });
     }
 
     const forward = (data: Buffer) => {
