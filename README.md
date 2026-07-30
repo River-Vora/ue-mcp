@@ -1,7 +1,7 @@
 # UE-MCP
 [![npm version](https://img.shields.io/npm/v/ue-mcp)](https://www.npmjs.com/package/ue-mcp)
 [![npm downloads](https://img.shields.io/npm/dt/ue-mcp)](https://www.npmjs.com/package/ue-mcp)
-[![CI](https://github.com/db-lyon/ue-mcp/actions/workflows/publish.yml/badge.svg)](https://github.com/db-lyon/ue-mcp/actions)
+[![CI](https://github.com/db-lyon/ue-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/db-lyon/ue-mcp/actions/workflows/ci.yml)
 [![stars](https://img.shields.io/github/stars/db-lyon/ue-mcp)](https://github.com/db-lyon/ue-mcp/stargazers)
 [![MIT](https://img.shields.io/npm/l/ue-mcp)](LICENSE)
 
