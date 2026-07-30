@@ -1217,51 +1217,95 @@ TSharedPtr<FJsonValue> FEditorHandlers::SearchLog(const TSharedPtr<FJsonObject>&
 	return MCPResult(Result);
 }
 
-// Read a Message Log listing (Blueprint compiler results, map check, asset
-// check, PIE...). This returned an empty array unconditionally and ignored
-// logName, so "no messages" was indistinguishable from "not implemented" -
-// callers used it to confirm a clean compile and got a clean answer either way.
+// Read a Message Log listing (map check, asset check, PIE, load errors...).
+//
+// This returned an empty array unconditionally and ignored logName, so "no
+// messages" was indistinguishable from "not implemented" - callers used it to
+// confirm a clean compile and got a clean answer either way.
+//
+// Blueprint compile results are deliberately NOT the default. They do not go to
+// a fixed listing: FCompilerResultsLog names one per Blueprint
+// ("<Guid>_<Name>_CompilerResultsLog"), so defaulting to a single name would
+// reintroduce the same false-clean answer in a subtler form. With no logName we
+// report which listings actually exist instead of guessing.
 TSharedPtr<FJsonValue> FEditorHandlers::GetMessageLog(const TSharedPtr<FJsonObject>& Params)
 {
 	FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>(TEXT("MessageLog"));
 
-	const FString LogName = OptionalString(Params, TEXT("logName"), TEXT("BlueprintLog"));
+	// The module exposes no enumeration, so probe the well-known listings.
+	static const TCHAR* KnownListings[] = {
+		TEXT("MapCheck"), TEXT("AssetCheck"), TEXT("PIE"), TEXT("LoadErrors"),
+		TEXT("LightingResults"), TEXT("BlueprintLog"), TEXT("AssetTools"),
+		TEXT("EditorErrors"), TEXT("AutomationTestingLog"), TEXT("Blueprint Log"),
+		TEXT("PackagingResults"), TEXT("SourceControl"), TEXT("HLODResults"),
+		TEXT("AnimBlueprintLog"), TEXT("WorldPartition"), TEXT("BlueprintCompiler"),
+	};
+
+	const FString LogName = OptionalString(Params, TEXT("logName"));
+	if (LogName.IsEmpty())
+	{
+		TArray<TSharedPtr<FJsonValue>> Available;
+		for (const TCHAR* Candidate : KnownListings)
+		{
+			if (!MessageLogModule.IsRegisteredLogListing(FName(Candidate))) continue;
+			TSharedRef<IMessageLogListing> L = MessageLogModule.GetLogListing(FName(Candidate));
+			TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+			Row->SetStringField(TEXT("logName"), Candidate);
+			Row->SetNumberField(TEXT("errors"), L->NumMessages(EMessageSeverity::Error));
+			Row->SetNumberField(TEXT("warnings"), L->NumMessages(EMessageSeverity::Warning));
+			Available.Add(MakeShared<FJsonValueObject>(Row));
+		}
+		auto Listing = MCPSuccess();
+		Listing->SetArrayField(TEXT("listings"), Available);
+		Listing->SetStringField(TEXT("note"),
+			TEXT("Pass logName to read one of these. Blueprint COMPILE results are not here - the compiler creates a listing per Blueprint; use blueprint(compile) or blueprint(compile_all), which return the compiler log directly."));
+		return MCPResult(Listing);
+	}
+
 	if (!MessageLogModule.IsRegisteredLogListing(FName(*LogName)))
 	{
 		// Naming a listing that does not exist would otherwise create an empty
 		// one and report a clean log, which is the same false negative.
 		return MCPError(FString::Printf(
-			TEXT("No message log listing named '%s'. Common listings: BlueprintLog, MapCheck, AssetCheck, PIE, LoadErrors, LightingResults."),
+			TEXT("No message log listing named '%s'. Call with no logName to list the registered ones."),
 			*LogName));
 	}
 
 	TSharedRef<IMessageLogListing> Listing = MessageLogModule.GetLogListing(FName(*LogName));
 	const int32 Limit = FMath::Max(1, OptionalInt(Params, TEXT("maxLines"), 200));
-	const FString SeverityFilter = OptionalString(Params, TEXT("filter")).ToLower();
+	// Named `severity`, not `filter`: the editor tool's `filter` is a substring
+	// match on message text, and sharing the key made this look like one while
+	// silently matching only severity names.
+	const FString SeverityFilter = OptionalString(Params, TEXT("severity")).ToLower();
 
 	auto SeverityName = [](EMessageSeverity::Type S) -> FString
 	{
 		switch (S)
 		{
-			case EMessageSeverity::Error:           return TEXT("Error");
+			case EMessageSeverity::Error:              return TEXT("Error");
 			case EMessageSeverity::PerformanceWarning: return TEXT("PerformanceWarning");
-			case EMessageSeverity::Warning:         return TEXT("Warning");
-			case EMessageSeverity::Info:            return TEXT("Info");
-			default:                                return TEXT("Unknown");
+			case EMessageSeverity::Warning:            return TEXT("Warning");
+			case EMessageSeverity::Info:               return TEXT("Info");
+			default:                                   return TEXT("Unknown");
 		}
 	};
 
+	// Counts come from NumMessages, which reads the listing itself. The message
+	// bodies can only be reached through GetFilteredMessages, which is scoped to
+	// the current PAGE and honours the severity checkboxes in the Message Log
+	// tab - so the two can legitimately disagree, and that difference is
+	// reported rather than left to look like a clean log.
+	const int32 TotalErrors   = Listing->NumMessages(EMessageSeverity::Error);
+	const int32 TotalWarnings = Listing->NumMessages(EMessageSeverity::Warning);
+	const int32 TotalInfo     = Listing->NumMessages(EMessageSeverity::Info);
+
 	TArray<TSharedPtr<FJsonValue>> MessagesArray;
-	int32 Errors = 0, Warnings = 0, Total = 0;
+	int32 Visible = 0;
 	bool bTruncated = false;
 	for (const TSharedRef<FTokenizedMessage>& Message : Listing->GetFilteredMessages())
 	{
+		++Visible;
 		const FString Severity = SeverityName(Message->GetSeverity());
-		if (Message->GetSeverity() == EMessageSeverity::Error) ++Errors;
-		else if (Message->GetSeverity() == EMessageSeverity::Warning ||
-		         Message->GetSeverity() == EMessageSeverity::PerformanceWarning) ++Warnings;
-		++Total;
-
 		if (!SeverityFilter.IsEmpty() && !Severity.ToLower().Contains(SeverityFilter)) continue;
 		if (MessagesArray.Num() >= Limit) { bTruncated = true; continue; }
 
@@ -1274,12 +1318,17 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetMessageLog(const TSharedPtr<FJsonObje
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("logName"), LogName);
 	Result->SetArrayField(TEXT("messages"), MessagesArray);
-	// Counts are over the whole listing, not the returned page, so a truncated
-	// read still reports honestly whether the log is clean.
-	Result->SetNumberField(TEXT("total"), Total);
-	Result->SetNumberField(TEXT("errors"), Errors);
-	Result->SetNumberField(TEXT("warnings"), Warnings);
+	Result->SetNumberField(TEXT("errors"), TotalErrors);
+	Result->SetNumberField(TEXT("warnings"), TotalWarnings);
+	Result->SetNumberField(TEXT("total"), TotalErrors + TotalWarnings + TotalInfo);
 	Result->SetBoolField(TEXT("truncated"), bTruncated);
+	const int32 Reachable = Visible;
+	if (Reachable < TotalErrors + TotalWarnings + TotalInfo)
+	{
+		Result->SetStringField(TEXT("note"), FString::Printf(
+			TEXT("The listing holds %d messages but only %d are readable: GetFilteredMessages sees the current page and honours the Message Log tab's severity checkboxes. The counts above are the real totals."),
+			TotalErrors + TotalWarnings + TotalInfo, Reachable));
+	}
 	return MCPResult(Result);
 }
 
