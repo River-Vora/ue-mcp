@@ -6,12 +6,12 @@ import WebSocket from "ws";
 import type { ProjectContext } from "./project.js";
 import { findEngineInstall } from "./deployer.js";
 
-// editor-control relies on Windows-only tools (tasklist/taskkill, Build.bat).
-// The MCP server itself is cross-platform; only process control is gated.
+// Process control is cross-platform: the editor binary path and the running-
+// process probe differ per OS, and stopping goes through the bridge (#790).
 const IS_WINDOWS = process.platform === "win32";
 
-const WINDOWS_ONLY_MSG =
-  "editor start/stop/restart is Windows-only. On macOS/Linux, start and stop the Unreal Editor manually; ue-mcp will reconnect when the bridge is reachable.";
+const NO_EDITOR_BINARY_MSG =
+  "Unreal Editor executable not found. Set UE_EDITOR_PATH to the editor binary (on macOS that is inside UnrealEditor.app/Contents/MacOS/), or install the engine to a default location.";
 
 /** Read EngineAssociation from a .uproject, or null if unreadable. */
 function readEngineAssociation(projectPath: string): string | null {
@@ -78,15 +78,34 @@ function findUEBuildTool(engineAssociation?: string | null): string | null {
   return null;
 }
 
+/**
+ * #766/#790: the editor binary lives at a different path per platform. Only the
+ * Win64 path was ever checked, which is the whole reason start_editor was
+ * Windows-only - engine discovery itself (findUEBuildTool) has always worked
+ * cross-platform. On macOS the launchable binary is inside the .app bundle.
+ */
+function editorBinaryCandidates(engineRoot: string): string[] {
+  const binaries = path.join(engineRoot, "Engine", "Binaries");
+  if (IS_WINDOWS) {
+    return [path.join(binaries, "Win64", "UnrealEditor.exe")];
+  }
+  if (process.platform === "darwin") {
+    return [
+      path.join(binaries, "Mac", "UnrealEditor.app", "Contents", "MacOS", "UnrealEditor"),
+      path.join(binaries, "Mac", "UnrealEditor"),
+    ];
+  }
+  return [path.join(binaries, "Linux", "UnrealEditor")];
+}
+
 function findEditorExecutable(project?: ProjectContext): string | null {
   const envPath = process.env.UE_EDITOR_PATH;
   if (envPath) return envPath;
 
   const associatedEngineRoot = findEngineInstall(project?.engineAssociation ?? null);
   if (associatedEngineRoot) {
-    const associatedEditorExe = path.join(associatedEngineRoot, "Engine", "Binaries", "Win64", "UnrealEditor.exe");
-    if (fs.existsSync(associatedEditorExe)) {
-      return associatedEditorExe;
+    for (const candidate of editorBinaryCandidates(associatedEngineRoot)) {
+      if (fs.existsSync(candidate)) return candidate;
     }
   }
 
@@ -94,25 +113,27 @@ function findEditorExecutable(project?: ProjectContext): string | null {
   if (!buildTool) return null;
 
   const engineRoot = path.resolve(buildTool, "..", "..", "..", "..");
-  const editorExe = path.join(engineRoot, "Engine", "Binaries", "Win64", "UnrealEditor.exe");
-
-  if (fs.existsSync(editorExe)) {
-    return editorExe;
+  for (const candidate of editorBinaryCandidates(engineRoot)) {
+    if (fs.existsSync(candidate)) return candidate;
   }
 
   return null;
 }
 
 function isEditorRunning(): boolean {
-  if (!IS_WINDOWS) return false;
   try {
-    // Use /NH (no header) and check output directly — avoids pipe/find issues
-    const output = execSync('tasklist /NH /FI "IMAGENAME eq UnrealEditor.exe"', {
-      stdio: "pipe",
-      encoding: "utf-8",
-    });
-    // tasklist returns "INFO: No tasks..." when not found, or the process line when found
-    return output.toLowerCase().includes("unrealeditor.exe");
+    if (IS_WINDOWS) {
+      // Use /NH (no header) and check output directly — avoids pipe/find issues
+      const output = execSync('tasklist /NH /FI "IMAGENAME eq UnrealEditor.exe"', {
+        stdio: "pipe",
+        encoding: "utf-8",
+      });
+      // tasklist returns "INFO: No tasks..." when not found, or the process line when found
+      return output.toLowerCase().includes("unrealeditor.exe");
+    }
+    // pgrep exits non-zero when nothing matches, which the catch handles.
+    const output = execSync("pgrep -f UnrealEditor", { stdio: "pipe", encoding: "utf-8" });
+    return output.trim().length > 0;
   } catch {
     return false;
   }
@@ -184,7 +205,6 @@ export async function startEditor(
   project: ProjectContext,
   timeoutSeconds = 120,
 ): Promise<{ success: boolean; message: string }> {
-  if (!IS_WINDOWS) return { success: false, message: WINDOWS_ONLY_MSG };
   if (isEditorRunning()) {
     return { success: false, message: "Editor is already running" };
   }
@@ -193,7 +213,7 @@ export async function startEditor(
   if (!editorExe) {
     return {
       success: false,
-      message: "Unreal Editor executable not found. Set UE_EDITOR_PATH environment variable or install UE5.3+ to default location.",
+      message: NO_EDITOR_BINARY_MSG,
     };
   }
 
@@ -285,7 +305,6 @@ function requestEditorSelfQuit(port: number): Promise<boolean> {
  */
 export async function stopEditor(force = false, projectDir?: string): Promise<{ success: boolean; message: string }> {
   void force;
-  if (!IS_WINDOWS) return { success: false, message: WINDOWS_ONLY_MSG };
 
   const port = resolveBridgePort(projectDir);
   const bridgeUp = await isBridgeAvailable("127.0.0.1", port);

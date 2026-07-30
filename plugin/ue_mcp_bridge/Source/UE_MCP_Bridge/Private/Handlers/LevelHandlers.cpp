@@ -3003,9 +3003,22 @@ TSharedPtr<FJsonValue> FLevelHandlers::SpawnSkeletalMeshActor(const TSharedPtr<F
 		{
 			if (UAnimSequence* Anim = LoadAssetByPath<UAnimSequence>(AnimPath))
 			{
+				const bool bLoop = OptionalBool(Params, TEXT("loop"), true);
 				Comp->SetAnimationMode(EAnimationMode::AnimationSingleNode);
 				Comp->SetAnimation(Anim);
-				Comp->Play(OptionalBool(Params, TEXT("loop"), true));
+				Comp->Play(bLoop);
+
+				// #766/#790: SetAnimation() only drives the RUNTIME single-node
+				// player. The editable AnimationData struct is what gets
+				// serialised with the level, so without also writing it the
+				// saved map stored AnimToPlay=None and every actor came back in
+				// A-pose after a reload - with no error to explain why.
+				Comp->AnimationData.AnimToPlay = Anim;
+				Comp->AnimationData.bSavedLooping = bLoop;
+				Comp->AnimationData.bSavedPlaying = true;
+				Comp->AnimationData.SavedPosition = 0.0f;
+				Comp->AnimationData.SavedPlayRate = 1.0f;
+				Comp->Modify();
 			}
 		}
 	}

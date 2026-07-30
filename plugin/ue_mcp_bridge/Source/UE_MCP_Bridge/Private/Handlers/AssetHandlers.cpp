@@ -428,7 +428,13 @@ TSharedPtr<FJsonValue> FAssetHandlers::ListAssets(const TSharedPtr<FJsonObject>&
 {
 	const FString Directory = OptionalString(Params, TEXT("directory"), TEXT("/Game"));
 	const bool bRecursive = OptionalBool(Params, TEXT("recursive"), true);
-	const int32 MaxResults = OptionalInt(Params, TEXT("maxResults"), 2000);
+	// #766/#790: the old default of 2000 built a single response large enough
+	// to drop the bridge on a big folder ("Bridge connection lost" at roughly
+	// 700 assets). Page instead: a smaller default, a real offset, and enough
+	// counters that a caller can walk the whole set deterministically rather
+	// than guessing whether it got everything.
+	const int32 MaxResults = FMath::Clamp(OptionalInt(Params, TEXT("maxResults"), 500), 1, 5000);
+	const int32 Offset = FMath::Max(0, OptionalInt(Params, TEXT("offset"), 0));
 	const FString ClassFilter = OptionalString(Params, TEXT("classFilter"));
 
 	IAssetRegistry& Registry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
@@ -436,14 +442,20 @@ TSharedPtr<FJsonValue> FAssetHandlers::ListAssets(const TSharedPtr<FJsonObject>&
 	Registry.GetAssetsByPath(FName(*Directory), Found, bRecursive);
 
 	TArray<TSharedPtr<FJsonValue>> Out;
+	int32 TotalMatched = 0;
 	for (const FAssetData& Data : Found)
 	{
-		if (Out.Num() >= MaxResults) break;
 		const FString ClassName = Data.AssetClassPath.GetAssetName().ToString();
 		if (!ClassFilter.IsEmpty() && !ClassName.Equals(ClassFilter, ESearchCase::IgnoreCase) && !ClassName.Contains(ClassFilter))
 		{
 			continue;
 		}
+		// Count every match before slicing, so totalMatched is the real size of
+		// the result set and not just what fitted in this page.
+		const int32 MatchIndex = TotalMatched++;
+		if (MatchIndex < Offset) continue;
+		if (Out.Num() >= MaxResults) continue;
+
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 		Item->SetStringField(TEXT("path"), Data.PackageName.ToString());
 		Item->SetStringField(TEXT("name"), Data.AssetName.ToString());
@@ -451,10 +463,23 @@ TSharedPtr<FJsonValue> FAssetHandlers::ListAssets(const TSharedPtr<FJsonObject>&
 		Out.Add(MakeShared<FJsonValueObject>(Item));
 	}
 
+	const int32 NextOffset = Offset + Out.Num();
+	const bool bHasMore = NextOffset < TotalMatched;
+
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("directory"), Directory);
 	Result->SetBoolField(TEXT("recursive"), bRecursive);
 	Result->SetNumberField(TEXT("assetCount"), Out.Num());
+	Result->SetNumberField(TEXT("totalMatched"), TotalMatched);
+	Result->SetNumberField(TEXT("offset"), Offset);
+	Result->SetBoolField(TEXT("hasMore"), bHasMore);
+	if (bHasMore)
+	{
+		Result->SetNumberField(TEXT("nextOffset"), NextOffset);
+		Result->SetStringField(TEXT("note"), FString::Printf(
+			TEXT("Showing %d of %d matches. Re-run with offset=%d for the next page."),
+			Out.Num(), TotalMatched, NextOffset));
+	}
 	Result->SetArrayField(TEXT("assets"), Out);
 	return MCPResult(Result);
 }
