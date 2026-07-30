@@ -181,7 +181,7 @@ Details: [Guards](https://ue-mcp.com/docs/plugins-guards/) and [Handler Conventi
 | **UE plugins** | `PythonScriptPlugin` (ships with the engine); `init` enables the rest for you |
 | **C++ toolchain** | Required - the bridge is a C++ plugin and compiles on first editor launch. On Windows that means Visual Studio with the C++ workload; on macOS, Xcode command line tools. |
 
-Editor process control (`editor(start_editor)` / `stop_editor` / `restart_editor`) is Windows-only. Everything else, including `ue-mcp build`, works on macOS and Linux; launch the editor yourself and the bridge connects normally.
+Editor process control (`editor(start_editor)` / `stop_editor` / `restart_editor`) works on Windows, macOS and Linux. Set `UE_EDITOR_PATH` if the engine is installed somewhere non-standard.
 
 ## Documentation
 
