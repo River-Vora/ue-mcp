@@ -106,7 +106,10 @@ void FGameplayHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("create_input_action"), &CreateInputAction);
 	Registry.RegisterHandler(TEXT("create_input_mapping_context"), &CreateInputMappingContext);
 	Registry.RegisterHandler(TEXT("read_imc"), &ReadImc);
-	Registry.RegisterHandler(TEXT("get_applied_imcs"), &GetAppliedImcs);
+	// #778: superseded by GetInputMappingContexts, which covers every PIE world
+	// rather than only the primary one. Kept as an alias so raw-bridge callers
+	// and older clients keep working.
+	Registry.RegisterHandler(TEXT("get_applied_imcs"), &GetInputMappingContexts);
 	Registry.RegisterHandler(TEXT("list_imc_mappings"), &ReadImc);
 	Registry.RegisterHandler(TEXT("add_imc_mapping"), &AddImcMapping);
 	Registry.RegisterHandler(TEXT("set_mapping_modifiers"), &SetMappingModifiers);
@@ -117,6 +120,7 @@ void FGameplayHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("create_behavior_tree"), &CreateBehaviorTree);
 	Registry.RegisterHandler(TEXT("create_eqs_query"), &CreateEqsQuery);
 	Registry.RegisterHandler(TEXT("create_state_tree"), &CreateStateTree);
+	Registry.RegisterHandler(TEXT("get_input_mapping_contexts"), &GetInputMappingContexts);
 	Registry.RegisterHandler(TEXT("get_state_tree_runtime"), &GetStateTreeRuntime);
 	Registry.RegisterHandler(TEXT("create_game_mode"), &CreateGameMode);
 	Registry.RegisterHandler(TEXT("create_game_state"), &CreateGameState);
