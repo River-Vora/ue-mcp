@@ -1,6 +1,8 @@
 #include "EditorHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+#include "Editor/EditorPerformanceSettings.h"
+#include "Misc/ScopeExit.h"
 #include "Engine/World.h"
 #include "Engine/Engine.h"
 #include "Scalability.h"
@@ -2287,6 +2289,27 @@ TSharedPtr<FJsonValue> FEditorHandlers::RunAutomationTests(const TSharedPtr<FJso
 {
 	const FString NameFilter = OptionalString(Params, TEXT("filter"));
 	const int32 MaxTests = OptionalInt(Params, TEXT("maxTests"), 50);
+
+	// #765: with the editor window unfocused, the CPU throttle drops it to a
+	// few FPS and the automation framework's interactive-frame-rate gate never
+	// opens, so tests sat in the queue indefinitely. An agent driving the
+	// editor is unfocused BY DEFINITION. Suspend the throttle for the duration
+	// of the run and restore whatever the user had afterwards.
+	UEditorPerformanceSettings* PerfSettings = GetMutableDefault<UEditorPerformanceSettings>();
+	const bool bPrevThrottle = PerfSettings && PerfSettings->bThrottleCPUWhenNotForeground;
+	if (PerfSettings && bPrevThrottle)
+	{
+		PerfSettings->bThrottleCPUWhenNotForeground = false;
+		PerfSettings->PostEditChange();
+	}
+	ON_SCOPE_EXIT
+	{
+		if (PerfSettings && bPrevThrottle)
+		{
+			PerfSettings->bThrottleCPUWhenNotForeground = true;
+			PerfSettings->PostEditChange();
+		}
+	};
 
 	FAutomationTestFramework& Framework = FAutomationTestFramework::Get();
 	Framework.SetRequestedTestFilter(EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter |
