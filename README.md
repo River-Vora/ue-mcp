@@ -82,7 +82,7 @@ If you prefer to configure manually, add to your MCP client config:
 ## Supported Platforms
 
 - **Windows** — UE 5.4–5.8
-- **Linux** — UE 5.6+ (contributed by [@robinduckett](https://github.com/robinduckett))
+- **Linux** — UE 5.6+
 
 Requires `PythonScriptPlugin` (ships with UE 4.26+).
 
