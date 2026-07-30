@@ -2,6 +2,41 @@ import { z } from "zod";
 import { categoryTool, bp, type ActionSpec, type ToolDef } from "../types.js";
 import { Vec3, Rotator } from "../schemas.js";
 
+/**
+ * set_module_input takes a string on the bridge, so scalars are stringified
+ * here. Objects and arrays are rejected rather than stringified: String({...})
+ * is "[object Object]", which the handler cannot parse, and an unparsable
+ * value used to fall through to a raw pin-default write that reported success.
+ * The shared `value` key stays z.unknown() because set_renderer_property
+ * genuinely takes structs and arrays (#783); the narrowing belongs here.
+ */
+function coerceModuleInputValue(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (Array.isArray(value)) {
+    // A vector given as [x, y, z] is exactly the comma-separated form the
+    // handler's float parser expects, so this one is a real convenience.
+    if (value.every((v) => typeof v === "number" || typeof v === "boolean" || typeof v === "string")) {
+      return value.join(",");
+    }
+    throw new Error("set_module_input: array values must contain only numbers, booleans or strings");
+  }
+  if (typeof value === "object") {
+    const o = value as Record<string, unknown>;
+    // {x,y,z[,w]} and {r,g,b[,a]} are the shapes callers reach for; accept them
+    // in the order the handler parses rather than failing on a reasonable ask.
+    for (const keys of [["x", "y", "z", "w"], ["r", "g", "b", "a"]]) {
+      const present = keys.filter((k) => typeof o[k] === "number");
+      if (present.length >= 2 && present.length === Object.keys(o).length) {
+        return present.map((k) => String(o[k])).join(",");
+      }
+    }
+    throw new Error(
+      "set_module_input: object values are only accepted as {x,y,z[,w]} or {r,g,b[,a]}; pass other types as a string the input's type can parse",
+    );
+  }
+  return String(value);
+}
+
 export const niagaraTool: ToolDef = categoryTool(
   "niagara",
   "Niagara VFX: systems, emitters, spawning, parameters, and graph authoring.",
@@ -30,7 +65,7 @@ export const niagaraTool: ToolDef = categoryTool(
     get_compiled_hlsl: bp("Read GPU compute script info for an emitter. Params: systemPath, emitterName?, emitterIndex?", "get_niagara_compiled_hlsl"),
     list_system_parameters: bp("List user-exposed system parameters. Params: systemPath", "list_niagara_system_parameters"),
     list_module_inputs:  bp("List an emitter's modules with the inputs you can actually SET - Spawn Rate, Lifetime, Colour, Sprite Size - each with its name, qualifiedName, type and a settable flag. Current values are NOT returned: the binder's value reader is not exported from NiagaraEditor, so the names and types are readable but the live value is not. Compile-time switches and enums are reported separately under switchPins; note that 'inputs' now means override-map inputs, NOT the function-call node pins it meant before (those are switchPins) (#784). Params: systemPath, emitterName?, emitterIndex?, stackContext? (ParticleSpawn|ParticleUpdate|EmitterSpawn|EmitterUpdate|all - default all), moduleName?", "list_niagara_module_inputs", (p) => ({ systemPath: p.systemPath, emitterName: p.emitterName, emitterIndex: p.emitterIndex, stackContext: p.stackContext, moduleName: p.moduleName })),
-    set_module_input:    bp("Set a module input value. Override-map-bound inputs (the numeric/colour values that matter) are written through the stack override map, the same path the Niagara stack editor uses; others fall back to the pin default. Reports writePath ('overrideMap'|'pinDefault'). On the overrideMap path previousValue cannot be read back (NiagaraEditor does not export the binder's reader), so it reports '(unread: override map)' and NO rollback is offered - re-set the value explicitly instead. The pinDefault path reports a real previousValue and is rollback-safe (#769). Params: systemPath, moduleName, inputName, value, emitterName?, emitterIndex?, stackContext?", "set_niagara_module_input", (p) => ({ systemPath: p.systemPath, moduleName: p.moduleName, inputName: p.inputName, value: p.value === undefined || p.value === null ? undefined : String(p.value), emitterName: p.emitterName, emitterIndex: p.emitterIndex, stackContext: p.stackContext })),
+    set_module_input:    bp("Set a module input value. Override-map-bound inputs (the numeric/colour values that matter) are written through the stack override map, the same path the Niagara stack editor uses; others fall back to the pin default. Reports writePath ('overrideMap'|'pinDefault'). On the overrideMap path previousValue cannot be read back (NiagaraEditor does not export the binder's reader), so it reports '(unread: override map)' and NO rollback is offered - re-set the value explicitly instead. The pinDefault path reports a real previousValue and is rollback-safe (#769). Params: systemPath, moduleName, inputName, value, emitterName?, emitterIndex?, stackContext?", "set_niagara_module_input", (p) => ({ systemPath: p.systemPath, moduleName: p.moduleName, inputName: p.inputName, value: coerceModuleInputValue(p.value), emitterName: p.emitterName, emitterIndex: p.emitterIndex, stackContext: p.stackContext })),
     add_module:          bp("Add a stock /Niagara/Modules script to an emitter stack (the modules that make an emitter actually do anything). Params: systemPath, moduleScript (e.g. /Niagara/Modules/Emitter/SpawnRate), stackContext (ParticleSpawn|ParticleUpdate|EmitterSpawn|EmitterUpdate), emitterName?, emitterIndex?, targetIndex? (-1 appends). Then set_module_input to tune it.", "add_niagara_module", (p) => ({ systemPath: p.systemPath, moduleScript: p.moduleScript, stackContext: p.stackContext, emitterName: p.emitterName, emitterIndex: p.emitterIndex, targetIndex: p.targetIndex })),
     list_static_switches: bp("List static switch inputs on a module. Params: systemPath, moduleName, emitterName?, emitterIndex?, stackContext?", "list_niagara_static_switches"),
     set_static_switch:   bp("Set static switch value on a module's function call node. Params: systemPath, moduleName, switchName, value, emitterName?, emitterIndex?, stackContext?", "set_niagara_static_switch"),

@@ -1576,7 +1576,18 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SetModuleInput(const TSharedPtr<FJsonOb
 					{
 						TArray<uint8> Bytes;
 						FString VErr;
-						if (FillNiagaraValueBytes(Found->GetType(), Value, Bytes, VErr))
+						if (!FillNiagaraValueBytes(Found->GetType(), Value, Bytes, VErr))
+						{
+							// The input WAS found; only the value failed to parse.
+							// Falling through to the pin-default loop below wrote
+							// the unparsed string straight into the pin and still
+							// reported success, and reaching the end reported
+							// "input not found", which sends the caller after the
+							// wrong problem entirely.
+							return MCPError(FString::Printf(
+								TEXT("Cannot use value '%s' for input '%s' (type %s): %s"),
+								*Value, *InputName, *Found->GetType().GetName(), *VErr));
+						}
 						{
 							FC->Modify();
 							Graph->Modify();
