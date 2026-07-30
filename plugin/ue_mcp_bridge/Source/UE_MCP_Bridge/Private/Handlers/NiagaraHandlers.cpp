@@ -1646,8 +1646,8 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SetModuleInput(const TSharedPtr<FJsonOb
 	// change, which stopped being true once the binder path landed and led a
 	// caller to conclude a write that HAD applied had silently failed.
 	Res->SetStringField(TEXT("note"), WritePath == TEXT("overrideMap")
-		? TEXT("Written through the stack override map - the same path the Niagara stack editor uses, so the value applies. Verify with list_module_inputs.")
-		: TEXT("Written as a pin default on the function-call node (this input is not override-map bound). Verify with list_module_inputs."));
+		? TEXT("Written through the stack override map - the same path the Niagara stack editor uses, so the value applies. Reopen the system in the Niagara editor to confirm.")
+		: TEXT("Written as a pin default on the function-call node (this input is not override-map bound). Reopen the system in the Niagara editor to confirm."));
 
 	// Rollback: only meaningful when we captured a REAL previous value. On the
 	// override-map path previousValue is a placeholder, and emitting a rollback
