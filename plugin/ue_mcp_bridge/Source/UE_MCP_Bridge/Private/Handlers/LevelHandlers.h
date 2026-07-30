@@ -66,6 +66,10 @@ private:
 	static TSharedPtr<FJsonValue> SetActorProperty(const TSharedPtr<FJsonObject>& Params);
 	// #220: bulk delete actors by label prefix / class / tag
 	static TSharedPtr<FJsonValue> DeleteActors(const TSharedPtr<FJsonObject>& Params);
+	// Safely delete actors with exact editor labels across explicit level
+	// packages. Defaults to a dry run and saves only levels changed by a
+	// committed request.
+	static TSharedPtr<FJsonValue> DeleteExactLabeledActorsInLevels(const TSharedPtr<FJsonObject>& Params);
 	// #219: actor tag CRUD
 	static TSharedPtr<FJsonValue> AddActorTag(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> RemoveActorTag(const TSharedPtr<FJsonObject>& Params);

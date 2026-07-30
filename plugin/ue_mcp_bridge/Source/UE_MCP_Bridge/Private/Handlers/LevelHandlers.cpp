@@ -150,6 +150,7 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("export_actor_fbx"), &ExportActorFbx);
 	Registry.RegisterHandler(TEXT("snap_actor_to_floor"), &SnapActorToFloor);
 	Registry.RegisterHandler(TEXT("delete_actors"), &DeleteActors);
+	Registry.RegisterHandlerWithTimeout(TEXT("delete_exact_labeled_actors_in_levels"), &DeleteExactLabeledActorsInLevels, 300.0f);
 	Registry.RegisterHandler(TEXT("add_actor_tag"), &AddActorTag);
 	Registry.RegisterHandler(TEXT("remove_actor_tag"), &RemoveActorTag);
 	Registry.RegisterHandler(TEXT("set_actor_tags"), &SetActorTags);
