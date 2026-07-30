@@ -676,6 +676,45 @@ FEdGraphPinType FBlueprintHandlers::MakePinType(const FString& TypeStr)
 		return true;
 	};
 
+	// (#787) Explicit disambiguating prefixes, the same syntax add_event_dispatcher
+	// accepts. Documented for add_variable but never implemented here: the string
+	// still contained "object:"/"struct:" when it reached the resolvers below, so
+	// every one of them missed and the type came back unresolved.
+	if (TypeStr.StartsWith(TEXT("object:"), ESearchCase::IgnoreCase))
+	{
+		TryResolveObjectPin(TypeStr.Mid(7).TrimStartAndEnd());
+		// On failure PinCategory stays NAME_None and the caller reports it; do
+		// not fall through to the numeric default, which would silently make a Float.
+		return PinType;
+	}
+	if (TypeStr.StartsWith(TEXT("struct:"), ESearchCase::IgnoreCase))
+	{
+		FString Inner = TypeStr.Mid(7).TrimStartAndEnd();
+		UScriptStruct* Struct = LoadObject<UScriptStruct>(nullptr, *Inner);
+		if (!Struct && Inner.StartsWith(TEXT("/")) && !Inner.Contains(TEXT(".")))
+		{
+			// Asset path without the object suffix: /Game/Foo/S_Bar -> ...S_Bar.S_Bar
+			FString AssetName;
+			Inner.Split(TEXT("/"), nullptr, &AssetName, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+			Struct = LoadObject<UScriptStruct>(nullptr, *(Inner + TEXT(".") + AssetName));
+		}
+		if (!Struct)
+		{
+			FString ShortName = Inner;
+			if (ShortName.Len() > 1 && ShortName[0] == 'F' && FChar::IsUpper(ShortName[1])) ShortName = ShortName.Mid(1);
+			for (TObjectIterator<UScriptStruct> It; It; ++It)
+			{
+				if (It->GetName() == Inner || It->GetName() == ShortName) { Struct = *It; break; }
+			}
+		}
+		if (Struct)
+		{
+			PinType.PinCategory = UEdGraphSchema_K2::PC_Struct;
+			PinType.PinSubCategoryObject = Struct;
+		}
+		return PinType;
+	}
+
 	// If the caller passed an asterisk or a class path, treat as object-ref first.
 	if (TypeStr.Contains(TEXT("*")) || TypeStr.Contains(TEXT("/")))
 	{
