@@ -36,8 +36,8 @@ const CATALOG: EpicCatalog = {
     },
     {
       // No natural ue-mcp home -> falls to the epic umbrella.
-      name: "ConfigSettingsToolset.ConfigSettingsToolset",
-      tools: [{ name: "ConfigSettingsToolset.ConfigSettingsToolset.GetSetting" }],
+      name: "conversation_toolset.toolsets.conversation.ConversationTools",
+      tools: [{ name: "conversation_toolset.toolsets.conversation.ConversationTools.ListSpeakers" }],
     },
   ],
 };
@@ -54,9 +54,32 @@ describe("routeToolset", () => {
     expect(routeToolset("animation_toolset.toolsets.sequencer.SequencerTools")).toBe("animation");
   });
 
-  it("returns null for toolsets with no natural home", () => {
-    expect(routeToolset("ConfigSettingsToolset.ConfigSettingsToolset")).toBeNull();
-    expect(routeToolset("SemanticSearchToolset.SemanticSearchToolset")).toBeNull();
+  it("routes the editor/engine toolsets to their canonical category, not the umbrella", () => {
+    expect(routeToolset("editor_toolset.toolsets.skeletal_mesh.SkeletalMeshTools")).toBe("animation");
+    expect(routeToolset("editor_toolset.toolsets.static_mesh.StaticMeshTools")).toBe("asset");
+    expect(routeToolset("editor_toolset.toolsets.texture.TextureTools")).toBe("asset");
+    expect(routeToolset("editor_toolset.toolsets.data_table.DataTableTools")).toBe("asset");
+    expect(routeToolset("editor_toolset.toolsets.string_table.StringTableTools")).toBe("asset");
+    expect(routeToolset("SemanticSearchToolset.SemanticSearchToolset")).toBe("asset");
+    expect(routeToolset("editor_toolset.toolsets.scene.SceneTools")).toBe("level");
+    expect(routeToolset("editor_toolset.toolsets.primitive.PrimitiveTools")).toBe("level");
+    expect(routeToolset("editor_toolset.toolsets.object.ObjectTools")).toBe("reflection");
+    expect(routeToolset("aimodule_toolset.toolsets.behavior_tree.BehaviorTreeTools")).toBe("gameplay");
+    expect(routeToolset("WorldConditionsToolset.WorldConditionTools")).toBe("gameplay");
+    expect(routeToolset("SlateInspectorToolset.SlateInspectorToolset")).toBe("widget");
+    expect(routeToolset("PluginToolset.PluginToolset")).toBe("plugins");
+    expect(routeToolset("GameFeaturesToolset.GameFeaturesToolset")).toBe("plugins");
+    expect(routeToolset("EditorToolset.EditorAppToolset")).toBe("editor");
+    expect(routeToolset("EditorToolset.LogsToolset")).toBe("editor");
+    expect(routeToolset("ConfigSettingsToolset.ConfigSettingsToolset")).toBe("project");
+    expect(routeToolset("AutomationTestToolset.AutomationTestToolset")).toBe("project");
+  });
+
+  it("returns null only for toolsets with genuinely no ue-mcp home", () => {
+    expect(routeToolset("ToolsetRegistry.AgentSkillToolset")).toBeNull();
+    expect(routeToolset("DataflowAgent.DataflowAgentToolset")).toBeNull();
+    expect(routeToolset("conversation_toolset.toolsets.conversation.ConversationTools")).toBeNull();
+    expect(routeToolset("editor_toolset.toolsets.programmatic.ProgrammaticToolset")).toBeNull();
   });
 });
 
@@ -108,7 +131,7 @@ describe("enrichToolsWithEpicCatalog", () => {
     const tools = fixtureTools();
     enrichToolsWithEpicCatalog(tools, CATALOG);
     const epic = tools.find((t) => t.name === "epic")!;
-    expect(epic.actions.epic_get_setting).toBeDefined();
+    expect(epic.actions.epic_list_speakers).toBeDefined();
   });
 
   it("is a no-op for an empty catalog", () => {

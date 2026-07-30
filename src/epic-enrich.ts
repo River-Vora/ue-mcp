@@ -36,6 +36,19 @@ const ROUTES: Rule[] = [
   { test: /\.blueprint\.|blueprinttools/i, category: "blueprint" },
   { test: /\.actor\.|actortools/i, category: "level" },
   { test: /\.asset\.|assettools|data_?asset|curve_?table|dataregistry|data_?registry/i, category: "asset" },
+  // Appended rules: every one of these matched nothing above, so placing them
+  // last cannot change an existing route (first match wins). They exist because
+  // an agent doing static-mesh or plugin work should find Epic's tools in the
+  // category it is already in, not have to detour through the epic umbrella.
+  { test: /skeletal_?mesh/i, category: "animation" },
+  { test: /static_?mesh|\btexture|data_?table|string_?table|semanticsearch/i, category: "asset" },
+  { test: /\.scene\.|scenetools|\.primitive\.|primitivetools/i, category: "level" },
+  { test: /\.object\.|objecttools/i, category: "reflection" },
+  { test: /behavior_?tree|worldcondition/i, category: "gameplay" },
+  { test: /slateinspector/i, category: "widget" },
+  { test: /plugintoolset|gamefeatures/i, category: "plugins" },
+  { test: /editorapptoolset|logstoolset/i, category: "editor" },
+  { test: /configsettings|automationtest/i, category: "project" },
 ];
 
 /** Resolve the ue-mcp category for an Epic toolset name, or null for the umbrella. */
