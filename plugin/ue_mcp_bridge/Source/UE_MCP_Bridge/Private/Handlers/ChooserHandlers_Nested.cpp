@@ -137,7 +137,7 @@ namespace
 					if (FStructProperty* ValueStruct = CastField<FStructProperty>(MapProp->ValueProp))
 					{
 						CollectRefsInStruct(ValueStruct->Struct, Helper.GetValuePtr(MapIt), Owner,
-							ChooserPath, Location + TEXT("[map]"), StructTypeName, OutRefs, Depth + 1);
+							ChooserPath, FString::Printf(TEXT("%s[map:%d]"), *Location, MapIt.GetInternalIndex()), StructTypeName, OutRefs, Depth + 1);
 					}
 					else if (FObjectPropertyBase* ValueObj = CastField<FObjectPropertyBase>(MapProp->ValueProp))
 					{
@@ -146,7 +146,7 @@ namespace
 						{
 							FChooserObjectRef Ref;
 							Ref.ChooserPath = ChooserPath;
-							Ref.Location = Location + TEXT("[map]");
+							Ref.Location = FString::Printf(TEXT("%s[map:%d]"), *Location, MapIt.GetInternalIndex());
 							Ref.StructType = StructTypeName;
 							Ref.ObjectPath = Referenced->GetPathName();
 							Ref.Property = MapProp->ValueProp;
@@ -372,10 +372,11 @@ TSharedPtr<FJsonValue> FChooserHandlers::RemapObjectReferences(const TSharedPtr<
 	TArray<FChooserObjectRef> Refs;
 	GatherAllRefs(Chooser, Refs);
 
-	// Resolve every replacement target BEFORE any write. ValueAddr points into
-	// TArray storage inside an FInstancedStruct, and LoadObject can run PostLoad
-	// and editor callbacks that resize those arrays - which would leave every
-	// later ValueAddr dangling mid-loop.
+	// ValueAddr points into TArray storage inside an FInstancedStruct, and a
+	// load can run PostLoad and editor callbacks that resize those arrays,
+	// leaving later addresses dangling. Object lookups below therefore prefer
+	// an already-loaded object, and soft refs are validated by path without
+	// forcing a load unless the caller asked for existence checking.
 	const FString NormFrom = NormalizeObjectPath(From);
 	TArray<TSharedPtr<FJsonValue>> Changes;
 	TSet<UObject*> Touched;

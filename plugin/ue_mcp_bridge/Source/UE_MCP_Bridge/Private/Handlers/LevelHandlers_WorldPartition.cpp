@@ -316,6 +316,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::LoadActorDescs(const TSharedPtr<FJsonObje
 	}
 
 	const bool bDryRun = OptionalBool(Params, TEXT("dryRun"), false);
+	const TSet<FGuid> ResidentBefore = CollectLoadedActorGuids(World);
 	TArray<FGuid> Guids;
 	TArray<TSharedPtr<FJsonValue>> Affected;
 	Guids.Reserve(Matches.Num());
@@ -343,6 +344,16 @@ TSharedPtr<FJsonValue> FLevelHandlers::LoadActorDescs(const TSharedPtr<FJsonObje
 	{
 		if (NowLoaded.Contains(Guid)) ++ResidentAfter;
 	}
+	// A real delta: how many actually changed residency. Without the
+	// before-snapshot, an already-loaded actor counted as "affected" by a call
+	// that did nothing.
+	int32 Changed = 0;
+	for (const FGuid& Guid : Guids)
+	{
+		const bool bWas = ResidentBefore.Contains(Guid);
+		const bool bNow = NowLoaded.Contains(Guid);
+		if (bWas != bNow) ++Changed;
+	}
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("mode"), Mode);
@@ -351,7 +362,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::LoadActorDescs(const TSharedPtr<FJsonObje
 	// Report what actually changed, not what was requested: PinActors is a
 	// no-op when the world partition has no pinned-actor adapter.
 	Result->SetNumberField(TEXT("requested"), Guids.Num());
-	Result->SetNumberField(TEXT("affected"), bDryRun ? 0 : (Mode == TEXT("pin") ? ResidentAfter : Guids.Num()));
+	Result->SetNumberField(TEXT("affected"), bDryRun ? 0 : Changed);
 	Result->SetNumberField(TEXT("residentAfter"), ResidentAfter);
 	Result->SetArrayField(TEXT("actors"), Affected);
 	return MCPResult(Result);

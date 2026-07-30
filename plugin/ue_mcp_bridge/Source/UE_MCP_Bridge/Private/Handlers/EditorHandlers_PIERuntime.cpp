@@ -34,6 +34,7 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/GCObjectScopeGuard.h"
+#include "Misc/ScopeExit.h"
 
 namespace
 {
@@ -250,7 +251,22 @@ namespace
 		// down the world and collects garbage - and the target is read again
 		// below to export out params.
 		FGCObjectScopeGuard TargetGuard(CallTarget);
+		// ParamBuf is raw bytes, invisible to GC. Any UObject* out-param written
+		// into it during the call would dangle if ProcessEvent collected
+		// garbage, and it is dereferenced below to export return values.
+		TArray<FGCObjectScopeGuard*> ArgGuards;
+		ON_SCOPE_EXIT { for (FGCObjectScopeGuard* G : ArgGuards) delete G; };
 		CallTarget->ProcessEvent(Func, ParamBuf.GetData());
+		for (TFieldIterator<FProperty> It(Func); It && (It->PropertyFlags & CPF_Parm); ++It)
+		{
+			if (FObjectPropertyBase* OP = CastField<FObjectPropertyBase>(*It))
+			{
+				if (UObject* Out = OP->GetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(ParamBuf.GetData())))
+				{
+					ArgGuards.Add(new FGCObjectScopeGuard(Out));
+				}
+			}
+		}
 
 		TSharedPtr<FJsonObject> OutVals = MakeShared<FJsonObject>();
 		for (TFieldIterator<FProperty> It(Func); It && (It->PropertyFlags & CPF_Parm); ++It)
@@ -377,7 +393,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 		{
 			continue;
 		}
-		if (Wanted.Num() == 0 && Count >= MaxProperties) { ++Skipped; continue; }
+		if (Count >= MaxProperties) { ++Skipped; continue; }
 		FString S;
 		P->ExportTextItem_Direct(S, P->ContainerPtrToValuePtr<void>(Target), nullptr, Target, PPF_None);
 		if (S.Len() > MaxValueChars)
@@ -455,13 +471,38 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 	}
 
 	// A component whose transforms have never been evaluated returns
-	// FTransform::Identity for every bone. Reporting that as measurement data
-	// is worse than failing - this handler exists to supply evidence.
-	if (!Mesh->GetNumComponentSpaceTransforms())
+	// FTransform::Identity for every bone, and reporting that as measurement
+	// data is worse than failing - this handler exists to supply evidence.
+	//
+	// GetNumComponentSpaceTransforms alone is NOT a validity test:
+	// AllocateTransformData fills the array with identity on register, so an
+	// unevaluated component sails past a count check. The engine's own flag
+	// (bHasValidBoneTransform / AreBoneTransformsValid) is protected and not
+	// reflected, so detect the pathological signature directly: a multi-bone
+	// skeleton whose component-space transforms are ALL exactly identity has
+	// not been posed. A posed mesh - including a leader-pose-driven one, which
+	// a flag check would have wrongly rejected - exits on the first
+	// non-identity bone and costs nothing.
+	if (!Mesh->GetSkinnedAsset() || Mesh->GetNumComponentSpaceTransforms() == 0)
 	{
 		return MCPError(FString::Printf(
-			TEXT("SkeletalMeshComponent '%s' on '%s' has no evaluated bone transforms yet (every bone would read as identity). Is PIE running, and has the mesh ticked?"),
+			TEXT("SkeletalMeshComponent '%s' on '%s' has no bone transform data (no skinned asset, or not registered)."),
 			*Mesh->GetName(), *ActorLabel));
+	}
+	{
+		const TArray<FTransform>& Spaces = Mesh->GetComponentSpaceTransforms();
+		bool bAnyPosed = Spaces.Num() <= 1;
+		const int32 Probe = FMath::Min(Spaces.Num(), 32);
+		for (int32 i = 0; i < Probe && !bAnyPosed; ++i)
+		{
+			if (!Spaces[i].Equals(FTransform::Identity, UE_KINDA_SMALL_NUMBER)) bAnyPosed = true;
+		}
+		if (!bAnyPosed)
+		{
+			return MCPError(FString::Printf(
+				TEXT("SkeletalMeshComponent '%s' on '%s' has not evaluated its bone transforms yet - every bone reads as identity, which would be reported as real measurement data. Is PIE running, and has the mesh ticked?"),
+				*Mesh->GetName(), *ActorLabel));
+		}
 	}
 
 	// "world" (default) or "component" space. Component space is what an

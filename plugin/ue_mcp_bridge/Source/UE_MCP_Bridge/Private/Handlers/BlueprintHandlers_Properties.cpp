@@ -114,25 +114,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetVariableProperties(const TSharedPt
 	// Set instance editable
 	bool bInstanceEditable = false;
 	const bool bHasInstanceEditable = Params->TryGetBoolField(TEXT("instanceEditable"), bInstanceEditable);
-	if (bHasInstanceEditable)
-	{
-		if (bInstanceEditable)
-		{
-			FoundVar->PropertyFlags |= CPF_Edit;
-			// Without clearing this, an EditDefaultsOnly variable stayed
-			// EditDefaultsOnly and list_variables kept reporting false right
-			// after this call reported updated: true.
-			FoundVar->PropertyFlags &= ~CPF_DisableEditOnInstance;
-			FoundVar->RemoveMetaData(FBlueprintMetadata::MD_Private);
-		}
-		else
-		{
-			// "Not instance editable" means EditDefaultsOnly, not "not editable
-			// at all" - clearing CPF_Edit would also hide it from class defaults.
-			FoundVar->PropertyFlags |= CPF_Edit;
-			FoundVar->PropertyFlags |= CPF_DisableEditOnInstance;
-		}
-	}
+	const bool bWasEditableAtAll = (FoundVar->PropertyFlags & CPF_Edit) != 0;
 
 	// Set category
 	FString CategoryStr;
@@ -150,7 +132,10 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetVariableProperties(const TSharedPt
 		FoundVar->SetMetaData(FBlueprintMetadata::MD_Tooltip, *TooltipStr);
 	}
 
-	// Detect no-op: nothing requested OR every requested field already matches
+	// Detect no-op BEFORE writing anything. Previously every branch above had
+	// already mutated PropertyFlags by the time this ran, so a "nothing
+	// changed" return still left the in-memory Blueprint altered and never
+	// compiled or saved - divergence from disk with no record of it.
 	const bool bAnyChanged =
 		(bHasExposeOnSpawn && bExposeOnSpawn != bPrevExposeOnSpawn) ||
 		(bHasInstanceEditable && bInstanceEditable != bPrevInstanceEditable) ||
@@ -163,6 +148,28 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetVariableProperties(const TSharedPt
 		Noop->SetStringField(TEXT("path"), AssetPath);
 		Noop->SetStringField(TEXT("name"), VarName);
 		return MCPResult(Noop);
+	}
+
+	if (bHasInstanceEditable)
+	{
+		if (bInstanceEditable)
+		{
+			FoundVar->PropertyFlags |= CPF_Edit;
+			// Without clearing this, an EditDefaultsOnly variable stayed
+			// EditDefaultsOnly and list_variables kept reporting false right
+			// after this call reported updated: true.
+			FoundVar->PropertyFlags &= ~CPF_DisableEditOnInstance;
+			FoundVar->RemoveMetaData(FBlueprintMetadata::MD_Private);
+		}
+		else if (bWasEditableAtAll)
+		{
+			// "Not instance editable" on an editable variable means
+			// EditDefaultsOnly. Only do this when it was already editable -
+			// otherwise a private/non-editable variable would be silently
+			// PROMOTED into the class-defaults panel, and the rollback would
+			// re-apply the promotion rather than undo it.
+			FoundVar->PropertyFlags |= CPF_DisableEditOnInstance;
+		}
 	}
 
 	// Compile and save

@@ -481,19 +481,14 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorDetails(const TSharedPtr<FJsonObj
 	}
 
 	// World selection: "editor" (default) or "pie" (#111)
+	// #778: this hand-rolled loop took the FIRST PIE context, i.e. the server,
+	// so pieInstance could not select a client. Use the shared resolver.
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
 	UWorld* World = nullptr;
 	if (WorldScope.Equals(TEXT("pie"), ESearchCase::IgnoreCase) || WorldScope.Equals(TEXT("game"), ESearchCase::IgnoreCase))
 	{
-		for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
-		{
-			if (Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game)
-			{
-				World = Ctx.World();
-				break;
-			}
-		}
-		if (!World) return MCPError(TEXT("No PIE/Game world active"));
+		World = ResolveWorldFromParams(Params, *WorldScope);
+		if (!World) return MCPError(TEXT("No PIE/Game world active (or no such pieInstance). See editor(list_pie_instances)."));
 	}
 	else
 	{

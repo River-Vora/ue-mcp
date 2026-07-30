@@ -218,8 +218,9 @@ TSharedPtr<FJsonValue> FEditorHandlers::PieGetRuntimeValue(const TSharedPtr<FJso
 	FString PropertyName;
 	if (auto Err = RequireString(Params, TEXT("propertyName"), PropertyName)) return Err;
 
-	// Search for the actor in the PIE world (accept label, name, or full path)
-	UWorld* PIEWorld = GEditor->PlayWorld;
+	// Search for the actor in the PIE world (accept label, name, or full path).
+	// #778: honour pieInstance so a client world is reachable.
+	UWorld* PIEWorld = ResolveWorldFromParams(Params, TEXT("pie"));
 	AActor* TargetActor = FindActorByLabelNameOrPath(PIEWorld, ActorPath);
 
 	if (!TargetActor)
@@ -616,16 +617,10 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetRuntimeValues(const TSharedPtr<FJsonO
 	}
 	if (Paths.Num() == 0) return MCPError(TEXT("'paths' must contain at least one non-empty string"));
 
-	const FString WorldHint = OptionalString(Params, TEXT("world"));
-	UWorld* World = nullptr;
-	if (WorldHint == TEXT("editor") || !GEditor->PlayWorld)
-	{
-		World = (UWorld*)GEditor->GetEditorWorldContext().World();
-	}
-	else
-	{
-		World = (UWorld*)GEditor->PlayWorld;
-	}
+	// #778: was GEditor->PlayWorld, which is always the primary/server world.
+	const FString WorldHint = OptionalString(Params, TEXT("world"), TEXT("auto"));
+	UWorld* World = ResolveWorldFromParams(Params, *WorldHint);
+	if (!World) World = (UWorld*)GEditor->GetEditorWorldContext().World();
 	if (!World) return MCPError(TEXT("No world available"));
 
 	TArray<TSharedPtr<FJsonValue>> Rows;
@@ -813,11 +808,6 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 		return MCPError(WorldScope == TEXT("pie")
 			? TEXT("PIE not running (or no such pieInstance) - cannot invoke against PIE world. See editor(list_pie_instances).")
 			: TEXT("No editor world available"));
-	}
-	else
-	{
-		World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
-		if (!World) return MCPError(TEXT("No editor world available"));
 	}
 
 	// #654: also match internal UObject name and full path so unlabeled actors
@@ -1012,8 +1002,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeStaticFunction(const TSharedPtr<FJ
 	UWorld* World = nullptr;
 	if (WorldScope == TEXT("pie"))
 	{
-		FWorldContext* PieCtx = GEditor ? GEditor->GetPIEWorldContext() : nullptr;
-		World = PieCtx ? PieCtx->World() : nullptr;
+		World = ResolveWorldFromParams(Params, TEXT("pie"));
 		if (!World) return MCPError(TEXT("PIE not running - cannot invoke against PIE world"));
 	}
 	else

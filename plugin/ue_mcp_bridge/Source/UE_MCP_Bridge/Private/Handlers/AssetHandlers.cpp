@@ -444,9 +444,12 @@ TSharedPtr<FJsonValue> FAssetHandlers::ListAssets(const TSharedPtr<FJsonObject>&
 	// AssetRegistry order is not a stable contract, so paging over it could
 	// overlap or skip entries between calls. Sort so offset/limit paging is
 	// genuinely deterministic, which is what the action advertises.
+	// TArray::Sort is not stable, so tie on AssetName too: multi-asset packages
+	// would otherwise order arbitrarily and paging could still overlap or skip.
 	Found.Sort([](const FAssetData& A, const FAssetData& B)
 	{
-		return A.PackageName.LexicalLess(B.PackageName);
+		if (A.PackageName != B.PackageName) return A.PackageName.LexicalLess(B.PackageName);
+		return A.AssetName.LexicalLess(B.AssetName);
 	});
 
 	TArray<TSharedPtr<FJsonValue>> Out;

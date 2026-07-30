@@ -136,10 +136,11 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ReadControlRigGraph(const TSharedPtr<
 		TotalNodes += Nodes.Num();
 
 		TArray<TSharedPtr<FJsonValue>> NodesArray;
+		bool bGraphTruncated = false;
 		for (URigVMNode* Node : Nodes)
 		{
 			if (!Node) continue;
-			if (NodesArray.Num() >= NodeLimit) { bTruncatedAny = true; break; }
+			if (NodesArray.Num() >= NodeLimit) { bTruncatedAny = true; bGraphTruncated = true; break; }
 
 			TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
 			NodeObj->SetStringField(TEXT("name"), Node->GetName());
@@ -158,9 +159,9 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ReadControlRigGraph(const TSharedPtr<
 			NodesArray.Add(MakeShared<FJsonValueObject>(NodeObj));
 		}
 		GraphObj->SetArrayField(TEXT("nodes"), NodesArray);
-		// Compare against the node limit, not the raw count: a graph containing a
-		// null node would otherwise report truncation that never happened.
-		GraphObj->SetBoolField(TEXT("nodesTruncated"), NodesArray.Num() >= NodeLimit && Nodes.Num() > NodeLimit);
+		// Set at the break site: deriving it from counts false-positives on a
+		// graph that merely contains a null node.
+		GraphObj->SetBoolField(TEXT("nodesTruncated"), bGraphTruncated);
 
 		if (bIncludeLinks)
 		{

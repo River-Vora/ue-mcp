@@ -228,7 +228,18 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::Sculpt(const TSharedPtr<FJsonObject>&
 
 	FLandscapeEditDataInterface EditData(Info);
 	EditData.SetEditLayer(EditLayerGuid);
-	EditData.GetHeightData(X1, Y1, X2, Y2, Heights.GetData(), 0);
+	// GetHeightData takes the rect by non-const reference and REWRITES it with
+	// the valid sub-range, so pass copies: the buffer is sized and indexed
+	// against the original rect, and an empty region returns an inverted
+	// INT_MAX/INT_MIN rect that would overflow the vertex count downstream.
+	{
+		int32 GX1 = X1, GY1 = Y1, GX2 = X2, GY2 = Y2;
+		EditData.GetHeightData(GX1, GY1, GX2, GY2, Heights.GetData(), 0);
+		if (GX2 < GX1 || GY2 < GY1)
+		{
+			return MCPError(TEXT("No landscape height data in the requested area (unloaded or absent components). Move the brush or load the region first."));
+		}
+	}
 
 	const FVector Scale = Landscape->ActorToWorld().GetScale3D();
 	// uint16 height units per world centimetre.
@@ -278,7 +289,8 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::Sculpt(const TSharedPtr<FJsonObject>&
 		const FScopedTransaction Transaction(FText::FromString(TEXT("MCP landscape sculpt")));
 		Landscape->Modify();
 		FScopedSetLandscapeEditingLayer EditingLayer(Landscape, EditLayerGuid);
-		EditData.SetHeightData(X1, Y1, X2, Y2, Heights.GetData(), 0, /*InCalcNormals=*/true);
+		int32 SX1 = X1, SY1 = Y1, SX2 = X2, SY2 = Y2;
+		EditData.SetHeightData(SX1, SY1, SX2, SY2, Heights.GetData(), 0, /*InCalcNormals=*/true);
 		EditData.Flush();
 	}
 	Landscape->PostEditChange();
@@ -357,6 +369,14 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::PaintLayer(const TSharedPtr<FJsonObje
 
 	const int32 Width = X2 - X1 + 1;
 	const int32 Height = Y2 - Y1 + 1;
+	const int64 VertexCount = (int64)Width * (int64)Height;
+	const int64 MaxVertices = (int64)FMath::Clamp(OptionalInt(Params, TEXT("maxVertices"), 4'000'000), 1024, 64'000'000);
+	if (VertexCount > MaxVertices)
+	{
+		return MCPError(FString::Printf(
+			TEXT("Brush covers %lld vertices, above the %lld limit. Reduce 'radius' or raise 'maxVertices' deliberately."),
+			VertexCount, MaxVertices));
+	}
 	TArray<uint8> Weights;
 	Weights.SetNumZeroed(Width * Height);
 
@@ -370,7 +390,14 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::PaintLayer(const TSharedPtr<FJsonObje
 
 	FLandscapeEditDataInterface EditData(Info);
 	EditData.SetEditLayer(EditLayerGuid);
-	EditData.GetWeightData(LayerInfo, X1, Y1, X2, Y2, Weights.GetData(), 0);
+	{
+		int32 GX1 = X1, GY1 = Y1, GX2 = X2, GY2 = Y2;
+		EditData.GetWeightData(LayerInfo, GX1, GY1, GX2, GY2, Weights.GetData(), 0);
+		if (GX2 < GX1 || GY2 < GY1)
+		{
+			return MCPError(TEXT("No landscape weight data in the requested area (unloaded or absent components). Move the brush or load the region first."));
+		}
+	}
 
 	const FVector Scale = Landscape->ActorToWorld().GetScale3D();
 	const FVector LocalCenter = Landscape->ActorToWorld().InverseTransformPosition(FVector(Center.X, Center.Y, 0.0));
@@ -402,7 +429,8 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::PaintLayer(const TSharedPtr<FJsonObje
 		// deprecated in 5.7 and its body DISCARDS both flags, so calling it
 		// would let us claim a renormalisation that never happened.
 		FScopedSetLandscapeEditingLayer EditingLayer(Landscape, EditLayerGuid);
-		EditData.SetAlphaData(LayerInfo, X1, Y1, X2, Y2, Weights.GetData(), 0,
+		int32 SX1 = X1, SY1 = Y1, SX2 = X2, SY2 = Y2;
+		EditData.SetAlphaData(LayerInfo, SX1, SY1, SX2, SY2, Weights.GetData(), 0,
 			ELandscapeLayerPaintingRestriction::None);
 		EditData.Flush();
 	}

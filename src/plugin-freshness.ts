@@ -108,8 +108,13 @@ function findCompiledBinary(pluginDir: string): { file: string; mtimeMs: number 
  */
 // get_status is the first call of every session and gets polled, so the walk
 // below must not run per call. Cache by project path for a short window.
-const CACHE_TTL_MS = 60_000;
+const CACHE_TTL_MS = 10_000;
 const cache = new Map<string, { at: number; value: PluginFreshness }>();
+
+/** Drop the cached verdict, e.g. straight after a rebuild. */
+export function invalidatePluginFreshness(): void {
+  cache.clear();
+}
 
 export function checkPluginFreshness(uprojectPath: string | null): PluginFreshness {
   if (uprojectPath) {
