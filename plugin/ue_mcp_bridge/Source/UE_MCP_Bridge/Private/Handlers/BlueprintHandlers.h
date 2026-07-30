@@ -43,6 +43,7 @@ private:
 	static TSharedPtr<FJsonValue> DeleteNode(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetNodeProperty(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ListGraphs(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ResolveGraph(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetComponentProperty(const TSharedPtr<FJsonObject>& Params);
 	// #442: dedicated OverrideMaterials writer for mesh-component templates.
 	static TSharedPtr<FJsonValue> SetComponentOverrideMaterials(const TSharedPtr<FJsonObject>& Params);
