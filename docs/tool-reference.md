@@ -471,7 +471,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `list_splines` | Read landscape splines |
 | `get_component` | Inspect component. Params: `componentIndex` |
 | `set_material` | Set landscape material. Params: `materialPath` |
-| `add_layer_info` | Register paint layer (creates LayerInfo asset + binds to active landscape). Params: `layerName, packagePath?, weightBlended?` |
+| `add_layer_info` | Register paint layer (creates LayerInfo asset + binds to active landscape). Params: `layerName, packagePath?` |
 | `create_layer_info` | Standalone LayerInfo asset creation - no landscape required. Params: `layerName, name? (default LI_<layerName>), packagePath? (default /Game/Landscape/LayerInfos), physMaterial? (asset path), hardness? (#251)` |
 | `create` | Spawn a new ALandscape with a flat heightmap. Defaults match the Editor's Landscape Mode 'create new' (8x8 components, 63 quads/subsection, 2 subsections/component = 1016x1016 quads). Params: `location? (Vec3), scale? (Vec3, default 100,100,100), componentCountX? (default 8), componentCountY? (default 8), subsectionSizeQuads? (one of 7\|15\|31\|63\|127\|255, default 63), numSubsections? (1\|2, default 2), heightOffset? (uint16, default 32768 = mid-elevation), label? (#303)` |
 | `get_material_usage_summary` | Per-proxy summary: landscape/hole material paths + component/grass/nanite counts (#150) |

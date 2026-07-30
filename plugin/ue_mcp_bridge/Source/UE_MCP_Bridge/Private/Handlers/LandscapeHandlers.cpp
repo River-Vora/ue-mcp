@@ -455,9 +455,11 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		LayerInfoObj->LayerName = FName(*LayerName);
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
-		// Set optional properties
-		bool bIsWeightBlended = OptionalBool(Params, TEXT("weightBlended"), true);
-		// bNoWeightBlend removed in UE 5.7 — weight blending is now controlled per-layer via landscape settings
+		// There is no weight-blend toggle to set here any more: bNoWeightBlend
+		// was removed in 5.7 and blending is controlled per-layer through
+		// landscape settings. The old 'weightBlended' param read into a unused
+		// local and the response hardcoded true, so both are gone rather than
+		// left implying a setting that is not being applied.
 
 		// Notify asset registry and save
 		FAssetRegistryModule::AssetCreated(LayerInfoObj);
@@ -478,7 +480,6 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	Result->SetStringField(TEXT("path"), LayerInfoObj->GetPathName());
 	Result->SetStringField(TEXT("landscapeName"), TargetLandscape->GetName());
 	Result->SetNumberField(TEXT("layerIndex"), LayerIndex);
-	Result->SetBoolField(TEXT("weightBlended"), true);
 
 	return MCPResult(Result);
 }
