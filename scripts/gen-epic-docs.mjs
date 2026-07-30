@@ -74,7 +74,8 @@ function main() {
   lines.push("");
   lines.push(
     `ue-mcp currently wraps **${total} official tools** across **${toolsetCount} toolsets**, grouped below by the ` +
-    "ue-mcp category they surface in. Toolsets with no natural home appear under `epic`.",
+    "ue-mcp category they surface in. Domains ue-mcp has no native handlers for still get their own " +
+    "category (`dataflow`, `conversation`); only the registry's own meta-tooling lives under `epic`.",
   );
   lines.push("");
 

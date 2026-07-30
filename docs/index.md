@@ -1,6 +1,6 @@
 # UE-MCP
 
-**Unreal Engine Model Context Protocol Server** - lets AI assistants drive the Unreal Editor through <!-- count:tools -->24<!-- /count --> category tools covering <!-- count:actions -->741+<!-- /count --> actions.
+**Unreal Engine Model Context Protocol Server** - lets AI assistants drive the Unreal Editor through <!-- count:tools -->24<!-- /count --> category tools covering <!-- count:actions -->744+<!-- /count --> actions.
 
 UE-MCP is a bridge between an AI client (Claude Code, Claude Desktop, Cursor, etc.) and the Unreal Editor. It runs a TypeScript MCP server on your machine, which talks over WebSocket to a C++ plugin running inside the editor. The result: your AI can place actors, write blueprints, author materials, sculpt landscape, set up Niagara VFX, configure replication, run PIE, build the project — anything the editor can do.
 
@@ -40,6 +40,8 @@ Start with **[Getting Started](getting-started.md)**. It assumes zero knowledge 
 | **Editor** | Console commands, Python escape hatch, PIE, viewport, sequencer, build pipeline, logs |
 | **Reflection** | Class/struct/enum introspection, gameplay tags, SaveGame inspection |
 | **Project** | Status, INI config, C++ source/header parsing, build |
+| **Dataflow** | Dataflow graph nodes, pins, variables, templates (UE 5.8+) |
+| **Conversation** | Dialogue graph nodes, speakers, entry points (UE 5.8+) |
 | **Demo** | Built-in 19-step Neon Shrine procedural scene |
 | **Feedback** | Submit tool-gap reports as GitHub issues |
 

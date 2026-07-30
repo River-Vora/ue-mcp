@@ -2,7 +2,7 @@
 
 This page lists ue-mcp's own category tools and actions. For the official Unreal 5.8 tools that ue-mcp wraps (surfaced inside these same categories), see [Native Tools](native-tools.md).
 
-UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->741+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
+UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->744+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
 
 !!! tip "First call in any session"
     Start with `project(action="get_status")` to check the connection, then `level(action="get_outliner")` or `asset(action="list")` to explore.
@@ -158,6 +158,8 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `lock` | Acquire an exclusive lock on an asset for this session. Returns acquired=true, or acquired=false with holder{sessionId,ttlSecondsRemaining} when another session holds it. Params: `assetPath, ttlSeconds? (default 300), sessionId?` |
 | `unlock` | Release an asset lock held by this session (or force=true to break any holder's lock). Params: `assetPath, force?, sessionId?` |
 | `list_locks` | List all currently-held asset locks with holder session id, acquiredAt, and ttlSecondsRemaining |
+| `unlock_all` | Release every lock held by one session in a single call, returning the number released. Defaults to this server process's session; pass sessionId to clear a different one (for example after a crashed session left assets wedged). Params: `sessionId?` |
+| `diff` | Semantic structural diff between two assets of any type, dispatching on the asset's class. Blueprints are diffed structurally (parent class, variables, functions, components, per-graph node and connection deltas); other asset types report that diffing is not supported yet rather than failing opaquely. Params: `assetPath, otherPath` |
 
 ---
 
@@ -852,6 +854,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | Action | Description |
 |--------|-------------|
 | `step` | Execute demo step. Params: `stepIndex?` |
+| `get_steps` | List every demo step up front: index, id and description, plus a count. Use this to see what the 19 steps build before running any of them. Params: `none` |
 | `cleanup` | Remove demo assets and actors. Switches editor to /Game/MCP_Home before deleting so the editor is never left on an Untitled map |
 | `go_home` | Switch the editor to /Game/MCP_Home (creating it on first use). Use this before any operation that would leave the editor on an Untitled map |
 
@@ -941,7 +944,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 
 ## epic
 
-*Epic's native Unreal 5.8 AI Toolset Registry, wrapped as first-class actions. Every toolset Epic ships (GAS, Niagara, PCG, UMG, StateTree, editor actor/asset/blueprint, sequencer, and more) is discoverable and callable in-process. Requires UE 5.8+ with the ToolsetRegistry plugin enabled - call epic(status) first to check availability.*
+*The Unreal 5.8 AI Toolset Registry itself: discovery (status/list_toolsets/describe_toolset), direct dispatch (call_tool), and the registry's own meta-tooling (agent skills, programmatic tool batching). Toolsets that map to a real editor domain are NOT here - they are injected as epic_* actions on that domain's category (GAS in gas, Sequencer in animation, Dataflow in dataflow, and so on), so reach for the domain tool first and use this one to introspect or call the registry directly. Requires UE 5.8+ with the ToolsetRegistry plugin enabled - call epic(status) first to check availability.*
 
 | Action | Description |
 |--------|-------------|
