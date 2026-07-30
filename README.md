@@ -5,7 +5,7 @@
 [![stars](https://img.shields.io/github/stars/db-lyon/ue-mcp)](https://github.com/db-lyon/ue-mcp/stargazers)
 [![MIT](https://img.shields.io/npm/l/ue-mcp)](LICENSE)
 
-**Unreal Engine Model Context Protocol Server** - gives AI assistants deep read/write access to the Unreal Editor through <!-- count:tools -->24<!-- /count --> category tools covering <!-- count:actions -->744+<!-- /count --> actions, plus a YAML flow engine for multi-step workflows and an npm plugin system for extending the surface.
+**Unreal Engine Model Context Protocol Server** - gives AI assistants deep read/write access to the Unreal Editor through <!-- count:tools -->24<!-- /count --> category tools covering <!-- count:actions -->754+<!-- /count --> actions, plus a YAML flow engine for multi-step workflows and an npm plugin system for extending the surface.
 
 On UE 5.8+ it also wraps Epic's entire native AI Toolset Registry - 830 official Unreal tools, called in-process and surfaced as `epic_*` actions in the matching category: Sequencer in `animation`, PCG in `pcg`, static meshes in `asset`.
 
@@ -90,7 +90,7 @@ Nothing is pre-authored. Every asset in the scene is created by the agent at run
 | **Assets** | CRUD, import meshes/textures/animations, datatables, mesh bounds/collision/nav |
 | **Animation** | Anim blueprints, montages, blendspaces, skeletons |
 | **VFX** | Niagara systems, emitters, modules, renderers, parameters |
-| **Landscape** | Sculpt terrain, paint layers, import heightmaps |
+| **Landscape** | Sculpt terrain, paint weight layers, materials, splines, proxies |
 | **Foliage** | Painting, foliage types, instance queries |
 | **PCG** | Author and execute Procedural Content Generation graphs |
 | **Audio** | SoundCues, MetaSounds, attenuation, ambient audio, submixes |
@@ -137,7 +137,7 @@ flows:
 flow(action="run", flowName="build_and_check")
 ```
 
-Every one of the <!-- count:actions -->744+<!-- /count --> actions is also a flow task. Flows support step references, retries, rollback, custom tasks in your own `.js`/`.ts`, and shell steps. See [Flows](https://ue-mcp.com/docs/flows/).
+Every one of the <!-- count:actions -->754+<!-- /count --> actions is also a flow task. Flows support step references, retries, rollback, custom tasks in your own `.js`/`.ts`, and shell steps. See [Flows](https://ue-mcp.com/docs/flows/).
 
 ## Plugins
 

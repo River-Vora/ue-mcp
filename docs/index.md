@@ -1,6 +1,6 @@
 # UE-MCP
 
-**Unreal Engine Model Context Protocol Server** - lets AI assistants drive the Unreal Editor through <!-- count:tools -->24<!-- /count --> category tools covering <!-- count:actions -->744+<!-- /count --> actions.
+**Unreal Engine Model Context Protocol Server** - lets AI assistants drive the Unreal Editor through <!-- count:tools -->24<!-- /count --> category tools covering <!-- count:actions -->754+<!-- /count --> actions.
 
 UE-MCP is a bridge between an AI client (Claude Code, Claude Desktop, Cursor, etc.) and the Unreal Editor. It runs a TypeScript MCP server on your machine, which talks over WebSocket to a C++ plugin running inside the editor. The result: your AI can place actors, write blueprints, author materials, sculpt landscape, set up Niagara VFX, configure replication, run PIE, build the project — anything the editor can do.
 
@@ -28,7 +28,7 @@ Start with **[Getting Started](getting-started.md)**. It assumes zero knowledge 
 | **Assets** | CRUD, import meshes/textures/animations, datatables |
 | **Animation** | Read/create anim blueprints, montages, blendspaces, skeletons |
 | **VFX** | Create and configure Niagara systems and emitters |
-| **Landscape** | Sculpt terrain, paint layers, import heightmaps |
+| **Landscape** | Sculpt terrain, paint weight layers, materials, splines, proxies |
 | **PCG** | Author and execute Procedural Content Generation graphs |
 | **Foliage** | Painting, types, instance queries |
 | **Audio** | SoundCues, MetaSounds, ambient audio |
