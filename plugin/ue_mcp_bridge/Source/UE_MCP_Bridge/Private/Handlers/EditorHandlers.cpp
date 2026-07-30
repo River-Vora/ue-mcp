@@ -181,6 +181,11 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("save_asset"), &SaveAsset);
 	Registry.RegisterHandler(TEXT("save_dirty"), &SaveDirty);
 	Registry.RegisterHandler(TEXT("list_dirty_packages"), &ListDirtyPackages);
+	Registry.RegisterHandler(TEXT("list_pie_instances"), &ListPIEInstances);
+	Registry.RegisterHandler(TEXT("invoke_object_function"), &InvokeObjectFunction);
+	Registry.RegisterHandler(TEXT("get_object_properties"), &GetObjectProperties);
+	Registry.RegisterHandler(TEXT("sample_bone_transforms"), &SampleBoneTransforms);
+	Registry.RegisterHandler(TEXT("teleport_runtime_actor"), &TeleportRuntimeActor);
 	Registry.RegisterHandler(TEXT("build_lighting"), &BuildLighting);
 	Registry.RegisterHandler(TEXT("build_all"), &BuildAll);
 	Registry.RegisterHandler(TEXT("validate_assets"), &ValidateAssets);
