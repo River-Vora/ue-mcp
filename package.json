@@ -42,7 +42,7 @@
     "type": "git",
     "url": "https://github.com/db-lyon/ue-mcp.git"
   },
-  "homepage": "https://db-lyon.github.io/ue-mcp/",
+  "homepage": "https://ue-mcp.com/docs/",
   "engines": {
     "node": ">=18"
   },
