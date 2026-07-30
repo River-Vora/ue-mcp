@@ -1326,8 +1326,9 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetMessageLog(const TSharedPtr<FJsonObje
 	if (Reachable < TotalErrors + TotalWarnings + TotalInfo)
 	{
 		Result->SetStringField(TEXT("note"), FString::Printf(
-			TEXT("The listing holds %d messages but only %d are readable: GetFilteredMessages sees the current page and honours the Message Log tab's severity checkboxes. The counts above are the real totals."),
-			TotalErrors + TotalWarnings + TotalInfo, Reachable));
+			TEXT("The listing holds %d messages but only %d %s readable: the message bodies come from the current page and honour the Message Log tab's severity checkboxes. The counts above are the real totals."),
+			TotalErrors + TotalWarnings + TotalInfo, Reachable,
+			Reachable == 1 ? TEXT("is") : TEXT("are")));
 	}
 	return MCPResult(Result);
 }

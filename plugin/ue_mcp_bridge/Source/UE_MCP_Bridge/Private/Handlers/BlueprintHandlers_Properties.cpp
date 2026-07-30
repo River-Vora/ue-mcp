@@ -111,9 +111,13 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetVariableProperties(const TSharedPt
 	bool bInstanceEditable = false;
 	const bool bHasInstanceEditable = Params->TryGetBoolField(TEXT("instanceEditable"), bInstanceEditable);
 	const bool bWasEditableAtAll = (FoundVar->PropertyFlags & CPF_Edit) != 0;
-	// GetBoolMetaData, not HasMetaData: the engine's own readers use the value,
-	// so a key present with "false" is NOT private.
-	const bool bWasPrivate = FoundVar->GetMetaData(FBlueprintMetadata::MD_Private).ToBool();
+	// Read the VALUE, not just presence - the engine's own readers use it, so a
+	// key present with "false" is NOT private. GetMetaData asserts outright
+	// when the key is absent (FBPVariableDescription::GetMetaData ->
+	// check(EntryIndex != INDEX_NONE)), so it must stay behind HasMetaData.
+	const bool bWasPrivate =
+		FoundVar->HasMetaData(FBlueprintMetadata::MD_Private) &&
+		FoundVar->GetMetaData(FBlueprintMetadata::MD_Private).ToBool();
 
 	// `instanceEditable` is a boolean over a three-state setting, so it cannot
 	// express (and therefore cannot restore) every state a variable can be in:

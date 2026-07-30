@@ -1745,9 +1745,13 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ListBlueprintVariables(const TSharedP
 		VarObj->SetStringField(TEXT("guid"), Var.VarGuid.ToString());
 
 		// Check metadata
+		// Report the VALUE, matching set_variable_properties and the engine's own
+		// readers: a key present with "false" is not private. Reporting on mere
+		// presence made read -> write -> read disagree with itself.
 		if (Var.HasMetaData(FBlueprintMetadata::MD_Private))
 		{
-			VarObj->SetBoolField(TEXT("private"), true);
+			VarObj->SetBoolField(TEXT("private"),
+				Var.GetMetaData(FBlueprintMetadata::MD_Private).ToBool());
 		}
 		if (Var.HasMetaData(FBlueprintMetadata::MD_FunctionCategory))
 		{
@@ -1767,10 +1771,14 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ListBlueprintVariables(const TSharedP
 		const bool bEditable = (Var.PropertyFlags & CPF_Edit) != 0;
 		const bool bNoInstanceEdit = (Var.PropertyFlags & CPF_DisableEditOnInstance) != 0;
 		const bool bNoTemplateEdit = (Var.PropertyFlags & CPF_DisableEditOnTemplate) != 0;
-		const bool bPrivate = Var.HasMetaData(FBlueprintMetadata::MD_Private);
-
+		// MD_Private is NOT folded in. It is a Blueprint-GRAPH access flag - it
+		// hides the variable from other Blueprints' graphs, not from a placed
+		// instance's details panel - so an EditAnywhere private variable IS
+		// instance editable. Including it here made this reader disagree with
+		// set_variable_properties, which reported a real change as a no-op.
+		// `private` is reported on its own above.
 		VarObj->SetBoolField(TEXT("instanceEditable"),
-			bEditable && !bNoInstanceEdit && !bPrivate);
+			bEditable && !bNoInstanceEdit);
 
 		const TCHAR* EditFlag = TEXT("none");
 		if (bEditable)
@@ -1782,8 +1790,11 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ListBlueprintVariables(const TSharedP
 		VarObj->SetStringField(TEXT("editFlag"), EditFlag);
 		VarObj->SetBoolField(TEXT("blueprintReadOnly"), (Var.PropertyFlags & CPF_BlueprintReadOnly) != 0);
 
+		// Effective state, not key presence: the key can exist with "false".
 		VarObj->SetBoolField(TEXT("exposeOnSpawn"),
-			Var.HasMetaData(FBlueprintMetadata::MD_ExposeOnSpawn) || (Var.PropertyFlags & CPF_ExposeOnSpawn) != 0);
+			(Var.PropertyFlags & CPF_ExposeOnSpawn) != 0 ||
+			(Var.HasMetaData(FBlueprintMetadata::MD_ExposeOnSpawn) &&
+			 Var.GetMetaData(FBlueprintMetadata::MD_ExposeOnSpawn).ToBool()));
 
 		Variables.Add(MakeShared<FJsonValueObject>(VarObj));
 	}
