@@ -278,6 +278,7 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("move_folder"), &MoveFolder);
 	Registry.RegisterHandler(TEXT("create_folder"), &CreateFolder);
 	Registry.RegisterHandler(TEXT("delete_folder"), &DeleteFolder);
+	Registry.RegisterHandler(TEXT("migrate"), &MigrateAssets);
 
 	// #686 — UserDefinedEnum authoring
 	Registry.RegisterHandler(TEXT("create_user_defined_enum"), &CreateUserDefinedEnum);
@@ -3212,5 +3213,162 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateInterchangePipeline(const TSharedPt
 	Result->SetNumberField(TEXT("overridesApplied"), OverridesApplied);
 	if (OverrideFailures.Num() > 0) Result->SetArrayField(TEXT("overrideFailures"), OverrideFailures);
 	MCPSetDeleteAssetRollback(Result, NewAsset->GetPathName());
+	return MCPResult(Result);
+}
+
+
+// #760: copy assets and their dependencies into ANOTHER project's Content
+// directory - the scripted form of the content browser's Migrate.
+//
+// This is the half of cross-project work the bridge can actually do. The
+// bridge attaches to one editor, so it cannot drive two projects at once; what
+// it can do is push assets out of the project it is attached to. Combined with
+// project(set_project) + editor(restart_editor), that makes the full round trip
+// reachable: attach to the reference project, batch_retarget_animations there,
+// migrate the results into the game project, switch back.
+//
+// Params:
+//   assetPaths (string[]) OR assetPath, destinationContentDir (the TARGET
+//   project's Content folder), includeDependencies? (default true),
+//   onConflict? ("skip" default | "overwrite"), dryRun? (default false)
+TSharedPtr<FJsonValue> FAssetHandlers::MigrateAssets(const TSharedPtr<FJsonObject>& Params)
+{
+	TArray<FString> AssetPaths;
+	const TArray<TSharedPtr<FJsonValue>>* PathArray = nullptr;
+	if (Params->TryGetArrayField(TEXT("assetPaths"), PathArray) && PathArray)
+	{
+		for (const TSharedPtr<FJsonValue>& V : *PathArray)
+		{
+			FString P;
+			if (V.IsValid() && V->TryGetString(P) && !P.IsEmpty()) AssetPaths.Add(P);
+		}
+	}
+	FString Single;
+	if (Params->TryGetStringField(TEXT("assetPath"), Single) && !Single.IsEmpty())
+	{
+		AssetPaths.AddUnique(Single);
+	}
+	if (AssetPaths.Num() == 0)
+	{
+		return MCPError(TEXT("Provide assetPaths (string[]) or assetPath."));
+	}
+
+	FString DestContentDir;
+	if (auto Err = RequireString(Params, TEXT("destinationContentDir"), DestContentDir)) return Err;
+	FPaths::NormalizeDirectoryName(DestContentDir);
+	if (!FPaths::DirectoryExists(DestContentDir))
+	{
+		return MCPError(FString::Printf(
+			TEXT("destinationContentDir does not exist: %s. Point it at the TARGET project's Content folder (e.g. D:/Games/MyGame/Content)."),
+			*DestContentDir));
+	}
+	// Migrating into our own Content folder would be a no-op that still reports
+	// success, and is almost always a wrong path rather than an intent.
+	FString OwnContent = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir());
+	FString DestFull = FPaths::ConvertRelativePathToFull(DestContentDir);
+	// Normalise both sides: the caller's path arrives with forward slashes and
+	// no trailing separator, ProjectContentDir has the platform form and a
+	// trailing one, so a raw compare let the no-op case through.
+	FPaths::NormalizeDirectoryName(OwnContent);
+	FPaths::NormalizeDirectoryName(DestFull);
+	if (DestFull.Equals(OwnContent, ESearchCase::IgnoreCase))
+	{
+		return MCPError(TEXT("destinationContentDir is this project's own Content folder; migrate targets a DIFFERENT project."));
+	}
+
+	// Resolve every asset before migrating any: a half-done migration with an
+	// error at the end is worse than a clean refusal.
+	const bool bAllowDirty = OptionalBool(Params, TEXT("allowDirty"), false);
+	TArray<FName> PackageNames;
+	TArray<TSharedPtr<FJsonValue>> Resolved;
+	for (const FString& Path : AssetPaths)
+	{
+		UObject* Asset = UEditorAssetLibrary::LoadAsset(Path);
+		if (!Asset)
+		{
+			return MCPError(FString::Printf(TEXT("Asset not found: %s"), *Path));
+		}
+		UPackage* Package = Asset->GetOutermost();
+		const FName PackageName(*Package->GetName());
+
+		// MigratePackages copies files off disk. A package that has never been
+		// saved, or has unsaved edits, migrates its LAST SAVED state or nothing
+		// at all - and reports neither. Refuse instead.
+		FString PackageFile;
+		const bool bOnDisk = FPackageName::DoesPackageExist(PackageName.ToString(), &PackageFile);
+		if (!bOnDisk)
+		{
+			return MCPError(FString::Printf(
+				TEXT("'%s' has never been saved to disk, so there is no file to migrate. Save it first (asset(save)) - migrate copies files, it does not serialise in-memory state."),
+				*Path));
+		}
+		if (Package->IsDirty() && !bAllowDirty)
+		{
+			return MCPError(FString::Printf(
+				TEXT("'%s' has unsaved changes. Migrating now would copy the last SAVED state and silently omit your edits. Save it first (asset(save)), or pass allowDirty=true to migrate the on-disk version deliberately."),
+				*Path));
+		}
+
+		PackageNames.AddUnique(PackageName);
+		TSharedPtr<FJsonObject> R = MakeShared<FJsonObject>();
+		R->SetStringField(TEXT("assetPath"), Asset->GetPathName());
+		R->SetStringField(TEXT("package"), PackageName.ToString());
+		Resolved.Add(MakeShared<FJsonValueObject>(R));
+	}
+
+	const bool bIncludeDeps = OptionalBool(Params, TEXT("includeDependencies"), true);
+	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
+	if (!OnConflict.Equals(TEXT("skip"), ESearchCase::IgnoreCase) &&
+		!OnConflict.Equals(TEXT("overwrite"), ESearchCase::IgnoreCase))
+	{
+		return MCPError(TEXT("onConflict must be 'skip' or 'overwrite'."));
+	}
+	const bool bDryRun = OptionalBool(Params, TEXT("dryRun"), false);
+
+	auto Result = MCPSuccess();
+	Result->SetArrayField(TEXT("assets"), Resolved);
+	Result->SetNumberField(TEXT("packageCount"), PackageNames.Num());
+	Result->SetStringField(TEXT("destinationContentDir"), DestContentDir);
+	Result->SetBoolField(TEXT("includeDependencies"), bIncludeDeps);
+	Result->SetStringField(TEXT("onConflict"), OnConflict);
+
+	if (bDryRun)
+	{
+		Result->SetBoolField(TEXT("dryRun"), true);
+		Result->SetStringField(TEXT("note"), TEXT("Dry run - nothing was copied. Re-run without dryRun to migrate."));
+		return MCPResult(Result);
+	}
+
+	FMigrationOptions Options;
+	// bPrompt is documented as always false through scripting; setting it would
+	// block the bridge on a modal dialog with nobody to answer it.
+	Options.bPrompt = false;
+	Options.bIgnoreDependencies = !bIncludeDeps;
+	Options.AssetConflict = OnConflict.Equals(TEXT("overwrite"), ESearchCase::IgnoreCase)
+		? EAssetMigrationConflict::Overwrite
+		: EAssetMigrationConflict::Skip;
+
+	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
+	AssetToolsModule.Get().MigratePackages(PackageNames, DestContentDir, Options);
+
+	// MigratePackages returns void and reports through the message log, so the
+	// only honest confirmation is to look for the files afterwards rather than
+	// claim success on the call returning.
+	int32 Present = 0;
+	TArray<TSharedPtr<FJsonValue>> Missing;
+	for (const FName& Pkg : PackageNames)
+	{
+		FString Rel = Pkg.ToString();
+		if (Rel.StartsWith(TEXT("/Game/"))) Rel = Rel.RightChop(6);
+		const FString Candidate = DestContentDir / Rel + TEXT(".uasset");
+		if (FPaths::FileExists(Candidate)) ++Present;
+		else Missing.Add(MakeShared<FJsonValueString>(Pkg.ToString()));
+	}
+	Result->SetNumberField(TEXT("packagesPresentAtDestination"), Present);
+	if (Missing.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("packagesNotFoundAtDestination"), Missing);
+		Result->SetStringField(TEXT("note"), TEXT("Some packages were not found at the destination afterwards. With onConflict=skip that is expected when they already existed; otherwise check the Message Log (editor(get_message_log, logName='AssetTools')) for what the migration reported."));
+	}
 	return MCPResult(Result);
 }
