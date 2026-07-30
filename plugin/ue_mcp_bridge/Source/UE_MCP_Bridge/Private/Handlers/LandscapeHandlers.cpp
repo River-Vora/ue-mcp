@@ -42,6 +42,8 @@ void FLandscapeHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// #733: World Partition landscape streaming-proxy enumeration + spatial lookup.
 	Registry.RegisterHandler(TEXT("list_landscape_proxies"), &ListLandscapeProxies);
 	Registry.RegisterHandler(TEXT("find_landscape_proxy_at"), &FindLandscapeProxyAt);
+	Registry.RegisterHandlerWithTimeout(TEXT("sculpt_landscape"), &Sculpt, 120.0f);
+	Registry.RegisterHandlerWithTimeout(TEXT("paint_landscape_layer"), &PaintLayer, 120.0f);
 }
 
 TSharedPtr<FJsonValue> FLandscapeHandlers::GetLandscapeInfo(const TSharedPtr<FJsonObject>& Params)

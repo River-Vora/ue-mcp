@@ -4,11 +4,13 @@ import { Vec3 } from "../schemas.js";
 
 export const landscapeTool: ToolDef = categoryTool(
   "landscape",
-  "Landscape terrain: info, layers, sculpting, painting, materials, heightmap import.",
+  "Landscape terrain: info, layers, sculpting, weight painting, materials, splines, proxies.",
   {
     get_info:          bp("Get landscape setup", "get_landscape_info"),
     list_layers:       bp("List paint layers", "list_landscape_layers"),
     sample:            bp("Sample height/layers. Params: x, y", "sample_landscape"),
+    sculpt:            bp("Raise, lower or flatten terrain with a circular brush. mode=raise|lower|flatten; amount is world centimetres at full strength (raise/lower), and flatten pulls toward the height under the brush centre. falloff (0..1) is the smoothstepped soft edge. Runs in one transaction and leaves the level dirty and unsaved. Params: center ({x,y} world space), radius (default 500), mode? (default raise), amount? (default 100), falloff? (default 0.5), actorLabel? (#742)", "sculpt_landscape", (p) => ({ center: p.center, radius: p.radius, mode: p.mode, amount: p.amount, falloff: p.falloff, actorLabel: p.actorLabel })),
+    paint_layer:       bp("Paint a weight layer with a circular brush. The layer must already have a LayerInfo on this landscape (see add_layer_info) - an unregistered name errors and lists the layers that ARE registered instead of silently painting nothing. Other layers are renormalised so weights still sum to 1. Params: layerName, center ({x,y} world space), radius (default 500), strength? (0..1, default 1), falloff? (default 0.5), actorLabel? (#742)", "paint_landscape_layer", (p) => ({ layerName: p.layerName, center: p.center, radius: p.radius, strength: p.strength, falloff: p.falloff, actorLabel: p.actorLabel })),
     list_splines:      bp("Read landscape splines", "list_landscape_splines"),
     get_component:     bp("Inspect component. Params: componentIndex", "get_landscape_component"),
     set_material:      bp("Set landscape material. Params: materialPath", "set_landscape_material"),
@@ -25,6 +27,10 @@ export const landscapeTool: ToolDef = categoryTool(
     worldX: z.number().optional().describe("find_proxy_at: world-space X (#733)"),
     worldY: z.number().optional().describe("find_proxy_at: world-space Y (#733)"),
     radius: z.number().optional(), strength: z.number().optional(),
+    center: z.record(z.number()).optional().describe("sculpt/paint_layer: brush centre {x, y} in world space (#742)"),
+    mode: z.string().optional().describe("sculpt: raise | lower | flatten (#742)"),
+    amount: z.number().optional().describe("sculpt: world centimetres to move at full brush strength (#742)"),
+    actorLabel: z.string().optional().describe("sculpt/paint_layer: which Landscape actor, when the level has more than one (#742)"),
     falloff: z.number().optional(),
     layerName: z.string().optional(),
     materialPath: z.string().optional(),
