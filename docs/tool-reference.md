@@ -728,7 +728,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `is_class_loaded` | Report whether a UClass is currently loaded in the editor (loaded), whether it exists/is loadable (exists), and its owning module + that module's load state. Distinguishes 'not loaded yet' from 'does not exist'. Params: `className (short name, /Script/<Module>.<Class>, or BP class path) (#689)` |
 | `is_module_loaded` | Report whether a named module is currently loaded. Params: `moduleName (#689)` |
 | `list_loaded_modules` | Enumerate modules with runtime load state. Params: `filter? (case-insensitive substring), loadedOnly? (default false)` |
-| `inspect_save_game` | Load a SaveGame slot read-only and return its reflected `UPROPERTY(SaveGame)` values. Params: `slotName, userIndex? (default 0)` |
+| `inspect_save_game` | Load a SaveGame slot read-only and return its reflected `UPROPERTY(SaveGame)` values. Non-serializable properties are reported in `skippedProperties` instead of failing the call. Params: `slotName, userIndex? (default 0)` |
 
 ---
 

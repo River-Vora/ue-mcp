@@ -173,6 +173,7 @@ TSharedPtr<FJsonValue> FReflectionHandlers::InspectSaveGame(const TSharedPtr<FJs
 	}
 
 	TSharedPtr<FJsonObject> Properties = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> Skipped;
 	int32 PropertyCount = 0;
 	for (TFieldIterator<FProperty> It(SaveGame->GetClass(), EFieldIteratorFlags::IncludeSuper); It; ++It)
 	{
@@ -186,11 +187,17 @@ TSharedPtr<FJsonValue> FReflectionHandlers::InspectSaveGame(const TSharedPtr<FJs
 		const void* Value = Property->ContainerPtrToValuePtr<void>(SaveGame);
 		TSharedPtr<FJsonValue> JsonValue = FJsonObjectConverter::UPropertyToJsonValue(
 			Property, Value, 0, CPF_Transient | CPF_DuplicateTransient);
+		// A property type the JSON converter cannot express (delegates, some
+		// container key types) must not abort the whole inspection. Report it
+		// and keep going so the caller still sees every readable value.
 		if (!JsonValue.IsValid())
 		{
-			return MCPError(FString::Printf(
-				TEXT("Failed to serialize SaveGame property '%s' on class '%s'"),
-				*Property->GetName(), *SaveGame->GetClass()->GetPathName()));
+			TSharedPtr<FJsonObject> SkipEntry = MakeShared<FJsonObject>();
+			SkipEntry->SetStringField(TEXT("name"), Property->GetName());
+			SkipEntry->SetStringField(TEXT("type"), Property->GetClass()->GetName());
+			SkipEntry->SetStringField(TEXT("reason"), TEXT("Property type is not JSON-serializable"));
+			Skipped.Add(MakeShared<FJsonValueObject>(SkipEntry));
+			continue;
 		}
 
 		Properties->SetField(Property->GetName(), JsonValue);
@@ -203,6 +210,8 @@ TSharedPtr<FJsonValue> FReflectionHandlers::InspectSaveGame(const TSharedPtr<FJs
 	Result->SetStringField(TEXT("className"), SaveGame->GetClass()->GetName());
 	Result->SetStringField(TEXT("classPath"), SaveGame->GetClass()->GetPathName());
 	Result->SetNumberField(TEXT("propertyCount"), PropertyCount);
+	Result->SetNumberField(TEXT("skippedCount"), Skipped.Num());
+	Result->SetArrayField(TEXT("skippedProperties"), Skipped);
 	Result->SetObjectField(TEXT("properties"), Properties);
 	return MCPResult(Result);
 }
