@@ -42,6 +42,10 @@
 #include "GameFramework/Actor.h"
 #include "Components/PrimitiveComponent.h"
 #include "NavModifierVolume.h"
+#include "Perception/AIPerceptionComponent.h"
+#include "Perception/AISenseConfig.h"
+#include "NavAreas/NavArea.h"
+#include "Builders/CubeBuilder.h"
 #include "GameFramework/WorldSettings.h"
 #include "UObject/UnrealType.h"
 #include "BehaviorTree/BlackboardData.h"
@@ -928,6 +932,41 @@ TSharedPtr<FJsonValue> FGameplayHandlers::GetStateTreeRuntime(const TSharedPtr<F
 	return MCPResult(Result);
 }
 
+// Resolve an optional caller-supplied parentClass, requiring it to derive from
+// the framework base the action is for. Returning the engine default silently
+// when the caller named a class is how you end up debugging a Blueprint that
+// simply is not the thing you asked for.
+static bool ResolveFrameworkParent(const TSharedPtr<FJsonObject>& Params, const FString& DefaultPath,
+	const TCHAR* FriendlyTypeName, FString& OutPath, TSharedPtr<FJsonValue>& OutError)
+{
+	OutPath = DefaultPath;
+	const FString Requested = OptionalString(Params, TEXT("parentClass"));
+	if (Requested.IsEmpty()) return true;
+
+	UClass* Base = FindObject<UClass>(nullptr, *DefaultPath);
+	UClass* Resolved = LoadObject<UClass>(nullptr, *Requested);
+	if (!Resolved) Resolved = FindClassByShortName(Requested);
+	if (!Resolved)
+	{
+		// A Blueprint path names the asset; the class is that path + "_C".
+		Resolved = LoadObject<UClass>(nullptr, *(Requested + TEXT("_C")));
+	}
+	if (!Resolved)
+	{
+		OutError = MCPError(FString::Printf(TEXT("parentClass not found: %s"), *Requested));
+		return false;
+	}
+	if (Base && !Resolved->IsChildOf(Base))
+	{
+		OutError = MCPError(FString::Printf(
+			TEXT("parentClass '%s' does not derive from %s, so it cannot be used as a %s."),
+			*Resolved->GetPathName(), *Base->GetName(), FriendlyTypeName));
+		return false;
+	}
+	OutPath = Resolved->GetPathName();
+	return true;
+}
+
 TSharedPtr<FJsonValue> FGameplayHandlers::CreateBlueprintWithParent(const FString& Name, const FString& PackagePath, const FString& ParentClassPath, const FString& FriendlyTypeName)
 {
 	UClass* ParentClass = FindObject<UClass>(nullptr, *ParentClassPath);
@@ -970,7 +1009,11 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreateGameMode(const TSharedPtr<FJsonO
 
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/Blueprints/GameFramework"));
 
-	return CreateBlueprintWithParent(Name, PackagePath, TEXT("/Script/Engine.GameModeBase"), TEXT("GameMode"));
+	FString ParentPath;
+	TSharedPtr<FJsonValue> ParentErr;
+	if (!ResolveFrameworkParent(Params, TEXT("/Script/Engine.GameModeBase"), TEXT("GameMode"), ParentPath, ParentErr)) return ParentErr;
+
+	return CreateBlueprintWithParent(Name, PackagePath, ParentPath, TEXT("GameMode"));
 }
 
 TSharedPtr<FJsonValue> FGameplayHandlers::CreateGameState(const TSharedPtr<FJsonObject>& Params)
@@ -980,7 +1023,11 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreateGameState(const TSharedPtr<FJson
 
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/Blueprints/GameFramework"));
 
-	return CreateBlueprintWithParent(Name, PackagePath, TEXT("/Script/Engine.GameStateBase"), TEXT("GameState"));
+	FString ParentPath;
+	TSharedPtr<FJsonValue> ParentErr;
+	if (!ResolveFrameworkParent(Params, TEXT("/Script/Engine.GameStateBase"), TEXT("GameState"), ParentPath, ParentErr)) return ParentErr;
+
+	return CreateBlueprintWithParent(Name, PackagePath, ParentPath, TEXT("GameState"));
 }
 
 TSharedPtr<FJsonValue> FGameplayHandlers::CreatePlayerController(const TSharedPtr<FJsonObject>& Params)
@@ -990,7 +1037,11 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreatePlayerController(const TSharedPt
 
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/Blueprints/GameFramework"));
 
-	return CreateBlueprintWithParent(Name, PackagePath, TEXT("/Script/Engine.PlayerController"), TEXT("PlayerController"));
+	FString ParentPath;
+	TSharedPtr<FJsonValue> ParentErr;
+	if (!ResolveFrameworkParent(Params, TEXT("/Script/Engine.PlayerController"), TEXT("PlayerController"), ParentPath, ParentErr)) return ParentErr;
+
+	return CreateBlueprintWithParent(Name, PackagePath, ParentPath, TEXT("PlayerController"));
 }
 
 TSharedPtr<FJsonValue> FGameplayHandlers::CreatePlayerState(const TSharedPtr<FJsonObject>& Params)
@@ -1000,7 +1051,11 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreatePlayerState(const TSharedPtr<FJs
 
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/Blueprints/GameFramework"));
 
-	return CreateBlueprintWithParent(Name, PackagePath, TEXT("/Script/Engine.PlayerState"), TEXT("PlayerState"));
+	FString ParentPath;
+	TSharedPtr<FJsonValue> ParentErr;
+	if (!ResolveFrameworkParent(Params, TEXT("/Script/Engine.PlayerState"), TEXT("PlayerState"), ParentPath, ParentErr)) return ParentErr;
+
+	return CreateBlueprintWithParent(Name, PackagePath, ParentPath, TEXT("PlayerState"));
 }
 
 TSharedPtr<FJsonValue> FGameplayHandlers::CreateHud(const TSharedPtr<FJsonObject>& Params)
@@ -1010,7 +1065,11 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreateHud(const TSharedPtr<FJsonObject
 
 	FString PackagePath = OptionalString(Params, TEXT("packagePath"), TEXT("/Game/Blueprints/GameFramework"));
 
-	return CreateBlueprintWithParent(Name, PackagePath, TEXT("/Script/Engine.HUD"), TEXT("HUD"));
+	FString ParentPath;
+	TSharedPtr<FJsonValue> ParentErr;
+	if (!ResolveFrameworkParent(Params, TEXT("/Script/Engine.HUD"), TEXT("HUD"), ParentPath, ParentErr)) return ParentErr;
+
+	return CreateBlueprintWithParent(Name, PackagePath, ParentPath, TEXT("HUD"));
 }
 
 TSharedPtr<FJsonValue> FGameplayHandlers::SpawnNavModifierVolume(const TSharedPtr<FJsonObject>& Params)
@@ -1043,12 +1102,52 @@ TSharedPtr<FJsonValue> FGameplayHandlers::SpawnNavModifierVolume(const TSharedPt
 		NewVolume->SetActorLabel(Label);
 	}
 
+	// areaClass and extent were documented and accepted but never applied. A
+	// NavModifierVolume with the default area class modifies nothing, so the
+	// call reported created: true having produced an inert actor - the whole
+	// point of spawning one is the area class.
+	FString AreaClassPath = OptionalString(Params, TEXT("areaClass"));
+	if (!AreaClassPath.IsEmpty())
+	{
+		UClass* AreaClass = FindClassByShortName(AreaClassPath);
+		if (!AreaClass) AreaClass = LoadObject<UClass>(nullptr, *AreaClassPath);
+		if (!AreaClass || !AreaClass->IsChildOf(UNavArea::StaticClass()))
+		{
+			World->DestroyActor(NewVolume);
+			return MCPError(FString::Printf(
+				TEXT("areaClass '%s' is not a UNavArea subclass (try NavArea_Null, NavArea_Obstacle, or a /Script/... path)."),
+				*AreaClassPath));
+		}
+		NewVolume->SetAreaClass(AreaClass);
+	}
+
+	// extent is a half-size in world units; the brush is a box built around the
+	// actor origin. Applied after spawn so it composes with scale.
+	if (Params->HasField(TEXT("extent")))
+	{
+		const FVector Extent = OptionalVec3(Params, TEXT("extent"), FVector(100.f, 100.f, 100.f));
+		if (Extent.X <= 0.f || Extent.Y <= 0.f || Extent.Z <= 0.f)
+		{
+			World->DestroyActor(NewVolume);
+			return MCPError(TEXT("extent must be positive on every axis (it is a half-size, not a corner)."));
+		}
+		UCubeBuilder* Builder = NewObject<UCubeBuilder>();
+		Builder->X = Extent.X * 2.f;
+		Builder->Y = Extent.Y * 2.f;
+		Builder->Z = Extent.Z * 2.f;
+		NewVolume->PreEditChange(nullptr);
+		Builder->Build(World, NewVolume);
+		NewVolume->PostEditChange();
+	}
+
 	const FString FinalLabel = NewVolume->GetActorLabel();
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
 	Result->SetStringField(TEXT("actorLabel"), FinalLabel);
 	Result->SetStringField(TEXT("actorName"), NewVolume->GetName());
+	Result->SetStringField(TEXT("areaClass"), NewVolume->GetAreaClass()
+		? NewVolume->GetAreaClass()->GetName() : TEXT("(default)"));
 
 	TSharedPtr<FJsonObject> LocationResult = MakeShared<FJsonObject>();
 	FVector ActorLocation = NewVolume->GetActorLocation();
@@ -1239,6 +1338,27 @@ TSharedPtr<FJsonValue> FGameplayHandlers::SetWorldGameMode(const TSharedPtr<FJso
 	return MCPResult(Result);
 }
 
+// Resolve an optional `baseClass` for an Object/Class blackboard key. Leaving
+// it at UObject is legal but useless: the BT nodes that consume the key filter
+// on this, so an untyped key silently will not bind.
+static TSharedPtr<FJsonValue> ResolveBlackboardBaseClass(const TSharedPtr<FJsonObject>& Params,
+	UClass* DefaultClass, TObjectPtr<UClass>& OutClass)
+{
+	OutClass = DefaultClass;
+	const FString Requested = OptionalString(Params, TEXT("baseClass"));
+	if (Requested.IsEmpty()) return nullptr;
+
+	UClass* Resolved = LoadObject<UClass>(nullptr, *Requested);
+	if (!Resolved) Resolved = FindClassByShortName(Requested);
+	if (!Resolved) Resolved = LoadObject<UClass>(nullptr, *(Requested + TEXT("_C")));
+	if (!Resolved)
+	{
+		return MCPError(FString::Printf(TEXT("baseClass not found: %s"), *Requested));
+	}
+	OutClass = Resolved;
+	return nullptr;
+}
+
 TSharedPtr<FJsonValue> FGameplayHandlers::AddBlackboardKey(const TSharedPtr<FJsonObject>& Params)
 {
 	FString BlackboardPath;
@@ -1293,15 +1413,46 @@ TSharedPtr<FJsonValue> FGameplayHandlers::AddBlackboardKey(const TSharedPtr<FJso
 	}
 	else if (KeyType == TEXT("Object"))
 	{
-		KeyTypeInstance = NewObject<UBlackboardKeyType_Object>(BlackboardAsset);
+		// baseClass was accepted and ignored, so Object/Class keys were created
+		// untyped (BaseClass = UObject). A Behaviour Tree node that expects a
+		// specific class then refuses to bind to the key, with nothing in the
+		// creation response hinting why.
+		UBlackboardKeyType_Object* ObjKey = NewObject<UBlackboardKeyType_Object>(BlackboardAsset);
+		if (auto Err = ResolveBlackboardBaseClass(Params, UObject::StaticClass(), ObjKey->BaseClass)) return Err;
+		KeyTypeInstance = ObjKey;
 	}
 	else if (KeyType == TEXT("Class"))
 	{
-		KeyTypeInstance = NewObject<UBlackboardKeyType_Class>(BlackboardAsset);
+		UBlackboardKeyType_Class* ClassKey = NewObject<UBlackboardKeyType_Class>(BlackboardAsset);
+		if (auto Err = ResolveBlackboardBaseClass(Params, UObject::StaticClass(), ClassKey->BaseClass)) return Err;
+		KeyTypeInstance = ClassKey;
 	}
 	else if (KeyType == TEXT("Enum"))
 	{
-		KeyTypeInstance = NewObject<UBlackboardKeyType_Enum>(BlackboardAsset);
+		UBlackboardKeyType_Enum* EnumKey = NewObject<UBlackboardKeyType_Enum>(BlackboardAsset);
+		const FString EnumName = OptionalString(Params, TEXT("enumType"), OptionalString(Params, TEXT("baseClass")));
+		if (!EnumName.IsEmpty())
+		{
+			UEnum* Enum = LoadObject<UEnum>(nullptr, *EnumName);
+			if (!Enum && !EnumName.Contains(TEXT(".")))
+			{
+				Enum = FindObject<UEnum>(nullptr, *(FString(TEXT("/Script/Engine.")) + EnumName));
+			}
+			if (!Enum)
+			{
+				for (TObjectIterator<UEnum> It; It; ++It)
+				{
+					if (It->GetName() == EnumName) { Enum = *It; break; }
+				}
+			}
+			if (!Enum)
+			{
+				return MCPError(FString::Printf(TEXT("Enum not found for blackboard key: %s"), *EnumName));
+			}
+			EnumKey->EnumType = Enum;
+			EnumKey->EnumName = Enum->GetName();
+		}
+		KeyTypeInstance = EnumKey;
 	}
 	else if (KeyType == TEXT("Vector"))
 	{
@@ -1332,6 +1483,14 @@ TSharedPtr<FJsonValue> FGameplayHandlers::AddBlackboardKey(const TSharedPtr<FJso
 	Result->SetStringField(TEXT("blackboardPath"), BlackboardPath);
 	Result->SetStringField(TEXT("keyName"), KeyName);
 	Result->SetStringField(TEXT("keyType"), KeyType);
+	if (UBlackboardKeyType_Object* AsObj = Cast<UBlackboardKeyType_Object>(KeyTypeInstance))
+	{
+		Result->SetStringField(TEXT("baseClass"), AsObj->BaseClass ? AsObj->BaseClass->GetPathName() : TEXT("Object"));
+	}
+	else if (UBlackboardKeyType_Class* AsCls = Cast<UBlackboardKeyType_Class>(KeyTypeInstance))
+	{
+		Result->SetStringField(TEXT("baseClass"), AsCls->BaseClass ? AsCls->BaseClass->GetPathName() : TEXT("Object"));
+	}
 	Result->SetNumberField(TEXT("totalKeys"), BlackboardAsset->Keys.Num());
 	// #469: rollback via remove_blackboard_key.
 	TSharedPtr<FJsonObject> RollPayload = MakeShared<FJsonObject>();
@@ -1700,18 +1859,56 @@ TSharedPtr<FJsonValue> FGameplayHandlers::AddPerceptionComponent(const TSharedPt
 	}
 
 	USCS_Node* NewNode = BP->SimpleConstructionScript->CreateNode(CompClass, TEXT("AIPerceptionComp"));
-	if (NewNode)
+	if (!NewNode)
 	{
-		BP->SimpleConstructionScript->AddNode(NewNode);
-		FKismetEditorUtilities::CompileBlueprint(BP);
-
-		SaveAssetPackage(BP);
+		return MCPError(TEXT("Failed to create the AIPerceptionComponent SCS node."));
 	}
+	BP->SimpleConstructionScript->AddNode(NewNode);
+
+	// `senses` was accepted and ignored. A perception component with no sense
+	// configs perceives nothing, so the call reported created: true having
+	// produced a component that cannot do the only thing it exists for.
+	TArray<TSharedPtr<FJsonValue>> ConfiguredSenses;
+	const TArray<TSharedPtr<FJsonValue>>* SenseArray = nullptr;
+	if (Params->TryGetArrayField(TEXT("senses"), SenseArray) && SenseArray)
+	{
+		UAIPerceptionComponent* Template = Cast<UAIPerceptionComponent>(NewNode->ComponentTemplate);
+		if (!Template)
+		{
+			return MCPError(TEXT("AIPerceptionComponent template unavailable on the new SCS node."));
+		}
+		for (const TSharedPtr<FJsonValue>& Entry : *SenseArray)
+		{
+			if (!Entry.IsValid()) continue;
+			FString SenseName;
+			if (!Entry->TryGetString(SenseName)) continue;
+			SenseName.TrimStartAndEndInline();
+			if (SenseName.IsEmpty()) continue;
+
+			// Accept "Sight", "AISenseConfig_Sight", or a full class path.
+			UClass* ConfigClass = LoadObject<UClass>(nullptr, *SenseName);
+			if (!ConfigClass) ConfigClass = FindClassByShortName(SenseName);
+			if (!ConfigClass) ConfigClass = FindClassByShortName(TEXT("AISenseConfig_") + SenseName);
+			if (!ConfigClass || !ConfigClass->IsChildOf(UAISenseConfig::StaticClass()))
+			{
+				return MCPError(FString::Printf(
+					TEXT("Unknown sense '%s'. Expected a UAISenseConfig subclass - e.g. Sight, Hearing, Damage, Touch, Team, Prediction."),
+					*SenseName));
+			}
+			UAISenseConfig* Config = NewObject<UAISenseConfig>(Template, ConfigClass);
+			Template->ConfigureSense(*Config);
+			ConfiguredSenses.Add(MakeShared<FJsonValueString>(ConfigClass->GetName()));
+		}
+	}
+
+	FKismetEditorUtilities::CompileBlueprint(BP);
+	SaveAssetPackage(BP);
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
 	Result->SetStringField(TEXT("blueprintPath"), BPPath);
 	Result->SetStringField(TEXT("component"), TEXT("AIPerceptionComp"));
+	Result->SetArrayField(TEXT("senses"), ConfiguredSenses);
 
 	// Rollback: remove_component
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();

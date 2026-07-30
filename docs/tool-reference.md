@@ -765,7 +765,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `list_nav_invokers` | Enumerate actors carrying a NavigationInvokerComponent + their tile generation/removal radii. Diagnoses 'no navmesh in this region' caused by missing or mis-sized invokers (#424) |
 | `get_navmesh_info` | Query nav system |
 | `project_to_nav` | Project point to navmesh. Params: `location, extent?` |
-| `spawn_nav_modifier` | Place nav modifier. Params: `location, extent?, areaClass?` |
+| `spawn_nav_modifier` | Place a NavModifierVolume. areaClass is what makes the volume do anything (NavArea_Null to cut a hole, NavArea_Obstacle to make it costly, or any UNavArea subclass); without it the volume is inert. extent is a HALF-size in world units and rebuilds the brush. Params: `location, extent?, areaClass?, label?, scale?, onConflict?` |
 | `create_input_action` | Create InputAction. Params: `name, packagePath?, valueType?` |
 | `create_input_mapping` | Create InputMappingContext. Params: `name, packagePath?` |
 | `list_input_assets` | List input assets. Params: `directory?, recursive?` |
@@ -781,7 +781,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `get_behavior_tree_info` | Inspect behavior tree (top-level + blackboard). Params: `assetPath` |
 | `read_behavior_tree_graph` | Walk BT tree: composites, tasks, decorators, services with blackboard keys. Params: `assetPath` |
 | `create_blackboard` | Create Blackboard. Params: `name, packagePath?` |
-| `add_blackboard_key` | Add a typed key to a Blackboard asset. Params: `blackboardPath, keyName, keyType (Bool\|Int\|Float\|String\|Name\|Vector\|Rotator\|Object\|Class\|Enum), baseClass? (for Object/Class types; e.g. /Script/Engine.Actor) (#250)` |
+| `add_blackboard_key` | Add a typed key to a Blackboard asset. baseClass types an Object/Class key - Behaviour Tree nodes filter on it, so an untyped key silently will not bind. For keyType=Enum pass the enum via enumType (or baseClass). Params: `blackboardPath, keyName, keyType (Bool\|Int\|Float\|String\|Name\|Vector\|Rotator\|Object\|Class\|Enum), baseClass? (e.g. /Script/Engine.Actor), enumType? (#250)` |
 | `remove_blackboard_key` | Remove a key from a Blackboard asset by name. Idempotent. Params: `blackboardPath, keyName (#469)` |
 | `set_blackboard_parent` | Set Parent on a BlackboardData asset (canonical UE child-of-parent pattern). Pass parentPath="None" or omit to clear. autoPruneDuplicateKeys (default true) removes own-keys that the parent chain already defines so the BT compiler accepts the child (#469) |
 | `read_blackboard` | Read a Blackboard asset: parent path, ownKeys, inheritedKeys (walks the parent chain). Params: `blackboardPath (#469)` |
@@ -790,7 +790,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `create_behavior_tree` | Create behavior tree. Params: `name, packagePath?, blackboardPath?` |
 | `create_eqs_query` | Create EQS query. Params: `name, packagePath?` |
 | `list_eqs_queries` | List EQS queries. Params: `directory?` |
-| `add_perception` | Add AIPerceptionComponent. Params: `blueprintPath, senses?` |
+| `add_perception` | Add an AIPerceptionComponent to a Blueprint and configure its senses. senses takes short names (Sight, Hearing, Damage, Touch, Team, Prediction), AISenseConfig_* names, or class paths - a component with no sense configs perceives nothing. Params: `blueprintPath, senses?` |
 | `configure_sense` | Add + configure an AI perception sense config on the blueprint's AIPerceptionComponent. Params: `blueprintPath, senseType (Sight\|Hearing\|Damage\|Touch\|Team\|Prediction\|Blueprint), settings? ({SightRadius: ...}), componentName?` |
 | `get_state_tree_runtime` | Read a running StateTreeComponent's active state names in PIE (the 'brain' state). Params: `actorLabel, world? (default pie), componentName? (#654)` |
 | `create_state_tree` | Create a StateTree with a proper UStateTreeEditorData (schema + root state), so states/tasks are authorable via statetree(*) and persist across save/load (#653). Params: `name, packagePath?, schema? (default /Script/GameplayStateTreeModule.StateTreeComponentSchema)` |
@@ -803,9 +803,9 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `remove_smart_object_slot` | Remove a slot by index. Idempotent: out-of-range returns alreadyDeleted=true. Params: `assetPath, slotIndex (#416)` |
 | `list_smart_object_slots` | List slots on a SmartObjectDefinition with index, offset, rotation, and raw text. Params: `assetPath (#416)` |
 | `add_smart_object_slot_behavior` | Attach a behavior definition (UBehaviorDefinition asset or class) to a slot's BehaviorDefinitions array. Pass instanceProperties to seed UPROPERTYs on a freshly-spawned class-instance. Params: `assetPath, slotIndex, behaviorClass (asset path or class path), instanceProperties? (#416)` |
-| `create_game_mode` | Create GameMode BP. Params: `name, packagePath?, parentClass?, defaults?` |
-| `create_game_state` | Create GameState BP. Params: `name, packagePath?, parentClass?` |
-| `create_player_controller` | Create PlayerController BP. Params: `name, packagePath?, parentClass?` |
+| `create_game_mode` | Create GameMode BP. parentClass must derive from GameModeBase (short name, /Script path, or a Blueprint asset path). Params: `name, packagePath?, parentClass?` |
+| `create_game_state` | Create GameState BP. parentClass must derive from GameStateBase. Params: `name, packagePath?, parentClass?` |
+| `create_player_controller` | Create PlayerController BP. parentClass must derive from PlayerController. Params: `name, packagePath?, parentClass?` |
 | `create_player_state` | Create PlayerState BP. Params: `name, packagePath?` |
 | `create_hud` | Create HUD BP. Params: `name, packagePath?` |
 | `set_world_game_mode` | Set level GameMode override. Params: `gameModeClass (or legacy gameModePath)` |
