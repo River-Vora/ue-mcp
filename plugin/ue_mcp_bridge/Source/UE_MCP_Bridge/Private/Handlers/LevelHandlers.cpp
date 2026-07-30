@@ -152,6 +152,8 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("snap_actor_to_floor"), &SnapActorToFloor);
 	Registry.RegisterHandler(TEXT("delete_actors"), &DeleteActors);
 	Registry.RegisterHandler(TEXT("set_actor_folder_path"), &SetActorFolderPath);
+	Registry.RegisterHandler(TEXT("list_actor_descs"), &ListActorDescs);
+	Registry.RegisterHandlerWithTimeout(TEXT("load_actor_descs"), &LoadActorDescs, 300.0f);
 	Registry.RegisterHandler(TEXT("add_actor_tag"), &AddActorTag);
 	Registry.RegisterHandler(TEXT("remove_actor_tag"), &RemoveActorTag);
 	Registry.RegisterHandler(TEXT("set_actor_tags"), &SetActorTags);
