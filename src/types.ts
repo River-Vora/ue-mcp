@@ -116,7 +116,10 @@ export function categoryTool(
       const action = params.action as string;
       const spec = actions[action];
       if (!spec) {
-        throw new McpError(ErrorCode.UNKNOWN_ACTION, `Unknown action '${action}'. Available: ${actionNames.join(", ")}`);
+        // Read the live keys, not the construction-time tuple: enrichment adds
+        // epic_* actions after the fact, and a stale list here sends an agent
+        // hunting for an action the tool actually has.
+        throw new McpError(ErrorCode.UNKNOWN_ACTION, `Unknown action '${action}'. Available: ${Object.keys(actions).join(", ")}`);
       }
       if (spec.handler) {
         return spec.handler(ctx, params);

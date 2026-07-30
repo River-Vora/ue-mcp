@@ -131,6 +131,9 @@ async function main() {
         if (enriched.injected > 0) {
           const summary = Object.entries(enriched.byCategory).map(([c, n]) => `${c}:${n}`).join(", ");
           console.error(`[ue-mcp] Epic 5.8 toolsets (${source}): surfaced ${enriched.injected} tools (${summary})`);
+          if (enriched.createdCategories.length) {
+            console.error(`[ue-mcp] Epic-only categories added: ${enriched.createdCategories.join(", ")}`);
+          }
         }
       }
     } catch (e) {

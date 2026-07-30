@@ -22,17 +22,20 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { enrichToolsWithEpicCatalog } from "../dist/epic-enrich.js";
+import { enrichToolsWithEpicCatalog, routedCategories } from "../dist/epic-enrich.js";
 import { categoryTool } from "../dist/types.js";
+import { ALL_TOOLS } from "../dist/tools.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SNAPSHOT = path.join(ROOT, "assets", "epic-catalog.snapshot.json");
 const DOC = path.join(ROOT, "docs", "native-tools.md");
 
-const CATS = [
-  "gas", "niagara", "pcg", "widget", "statetree", "animation", "gameplay",
-  "material", "landscape", "foliage", "level", "asset", "blueprint", "epic",
-];
+// Derived, never hand-listed. A hardcoded list silently rots the moment a new
+// routing rule lands: enrichment falls back to the `epic` umbrella for any
+// category with no stub, so the docs would claim a tool lives somewhere it
+// does not. Epic-only domains are created by enrichment itself, so they need
+// no stub here.
+const CATS = [...new Set([...ALL_TOOLS.map((t) => t.name), ...routedCategories()])];
 
 /** Run the real enrichment over stubs so documented actions == surfaced actions. */
 function enrichedByCategory(catalog) {

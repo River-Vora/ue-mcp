@@ -35,9 +35,16 @@ const CATALOG: EpicCatalog = {
       tools: [{ name: "NiagaraToolsets.NiagaraToolset_System.ListSystems" }],
     },
     {
-      // No natural ue-mcp home -> falls to the epic umbrella.
+      // Epic-only domain: ue-mcp has no native handlers, so enrichment
+      // materialises the category rather than dumping it in the umbrella.
       name: "conversation_toolset.toolsets.conversation.ConversationTools",
       tools: [{ name: "conversation_toolset.toolsets.conversation.ConversationTools.ListSpeakers" }],
+    },
+    {
+      // Registry meta-tooling: belongs to the registry itself, not an editor
+      // domain, so the epic umbrella is its correct home.
+      name: "ToolsetRegistry.AgentSkillToolset",
+      tools: [{ name: "ToolsetRegistry.AgentSkillToolset.ListSkills" }],
     },
   ],
 };
@@ -75,10 +82,19 @@ describe("routeToolset", () => {
     expect(routeToolset("AutomationTestToolset.AutomationTestToolset")).toBe("project");
   });
 
-  it("returns null only for toolsets with genuinely no ue-mcp home", () => {
+  it("gives Epic-only editor domains their own category rather than the umbrella", () => {
+    expect(routeToolset("DataflowAgent.DataflowAgentToolset")).toBe("dataflow");
+    expect(routeToolset("conversation_toolset.toolsets.conversation.ConversationTools")).toBe("conversation");
+  });
+
+  it("keeps PhysicsAsset out of asset, where substring matching would strand it", () => {
+    // "PhysicsAssetToolset" contains "assettools", so the generic asset rule
+    // would swallow it if the physics rule were not tested first.
+    expect(routeToolset("PhysicsToolsets.PhysicsAssetToolset")).toBe("gameplay");
+  });
+
+  it("returns null only for registry meta-tooling, which the umbrella owns", () => {
     expect(routeToolset("ToolsetRegistry.AgentSkillToolset")).toBeNull();
-    expect(routeToolset("DataflowAgent.DataflowAgentToolset")).toBeNull();
-    expect(routeToolset("conversation_toolset.toolsets.conversation.ConversationTools")).toBeNull();
     expect(routeToolset("editor_toolset.toolsets.programmatic.ProgrammaticToolset")).toBeNull();
   });
 });
@@ -88,8 +104,8 @@ describe("enrichToolsWithEpicCatalog", () => {
     const tools = fixtureTools();
     const r = enrichToolsWithEpicCatalog(tools, CATALOG);
 
-    expect(r.injected).toBe(4);
-    expect(r.byCategory).toEqual({ gas: 2, niagara: 1, epic: 1 });
+    expect(r.injected).toBe(5);
+    expect(r.byCategory).toEqual({ gas: 2, niagara: 1, conversation: 1, epic: 1 });
 
     const gas = tools.find((t) => t.name === "gas")!;
     expect(gas.actions.epic_list_attributes).toBeDefined();
@@ -127,11 +143,38 @@ describe("enrichToolsWithEpicCatalog", () => {
     expect(gas.schema.inputJson).toBeDefined();
   });
 
-  it("routes unmapped toolsets to the epic umbrella", () => {
+  it("routes registry meta-tooling to the epic umbrella", () => {
     const tools = fixtureTools();
     enrichToolsWithEpicCatalog(tools, CATALOG);
     const epic = tools.find((t) => t.name === "epic")!;
-    expect(epic.actions.epic_list_speakers).toBeDefined();
+    expect(epic.actions.epic_list_skills).toBeDefined();
+  });
+
+  it("materialises an Epic-only category that ue-mcp does not declare", () => {
+    const tools = fixtureTools();
+    expect(tools.some((t) => t.name === "conversation")).toBe(false);
+
+    const r = enrichToolsWithEpicCatalog(tools, CATALOG);
+    expect(r.createdCategories).toEqual(["conversation"]);
+
+    const conversation = tools.find((t) => t.name === "conversation")!;
+    expect(conversation).toBeDefined();
+    expect(conversation.actions.epic_list_speakers).toBeDefined();
+    // The seed action that satisfies the non-empty enum must not survive.
+    expect(Object.keys(conversation.actions)).toEqual(["epic_list_speakers"]);
+    expect(conversation.schema.action.safeParse("epic_list_speakers").success).toBe(true);
+    expect(conversation.schema.input).toBeDefined();
+    // It must not have leaked into the umbrella as well.
+    const epic = tools.find((t) => t.name === "epic")!;
+    expect(epic.actions.epic_list_speakers).toBeUndefined();
+  });
+
+  it("does not create a category when the catalog has no tools for it", () => {
+    const tools = fixtureTools();
+    const r = enrichToolsWithEpicCatalog(tools, { toolsets: [] });
+    expect(r.createdCategories).toEqual([]);
+    expect(tools.some((t) => t.name === "conversation")).toBe(false);
+    expect(tools.some((t) => t.name === "dataflow")).toBe(false);
   });
 
   it("is a no-op for an empty catalog", () => {

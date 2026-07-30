@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ToolDef, ActionSpec } from "./types.js";
+import { categoryTool, type ToolDef, type ActionSpec } from "./types.js";
 
 /**
  * First-class surfacing of Epic's native UE 5.8 toolsets.
@@ -23,6 +23,11 @@ import type { ToolDef, ActionSpec } from "./types.js";
 // unmatched falls through to the `epic` umbrella so nothing is ever dropped.
 interface Rule { test: RegExp; category: string; }
 const ROUTES: Rule[] = [
+  // PhysicsAsset authoring must be tested before the generic asset rule below:
+  // "PhysicsAssetToolset" contains the substring "assettools", so it would
+  // otherwise be swept into `asset` by accident. Physics belongs with the
+  // native collision/simulation actions, which live in `gameplay`.
+  { test: /physicsasset|physicstoolset/i, category: "gameplay" },
   { test: /gas|abilitysystem|gameplaycue|attributeset/i, category: "gas" },
   { test: /niagara/i, category: "niagara" },
   { test: /\bpcg\b|pcgspatial|pcgtoolset/i, category: "pcg" },
@@ -49,7 +54,29 @@ const ROUTES: Rule[] = [
   { test: /plugintoolset|gamefeatures/i, category: "plugins" },
   { test: /editorapptoolset|logstoolset/i, category: "editor" },
   { test: /configsettings|automationtest/i, category: "project" },
+  // Domains Unreal exposes that ue-mcp has no native handlers for. They still
+  // get a real category rather than the umbrella: an agent authoring a Dataflow
+  // graph should reach for `dataflow`, not go rummaging in `epic`. The category
+  // is materialised on demand (see EPIC_ONLY_DOMAINS) so it exists exactly when
+  // the engine actually ships the toolset.
+  { test: /dataflow/i, category: "dataflow" },
+  { test: /conversation/i, category: "conversation" },
 ];
+
+/**
+ * Categories that exist only because Epic ships the toolset - ue-mcp has no
+ * native C++ handlers behind them. They are created during enrichment instead
+ * of being declared in ALL_TOOLS, so on an engine without the toolset the
+ * category simply does not appear rather than advertising an empty action list.
+ */
+const EPIC_ONLY_DOMAINS: Record<string, string> = {
+  dataflow:
+    "Dataflow graphs: node and pin authoring, variables, comment boxes, templates, " +
+    "and creation of Dataflow-compatible assets (Chaos geometry and simulation graphs).",
+  conversation:
+    "Conversation graphs (UConversationDatabase): dialogue nodes, node connections, " +
+    "sub-nodes, speakers, and entry points.",
+};
 
 /** Resolve the ue-mcp category for an Epic toolset name, or null for the umbrella. */
 export function routeToolset(toolsetName: string): string | null {
@@ -57,6 +84,11 @@ export function routeToolset(toolsetName: string): string | null {
     if (r.test.test(toolsetName)) return r.category;
   }
   return null;
+}
+
+/** Every category name a routing rule can produce. */
+export function routedCategories(): string[] {
+  return [...new Set(ROUTES.map((r) => r.category))];
 }
 
 // ── Catalog types (shape of epic_list_toolsets includeSchemas=true) ───────────
@@ -104,6 +136,8 @@ function paramHint(tool: EpicTool): string {
 export interface EnrichResult {
   injected: number;
   byCategory: Record<string, number>;
+  /** Categories created during this run because only Epic supplies them. */
+  createdCategories: string[];
 }
 
 /**
@@ -121,7 +155,7 @@ export function enrichToolsWithEpicCatalog(
   const excluded = new Set(opts.excludeCategories ?? []);
   const byName = new Map(tools.map((t) => [t.name, t]));
   const epicTool = byName.get(epicName);
-  const result: EnrichResult = { injected: 0, byCategory: {} };
+  const result: EnrichResult = { injected: 0, byCategory: {}, createdCategories: [] };
   if (!catalog?.toolsets?.length) return result;
 
   // Track added action keys per category to dedupe.
@@ -138,13 +172,32 @@ export function enrichToolsWithEpicCatalog(
 
   const touched = new Set<string>();
 
+  // A routed category that ue-mcp does not declare natively is materialised
+  // here, on first use, rather than shipped as an empty stub in ALL_TOOLS. The
+  // seed action only exists to satisfy the non-empty action enum that
+  // categoryTool builds; it is removed immediately and the enum is rebuilt
+  // below once the category's real actions are in.
+  const SEED = "__epic_seed__";
+  const ensureCategory = (cat: string): ToolDef | undefined => {
+    const existing = byName.get(cat);
+    if (existing) return existing;
+    const summary = EPIC_ONLY_DOMAINS[cat];
+    if (summary === undefined) return undefined;
+    const created = categoryTool(cat, summary, { [SEED]: { bridge: SEED } });
+    delete created.actions[SEED];
+    byName.set(cat, created);
+    tools.push(created);
+    result.createdCategories.push(cat);
+    return created;
+  };
+
   for (const ts of catalog.toolsets) {
     if (!ts?.name || !ts.tools?.length) continue;
     const targetCat = routeToolset(ts.name) ?? epicName;
     // Excluded categories are not enriched (tools stay reachable via the epic
     // gateway's call_tool). Excluding the epic umbrella drops unrouted tools.
     if (excluded.has(targetCat)) continue;
-    const target = byName.get(targetCat) ?? epicTool;
+    const target = ensureCategory(targetCat) ?? epicTool;
     if (!target) continue;
 
     const keys = keysFor(target.name);
