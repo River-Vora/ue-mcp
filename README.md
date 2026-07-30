@@ -101,7 +101,7 @@ Nothing is pre-authored. Every asset in the scene is created by the agent at run
 | **GAS** | Gameplay Ability System - attributes, abilities, effects, cues, actor stand-up |
 | **Networking** | Replication, dormancy, relevancy, net priority |
 | **Editor** | Console, Python, PIE, viewport, sequencer, build pipeline, logs, editor lifecycle |
-| **Reflection** | Class/struct/enum introspection, gameplay tags |
+| **Reflection** | Class/struct/enum introspection, gameplay tags, SaveGame inspection |
 | **Project** | Status, INI config, C++ source/header parsing, build |
 | **Fab** | Import assets from your owned Fab library |
 | **Plugins** | Install, configure, and provision UE-MCP extension plugins |
