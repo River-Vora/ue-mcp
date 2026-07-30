@@ -394,7 +394,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 // one of these reports had to drop to Python purely to read where a hand or
 // foot actually was at runtime, which is the evidence an animation check is
 // built on.
-TSharedPtr<FJsonValue> FEditorHandlers::SampleBoneTransforms(const TSharedPtr<FJsonObject>& Params)
+TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJsonObject>& Params)
 {
 	UWorld* World = ResolveWorldFromParams(Params, TEXT("auto"));
 	if (!World) return MCPError(TEXT("No world available"));

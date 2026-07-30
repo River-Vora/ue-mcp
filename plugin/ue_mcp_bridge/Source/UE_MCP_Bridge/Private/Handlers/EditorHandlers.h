@@ -149,7 +149,7 @@ private:
 	static TSharedPtr<FJsonValue> ListPIEInstances(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> InvokeObjectFunction(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetObjectProperties(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> SampleBoneTransforms(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ReadBoneTransforms(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> TeleportRuntimeActor(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> PieGetRuntimeValue(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> BuildLighting(const TSharedPtr<FJsonObject>& Params);
@@ -193,7 +193,6 @@ private:
 	static TSharedPtr<FJsonValue> PieSetPlayerView(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> StageGameInput(const TSharedPtr<FJsonObject>& Params);
 	// #583: repeatedly invoke a parameterless UFUNCTION on an actor at an interval.
-	static TSharedPtr<FJsonValue> InvokeFunctionRepeating(const TSharedPtr<FJsonObject>& Params);
 	// #455: discover BlueprintFunctionLibrary classes (GeometryScript,
 	// Kismet*, AnimationLibrary, user-defined) so invoke_function callers
 	// can find the libraries that expose the ops they want.

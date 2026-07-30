@@ -186,7 +186,7 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("list_pie_instances"), &ListPIEInstances);
 	Registry.RegisterHandler(TEXT("invoke_object_function"), &InvokeObjectFunction);
 	Registry.RegisterHandler(TEXT("get_object_properties"), &GetObjectProperties);
-	Registry.RegisterHandler(TEXT("sample_bone_transforms"), &SampleBoneTransforms);
+	Registry.RegisterHandler(TEXT("read_bone_transforms"), &ReadBoneTransforms);
 	Registry.RegisterHandler(TEXT("teleport_runtime_actor"), &TeleportRuntimeActor);
 	Registry.RegisterHandler(TEXT("build_lighting"), &BuildLighting);
 	Registry.RegisterHandler(TEXT("build_all"), &BuildAll);
@@ -224,7 +224,6 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("get_pie_config"), &GetPieConfig);
 	Registry.RegisterHandler(TEXT("pie_set_player_view"), &PieSetPlayerView);
 	Registry.RegisterHandler(TEXT("stage_game_input"), &StageGameInput);
-	Registry.RegisterHandler(TEXT("invoke_function_repeating"), &InvokeFunctionRepeating);
 	// #455: discover UBlueprintFunctionLibrary classes (GeometryScript,
 	// Kismet, anything user-defined). Pair with editor.invoke_function to
 	// drive GeometryScript ops from MCP without hand-writing each handler.
