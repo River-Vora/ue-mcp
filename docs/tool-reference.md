@@ -176,7 +176,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `read_graph_summary` | Lightweight graph summary (nodes+edges only, ~10KB). Filterable node list. Params: `assetPath, graphName?, titleFilter?, classFilter? (#560)` |
 | `get_execution_flow` | Trace exec pins from an entry point. Params: `assetPath, graphName?, entryPoint?` |
 | `get_dependencies` | Forward (classes/functions/assets) or reverse (referencers) deps. Params: `assetPath, reverse?` |
-| `diff` | Semantic structural diff between two Blueprints (binary uassets are unreviewable in git). Compares parent class, variables (type/default), functions/macros, components, and per-graph node + connection deltas keyed on stable node GUIDs so edits are matched rather than shown as remove+add. Returns a structured delta plus a human summary and changeCount. Params: `assetPath (base/A), otherPath (compare/B)` |
+| `diff` | Semantic structural diff between two Blueprints (binary uassets are unreviewable in git). Compares parent class, variables (type/default), functions/macros, components, and per-graph node + connection deltas keyed on stable node GUIDs so edits are matched rather than shown as remove+add. Returns a structured delta plus a human summary and changeCount. Params: `assetPath (base/A), otherPath (compare/B)` Revision-based diffing (fromRevision/toRevision via source control) is a staged follow-up; passing either is an explicit error. |
 | `create` | Create Blueprint. Params: `assetPath, parentClass?` |
 | `add_variable` | Add variable. varType accepts bool/int/float/string/name/text/byte/vector/rotator/transform/gameplaytag, object:/Script/Module.Class, struct:/Game/Path/To/Struct, or a full class/struct path. Unrecognized types are rejected rather than silently defaulting. Params: `assetPath, name, varType (alias: type), onConflict? (skip\|error, default skip) (#745)` |
 | `set_variable_properties` | Edit variable properties. Note: replication is set with networking(set_property_replicated), and blueprintReadOnly is not writable here - list_variables reports it. Params: `assetPath, name, editFlag? (EditAnywhere\|EditDefaultsOnly\|EditInstanceOnly\|none - the exact value list_variables reports, and the only form that round-trips every state), instanceEditable? (two-state shorthand; mutually exclusive with editFlag), private?, category?, tooltip?, exposeOnSpawn?` |
@@ -765,7 +765,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `list_nav_invokers` | Enumerate actors carrying a NavigationInvokerComponent + their tile generation/removal radii. Diagnoses 'no navmesh in this region' caused by missing or mis-sized invokers (#424) |
 | `get_navmesh_info` | Query nav system |
 | `project_to_nav` | Project point to navmesh. Params: `location, extent?` |
-| `spawn_nav_modifier` | Place a NavModifierVolume. areaClass is what makes the volume do anything (NavArea_Null to cut a hole, NavArea_Obstacle to make it costly, or any UNavArea subclass); without it the volume is inert. extent is a HALF-size in world units and rebuilds the brush. Params: `location, extent?, areaClass?, label?, scale?, onConflict?` |
+| `spawn_nav_modifier` | Place a NavModifierVolume. The brush is built for real (a bare spawn leaves an AVolume with no geometry, which the engine skips entirely - it requires both Brush and AreaClass). extent is a HALF-size in world units, default 100. areaClass defaults to NavArea_Null, which cuts a hole in the navmesh; pass NavArea_Obstacle to make the region costly instead, or any UNavArea subclass. Params: `location, extent?, areaClass?, label?, scale?, onConflict?` |
 | `create_input_action` | Create InputAction. Params: `name, packagePath?, valueType?` |
 | `create_input_mapping` | Create InputMappingContext. Params: `name, packagePath?` |
 | `list_input_assets` | List input assets. Params: `directory?, recursive?` |
@@ -793,7 +793,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `add_perception` | Add an AIPerceptionComponent to a Blueprint and configure its senses. senses takes short names (Sight, Hearing, Damage, Touch, Team, Prediction), AISenseConfig_* names, or class paths - a component with no sense configs perceives nothing. Params: `blueprintPath, senses?` |
 | `configure_sense` | Add + configure an AI perception sense config on the blueprint's AIPerceptionComponent. Params: `blueprintPath, senseType (Sight\|Hearing\|Damage\|Touch\|Team\|Prediction\|Blueprint), settings? ({SightRadius: ...}), componentName?` |
 | `get_state_tree_runtime` | Read a running StateTreeComponent's active state names in PIE (the 'brain' state). Params: `actorLabel, world? (default pie), componentName? (#654)` |
-| `create_state_tree` | Create a StateTree with a proper UStateTreeEditorData (schema + root state), so states/tasks are authorable via statetree(*) and persist across save/load (#653). Params: `name, packagePath?, schema? (default /Script/GameplayStateTreeModule.StateTreeComponentSchema)` |
+| `create_state_tree` | Create a StateTree with a proper UStateTreeEditorData (schema + root state), so states/tasks are authorable via statetree(*) and persist across save/load (#653). Params: `name, packagePath?, schema? (default /Script/GameplayStateTreeModule.StateTreeComponentSchema), onConflict?` |
 | `list_state_trees` | List StateTrees. Params: `directory?` |
 | `add_state_tree_component` | Add StateTreeComponent. Params: `blueprintPath` |
 | `create_smart_object_def` | Create SmartObjectDefinition. Params: `name, packagePath?` |
@@ -806,8 +806,8 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `create_game_mode` | Create GameMode BP. parentClass must derive from GameModeBase (short name, /Script path, or a Blueprint asset path). Params: `name, packagePath?, parentClass?` |
 | `create_game_state` | Create GameState BP. parentClass must derive from GameStateBase. Params: `name, packagePath?, parentClass?` |
 | `create_player_controller` | Create PlayerController BP. parentClass must derive from PlayerController. Params: `name, packagePath?, parentClass?` |
-| `create_player_state` | Create PlayerState BP. Params: `name, packagePath?` |
-| `create_hud` | Create HUD BP. Params: `name, packagePath?` |
+| `create_player_state` | Create PlayerState BP. parentClass must derive from PlayerState. Params: `name, packagePath?, parentClass?` |
+| `create_hud` | Create HUD BP. parentClass must derive from HUD. Params: `name, packagePath?, parentClass?` |
 | `set_world_game_mode` | Set level GameMode override. Params: `gameModeClass (or legacy gameModePath)` |
 | `get_framework_info` | Get level framework classes |
 | `get_navmesh_details` | Read RecastNavMesh generation params (cellSize, agentHeight, maxStepHeight, etc.) (#163) |
