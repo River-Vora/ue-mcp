@@ -932,6 +932,34 @@ TSharedPtr<FJsonValue> FGameplayHandlers::GetStateTreeRuntime(const TSharedPtr<F
 	return MCPResult(Result);
 }
 
+// Resolve a class from a short name, a /Script path, or a Blueprint ASSET path.
+// A Blueprint's generated class lives at "<path>.<AssetName>_C" - appending a
+// bare "_C" to the package path (which is what this used to do) never resolves,
+// so every documented "or a Blueprint asset path" call failed.
+static UClass* ResolveClassFlexible(const FString& Requested)
+{
+	if (Requested.IsEmpty()) return nullptr;
+	if (UClass* Direct = LoadObject<UClass>(nullptr, *Requested)) return Direct;
+	if (UClass* ByName = FindClassByShortName(Requested)) return ByName;
+	if (Requested.StartsWith(TEXT("/")))
+	{
+		FString AssetName = Requested;
+		if (!Requested.Contains(TEXT(".")))
+		{
+			Requested.Split(TEXT("/"), nullptr, &AssetName, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+			const FString Generated = Requested + TEXT(".") + AssetName + TEXT("_C");
+			if (UClass* Gen = LoadObject<UClass>(nullptr, *Generated)) return Gen;
+			// Also try the plain object path, for a non-Blueprint asset.
+			if (UClass* Obj = LoadObject<UClass>(nullptr, *(Requested + TEXT(".") + AssetName))) return Obj;
+		}
+		else if (!Requested.EndsWith(TEXT("_C")))
+		{
+			if (UClass* Gen = LoadObject<UClass>(nullptr, *(Requested + TEXT("_C")))) return Gen;
+		}
+	}
+	return nullptr;
+}
+
 // Resolve an optional caller-supplied parentClass, requiring it to derive from
 // the framework base the action is for. Returning the engine default silently
 // when the caller named a class is how you end up debugging a Blueprint that
@@ -944,13 +972,7 @@ static bool ResolveFrameworkParent(const TSharedPtr<FJsonObject>& Params, const 
 	if (Requested.IsEmpty()) return true;
 
 	UClass* Base = FindObject<UClass>(nullptr, *DefaultPath);
-	UClass* Resolved = LoadObject<UClass>(nullptr, *Requested);
-	if (!Resolved) Resolved = FindClassByShortName(Requested);
-	if (!Resolved)
-	{
-		// A Blueprint path names the asset; the class is that path + "_C".
-		Resolved = LoadObject<UClass>(nullptr, *(Requested + TEXT("_C")));
-	}
+	UClass* Resolved = ResolveClassFlexible(Requested);
 	if (!Resolved)
 	{
 		OutError = MCPError(FString::Printf(TEXT("parentClass not found: %s"), *Requested));
@@ -1102,15 +1124,14 @@ TSharedPtr<FJsonValue> FGameplayHandlers::SpawnNavModifierVolume(const TSharedPt
 		NewVolume->SetActorLabel(Label);
 	}
 
-	// areaClass and extent were documented and accepted but never applied. A
-	// NavModifierVolume with the default area class modifies nothing, so the
-	// call reported created: true having produced an inert actor - the whole
-	// point of spawning one is the area class.
+	// areaClass and extent were documented and accepted but never applied.
+	// The default AreaClass is UNavArea_Null (see ANavModifierVolume's
+	// constructor), which cuts a navmesh hole, so a default volume is useful -
+	// what made every one of these inert was the missing brush below.
 	FString AreaClassPath = OptionalString(Params, TEXT("areaClass"));
 	if (!AreaClassPath.IsEmpty())
 	{
-		UClass* AreaClass = FindClassByShortName(AreaClassPath);
-		if (!AreaClass) AreaClass = LoadObject<UClass>(nullptr, *AreaClassPath);
+		UClass* AreaClass = ResolveClassFlexible(AreaClassPath);
 		if (!AreaClass || !AreaClass->IsChildOf(UNavArea::StaticClass()))
 		{
 			World->DestroyActor(NewVolume);
@@ -1141,6 +1162,12 @@ TSharedPtr<FJsonValue> FGameplayHandlers::SpawnNavModifierVolume(const TSharedPt
 		return MCPError(TEXT("extent must be positive on every axis (it is a half-size, not a corner)."));
 	}
 	UEMCP::BuildVolumeAsCube(World, NewVolume, Extent);
+	// The helper resets scale to one (the brush carries the size), so a caller's
+	// scale has to be re-applied after it or it is silently discarded.
+	if (!Scale.Equals(FVector::OneVector))
+	{
+		NewVolume->SetActorScale3D(Scale);
+	}
 
 	const FString FinalLabel = NewVolume->GetActorLabel();
 
@@ -1359,9 +1386,7 @@ static TSharedPtr<FJsonValue> ResolveBlackboardBaseClass(const TSharedPtr<FJsonO
 	const FString Requested = OptionalString(Params, TEXT("baseClass"));
 	if (Requested.IsEmpty()) return nullptr;
 
-	UClass* Resolved = LoadObject<UClass>(nullptr, *Requested);
-	if (!Resolved) Resolved = FindClassByShortName(Requested);
-	if (!Resolved) Resolved = LoadObject<UClass>(nullptr, *(Requested + TEXT("_C")));
+	UClass* Resolved = ResolveClassFlexible(Requested);
 	if (!Resolved)
 	{
 		return MCPError(FString::Printf(TEXT("baseClass not found: %s"), *Requested));
@@ -1459,6 +1484,21 @@ TSharedPtr<FJsonValue> FGameplayHandlers::AddBlackboardKey(const TSharedPtr<FJso
 			if (!Enum)
 			{
 				return MCPError(FString::Printf(TEXT("Enum not found for blackboard key: %s"), *EnumName));
+			}
+			// UBlackboardKeyType_Enum stores the value in a uint8 and the editor
+			// refuses an out-of-range enum via ValidateEnum. Setting EnumType
+			// directly bypassed that, producing a key that truncates silently
+			// at runtime.
+			for (int32 EnumIdx = 0; EnumIdx < Enum->NumEnums(); ++EnumIdx)
+			{
+				if (Enum->HasMetaData(TEXT("Hidden"), EnumIdx)) continue;
+				const int64 EnumValue = Enum->GetValueByIndex(EnumIdx);
+				if (EnumValue < 0 || EnumValue > 255)
+				{
+					return MCPError(FString::Printf(
+						TEXT("Enum '%s' has a value out of the 0-255 range a Blackboard enum key can hold (%s = %lld), so the key would truncate silently."),
+						*Enum->GetName(), *Enum->GetNameStringByIndex(EnumIdx), EnumValue));
+				}
 			}
 			EnumKey->EnumType = Enum;
 			EnumKey->EnumName = Enum->GetName();
@@ -1853,49 +1893,30 @@ TSharedPtr<FJsonValue> FGameplayHandlers::AddPerceptionComponent(const TSharedPt
 		return MCPError(TEXT("AIPerceptionComponent not found. Enable AIModule."));
 	}
 
-	// Idempotency: existing AIPerceptionComponent on the SCS?
-	if (BP->SimpleConstructionScript)
-	{
-		for (USCS_Node* N : BP->SimpleConstructionScript->GetAllNodes())
-		{
-			if (N && N->ComponentTemplate && N->ComponentTemplate->GetClass() == CompClass)
-			{
-				auto Existed = MCPSuccess();
-				MCPSetExisted(Existed);
-				Existed->SetStringField(TEXT("blueprintPath"), BPPath);
-				Existed->SetStringField(TEXT("component"), N->GetVariableName().ToString());
-				return MCPResult(Existed);
-			}
-		}
-	}
-
-	USCS_Node* NewNode = BP->SimpleConstructionScript->CreateNode(CompClass, TEXT("AIPerceptionComp"));
-	if (!NewNode)
-	{
-		return MCPError(TEXT("Failed to create the AIPerceptionComponent SCS node."));
-	}
-	BP->SimpleConstructionScript->AddNode(NewNode);
-
-	// `senses` was accepted and ignored. A perception component with no sense
-	// configs perceives nothing, so the call reported created: true having
-	// produced a component that cannot do the only thing it exists for.
-	TArray<TSharedPtr<FJsonValue>> ConfiguredSenses;
+	// Resolve every requested sense BEFORE touching the Blueprint. The previous
+	// order added the SCS node first and returned an error mid-loop on a bad
+	// sense name, leaving the component behind - and the idempotency check
+	// below then made every retry return existed: true, so the action could
+	// never configure it. Nothing is mutated until this pass succeeds.
+	TArray<UClass*> SenseClasses;
 	const TArray<TSharedPtr<FJsonValue>>* SenseArray = nullptr;
 	if (Params->TryGetArrayField(TEXT("senses"), SenseArray) && SenseArray)
 	{
-		UAIPerceptionComponent* Template = Cast<UAIPerceptionComponent>(NewNode->ComponentTemplate);
-		if (!Template)
-		{
-			return MCPError(TEXT("AIPerceptionComponent template unavailable on the new SCS node."));
-		}
 		for (const TSharedPtr<FJsonValue>& Entry : *SenseArray)
 		{
-			if (!Entry.IsValid()) continue;
 			FString SenseName;
-			if (!Entry->TryGetString(SenseName)) continue;
+			if (!Entry.IsValid() || Entry->Type != EJson::String || !Entry->TryGetString(SenseName))
+			{
+				// Flow YAML steps bypass the TS schema, so a non-string entry
+				// reaches here. Skipping it silently returned senses: [] with
+				// created: true - a component that perceives nothing.
+				return MCPError(TEXT("senses entries must be strings (e.g. \"Sight\"), not objects or numbers."));
+			}
 			SenseName.TrimStartAndEndInline();
-			if (SenseName.IsEmpty()) continue;
-
+			if (SenseName.IsEmpty())
+			{
+				return MCPError(TEXT("senses contains an empty entry."));
+			}
 			// Accept "Sight", "AISenseConfig_Sight", or a full class path.
 			UClass* ConfigClass = LoadObject<UClass>(nullptr, *SenseName);
 			if (!ConfigClass) ConfigClass = FindClassByShortName(SenseName);
@@ -1906,26 +1927,92 @@ TSharedPtr<FJsonValue> FGameplayHandlers::AddPerceptionComponent(const TSharedPt
 					TEXT("Unknown sense '%s'. Expected a UAISenseConfig subclass - e.g. Sight, Hearing, Damage, Touch, Team, Prediction."),
 					*SenseName));
 			}
-			UAISenseConfig* Config = NewObject<UAISenseConfig>(Template, ConfigClass);
-			Template->ConfigureSense(*Config);
-			ConfiguredSenses.Add(MakeShared<FJsonValueString>(ConfigClass->GetName()));
+			SenseClasses.Add(ConfigClass);
 		}
 	}
 
-	FKismetEditorUtilities::CompileBlueprint(BP);
-	SaveAssetPackage(BP);
+	// Idempotency: an existing AIPerceptionComponent is reused rather than
+	// duplicated, and requested senses are applied to it - returning
+	// existed: true without configuring them made "add a sense" impossible
+	// on any Blueprint that already had the component.
+	USCS_Node* TargetNode = nullptr;
+	bool bCreated = false;
+	if (BP->SimpleConstructionScript)
+	{
+		for (USCS_Node* N : BP->SimpleConstructionScript->GetAllNodes())
+		{
+			if (N && N->ComponentTemplate && N->ComponentTemplate->GetClass() == CompClass)
+			{
+				TargetNode = N;
+				break;
+			}
+		}
+	}
+	if (!TargetNode)
+	{
+		TargetNode = BP->SimpleConstructionScript->CreateNode(CompClass, TEXT("AIPerceptionComp"));
+		if (!TargetNode)
+		{
+			return MCPError(TEXT("Failed to create the AIPerceptionComponent SCS node."));
+		}
+		BP->SimpleConstructionScript->AddNode(TargetNode);
+		bCreated = true;
+	}
+
+	UAIPerceptionComponent* Template = Cast<UAIPerceptionComponent>(TargetNode->ComponentTemplate);
+	if (!Template)
+	{
+		return MCPError(TEXT("AIPerceptionComponent template unavailable on the SCS node."));
+	}
+
+	// ConfigureSense appends, so re-running with the same sense would stack
+	// duplicate configs on the component. Skip the ones already present and
+	// report them separately rather than silently doing nothing about them.
+	TArray<TSharedPtr<FJsonValue>> ConfiguredSenses;
+	TArray<TSharedPtr<FJsonValue>> AlreadyConfigured;
+	for (UClass* ConfigClass : SenseClasses)
+	{
+		bool bPresent = false;
+		for (auto It = Template->GetSensesConfigIterator(); It; ++It)
+		{
+			if (*It && (*It)->GetClass() == ConfigClass) { bPresent = true; break; }
+		}
+		if (bPresent)
+		{
+			AlreadyConfigured.Add(MakeShared<FJsonValueString>(ConfigClass->GetName()));
+			continue;
+		}
+		UAISenseConfig* Config = NewObject<UAISenseConfig>(Template, ConfigClass);
+		Template->ConfigureSense(*Config);
+		ConfiguredSenses.Add(MakeShared<FJsonValueString>(ConfigClass->GetName()));
+	}
+
+	if (bCreated || ConfiguredSenses.Num() > 0)
+	{
+		FKismetEditorUtilities::CompileBlueprint(BP);
+		SaveAssetPackage(BP);
+	}
 
 	auto Result = MCPSuccess();
-	MCPSetCreated(Result);
+	if (bCreated) MCPSetCreated(Result); else MCPSetExisted(Result);
 	Result->SetStringField(TEXT("blueprintPath"), BPPath);
-	Result->SetStringField(TEXT("component"), TEXT("AIPerceptionComp"));
+	Result->SetStringField(TEXT("component"), TargetNode->GetVariableName().ToString());
 	Result->SetArrayField(TEXT("senses"), ConfiguredSenses);
+	if (AlreadyConfigured.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("sensesAlreadyPresent"), AlreadyConfigured);
+	}
 
-	// Rollback: remove_component
-	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
-	Payload->SetStringField(TEXT("path"), BPPath);
-	Payload->SetStringField(TEXT("componentName"), TEXT("AIPerceptionComp"));
-	MCPSetRollback(Result, TEXT("remove_component"), Payload);
+	// Only offer the remove-component inverse when this call actually created
+	// it. Removing a component that already existed is not an undo of adding
+	// senses to it - it destroys something the caller did not ask us to touch.
+	if (bCreated)
+	{
+		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetStringField(TEXT("path"), BPPath);
+		Payload->SetStringField(TEXT("componentName"), TargetNode->GetVariableName().ToString());
+		MCPSetRollback(Result, TEXT("remove_component"), Payload);
+	}
 
 	return MCPResult(Result);
 }
