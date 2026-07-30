@@ -6,7 +6,12 @@ export const networkingTool: ToolDef = categoryTool(
   "Networking and replication: actor replication, property replication, net relevancy, dormancy.",
   {
     set_replicates:        bp("Enable actor replication. Params: blueprintPath, replicates?", "set_replicates"),
-    set_property_replicated: bp("Mark variable as replicated. Params: blueprintPath, propertyName, replicated?, replicationCondition?, repNotify?", "set_property_replicated"),
+    set_property_replicated: bp("Mark a Blueprint variable as replicated. replicationType is 'None' | 'Replicated' | 'RepNotify'; repNotify=true is shorthand for RepNotify and replicated=true for Replicated. Params: blueprintPath, variableName (alias: propertyName), replicationType? | replicated? | repNotify? (#768)", "set_property_replicated", (p) => ({
+      blueprintPath: p.blueprintPath,
+      variableName: p.variableName ?? p.propertyName,
+      replicationType: p.replicationType
+        ?? (p.repNotify ? "RepNotify" : p.replicated === true ? "Replicated" : p.replicated === false ? "None" : undefined),
+    })),
     configure_net_frequency: bp("Set update frequency. Params: blueprintPath, netUpdateFrequency?, minNetUpdateFrequency?", "configure_net_update_frequency"),
     set_dormancy:          bp("Set net dormancy. Params: blueprintPath, dormancy", "set_net_dormancy"),
     set_net_load_on_client: bp("Control client loading. Params: blueprintPath, loadOnClient?", "set_net_load_on_client"),
@@ -21,6 +26,8 @@ export const networkingTool: ToolDef = categoryTool(
   {
     blueprintPath: z.string().optional(),
     propertyName: z.string().optional(),
+    variableName: z.string().optional().describe("set_property_replicated: Blueprint variable name (propertyName is accepted too) (#768)"),
+    replicationType: z.string().optional().describe("set_property_replicated: None | Replicated | RepNotify (#768)"),
     replicates: z.boolean().optional(),
     replicated: z.boolean().optional(),
     replicationCondition: z.string().optional(),

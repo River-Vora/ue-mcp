@@ -1982,14 +1982,80 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateAssetByClass(const TSharedPtr<FJson
 	return MCPResult(Result);
 }
 
+namespace
+{
+	// #768: on-disk evidence for a save. A boolean return is not enough - the
+	// reported failure was save actions returning success while the .uasset was
+	// never touched, only surfacing after an editor restart. Reporting the file
+	// path, size and mtime lets a caller verify instead of trusting the flag.
+	void DescribeOnDisk(const TSharedPtr<FJsonObject>& Out, const FString& PackageName)
+	{
+		FString Filename;
+		if (!FPackageName::TryConvertLongPackageNameToFilename(PackageName, Filename))
+		{
+			return;
+		}
+		// A package is either an asset or a map; try both extensions.
+		const FString AssetFile = Filename + FPackageName::GetAssetPackageExtension();
+		const FString MapFile = Filename + FPackageName::GetMapPackageExtension();
+		IFileManager& FM = IFileManager::Get();
+		const FString Resolved = FM.FileExists(*AssetFile) ? AssetFile
+			: (FM.FileExists(*MapFile) ? MapFile : FString());
+		Out->SetBoolField(TEXT("existsOnDisk"), !Resolved.IsEmpty());
+		if (!Resolved.IsEmpty())
+		{
+			Out->SetStringField(TEXT("file"), Resolved);
+			Out->SetNumberField(TEXT("fileSize"), (double)FM.FileSize(*Resolved));
+			Out->SetStringField(TEXT("modifiedUtc"), FM.GetTimeStamp(*Resolved).ToIso8601());
+		}
+	}
+}
+
 TSharedPtr<FJsonValue> FAssetHandlers::SaveAsset(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
 	if ((Params->TryGetStringField(TEXT("path"), AssetPath) || Params->TryGetStringField(TEXT("assetPath"), AssetPath)) && !AssetPath.IsEmpty() && AssetPath != TEXT("all"))
 	{
-		bool bSuccess = UEditorAssetLibrary::SaveAsset(AssetPath);
+		// #768: force=true saves regardless of the dirty flag. Several reports
+		// hit edits that never marked their package dirty (OFPA level actors,
+		// property writes through some subsystems), so a dirty-only save
+		// skipped them and still returned success.
+		const bool bForce = OptionalBool(Params, TEXT("force"), false);
 		auto Result = MCPSuccess();
 		Result->SetStringField(TEXT("path"), AssetPath);
+		Result->SetBoolField(TEXT("force"), bForce);
+
+		bool bSuccess = false;
+		if (bForce)
+		{
+			UObject* Asset = LoadAssetByPath<UObject>(AssetPath);
+			if (!Asset)
+			{
+				return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
+			}
+			UPackage* Package = Asset->GetOutermost();
+			if (!Package)
+			{
+				return MCPError(FString::Printf(TEXT("Asset has no package: %s"), *AssetPath));
+			}
+			TArray<UPackage*> Packages{ Package };
+			bSuccess = UEditorLoadingAndSavingUtils::SavePackages(Packages, /*bOnlyDirty=*/false);
+			Result->SetStringField(TEXT("package"), Package->GetName());
+			DescribeOnDisk(Result, Package->GetName());
+		}
+		else
+		{
+			bSuccess = UEditorAssetLibrary::SaveAsset(AssetPath);
+			if (UObject* Asset = FindObject<UObject>(nullptr, *AssetPath))
+			{
+				if (UPackage* Package = Asset->GetOutermost())
+				{
+					Result->SetStringField(TEXT("package"), Package->GetName());
+					Result->SetBoolField(TEXT("stillDirty"), Package->IsDirty());
+					DescribeOnDisk(Result, Package->GetName());
+				}
+			}
+		}
 		Result->SetBoolField(TEXT("success"), bSuccess);
 		return MCPResult(Result);
 	}
@@ -2008,12 +2074,46 @@ TSharedPtr<FJsonValue> FAssetHandlers::SaveAllDirty(const TSharedPtr<FJsonObject
 	const bool bSaveMapPackages = OptionalBool(Params, TEXT("saveMapPackages"), true);
 	const bool bSaveContentPackages = OptionalBool(Params, TEXT("saveContentPackages"), true);
 
+	// #768: capture what was dirty BEFORE saving, so the response can name the
+	// packages this call was responsible for and report whether each one
+	// actually reached disk. 'savedAll' on its own was reported as true while
+	// packages were silently never written.
+	TArray<UPackage*> DirtyBefore;
+	if (bSaveContentPackages) FEditorFileUtils::GetDirtyContentPackages(DirtyBefore);
+	if (bSaveMapPackages) FEditorFileUtils::GetDirtyWorldPackages(DirtyBefore);
+	TArray<FString> TargetNames;
+	for (UPackage* Package : DirtyBefore)
+	{
+		if (Package && Package->IsDirty()) TargetNames.AddUnique(Package->GetName());
+	}
+
 	const bool bOk = UEditorLoadingAndSavingUtils::SaveDirtyPackages(bSaveMapPackages, bSaveContentPackages);
+
+	TArray<TSharedPtr<FJsonValue>> Written;
+	TArray<TSharedPtr<FJsonValue>> StillDirty;
+	for (const FString& Name : TargetNames)
+	{
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("package"), Name);
+		UPackage* Package = FindPackage(nullptr, *Name);
+		const bool bDirty = Package && Package->IsDirty();
+		Entry->SetBoolField(TEXT("stillDirty"), bDirty);
+		DescribeOnDisk(Entry, Name);
+		if (bDirty) StillDirty.Add(MakeShared<FJsonValueObject>(Entry));
+		else        Written.Add(MakeShared<FJsonValueObject>(Entry));
+	}
 
 	auto Result = MCPSuccess();
 	Result->SetBoolField(TEXT("saveMapPackages"), bSaveMapPackages);
 	Result->SetBoolField(TEXT("saveContentPackages"), bSaveContentPackages);
-	Result->SetBoolField(TEXT("savedAll"), bOk);
+	Result->SetBoolField(TEXT("savedAll"), bOk && StillDirty.Num() == 0);
+	Result->SetNumberField(TEXT("attempted"), TargetNames.Num());
+	Result->SetArrayField(TEXT("saved"), Written);
+	Result->SetArrayField(TEXT("stillDirty"), StillDirty);
+	if (StillDirty.Num() > 0)
+	{
+		Result->SetStringField(TEXT("note"), TEXT("Some packages are still dirty after the save. Retry those with asset(save, path=..., force=true)."));
+	}
 	return MCPResult(Result);
 }
 
