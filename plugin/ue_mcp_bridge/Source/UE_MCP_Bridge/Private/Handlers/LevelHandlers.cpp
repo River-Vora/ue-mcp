@@ -3,6 +3,7 @@
 #include "HandlerUtils.h"
 #include "VolumeHelpers_Internal.h"
 #include "EditorScriptingUtilities/Public/EditorLevelLibrary.h"
+#include "ScopedTransaction.h"
 #include "Editor.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -150,6 +151,7 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("export_actor_fbx"), &ExportActorFbx);
 	Registry.RegisterHandler(TEXT("snap_actor_to_floor"), &SnapActorToFloor);
 	Registry.RegisterHandler(TEXT("delete_actors"), &DeleteActors);
+	Registry.RegisterHandler(TEXT("set_actor_folder_path"), &SetActorFolderPath);
 	Registry.RegisterHandler(TEXT("add_actor_tag"), &AddActorTag);
 	Registry.RegisterHandler(TEXT("remove_actor_tag"), &RemoveActorTag);
 	Registry.RegisterHandler(TEXT("set_actor_tags"), &SetActorTags);
@@ -239,6 +241,9 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetOutliner(const TSharedPtr<FJsonObject>
 		ActorObj->SetStringField(TEXT("label"), ActorLabel);
 		ActorObj->SetStringField(TEXT("class"), ActorClass);
 		ActorObj->SetStringField(TEXT("path"), Actor->GetPathName());
+		// #767: the outliner folder is what an agent sees in the editor tree,
+		// so report it alongside the label rather than only being able to set it.
+		ActorObj->SetStringField(TEXT("folderPath"), Actor->GetFolderPath().ToString());
 		ActorObj->SetBoolField(TEXT("editorHidden"), bEditorHidden);
 
 		FVector Location = Actor->GetActorLocation();
@@ -505,6 +510,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorDetails(const TSharedPtr<FJsonObj
 	Result->SetStringField(TEXT("name"), Actor->GetName());
 	Result->SetStringField(TEXT("class"), Actor->GetClass()->GetName());
 	Result->SetStringField(TEXT("path"), Actor->GetPathName());
+	Result->SetStringField(TEXT("folderPath"), Actor->GetFolderPath().ToString());
 
 	FVector Location = Actor->GetActorLocation();
 	TSharedPtr<FJsonObject> LocationObj = MakeShared<FJsonObject>();
@@ -3018,6 +3024,125 @@ TSharedPtr<FJsonValue> FLevelHandlers::SpawnSkeletalMeshActor(const TSharedPtr<F
 }
 
 // #220: bulk delete actors matching label prefix / class / tag.
+// #767: assign World Outliner folder paths in bulk. Editor-only organisation,
+// so it deliberately does not save the level - the caller decides when to
+// persist. Everything runs inside one transaction so a bulk move is a single
+// undo, and the write is read back per actor instead of being assumed.
+TSharedPtr<FJsonValue> FLevelHandlers::SetActorFolderPath(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+
+	FString FolderPath;
+	if (auto Err = RequireString(Params, TEXT("folderPath"), FolderPath)) return Err;
+	// An empty folder path is legitimate: it moves actors back to the root.
+	FolderPath = FolderPath.TrimStartAndEnd().Replace(TEXT("\\"), TEXT("/"));
+
+	const FString LabelPrefix = OptionalString(Params, TEXT("labelPrefix"));
+	const FString ClassName = OptionalString(Params, TEXT("className"));
+	const FString Tag = OptionalString(Params, TEXT("tag"));
+	const bool bDryRun = OptionalBool(Params, TEXT("dryRun"), false);
+
+	TSet<FString> ExactLabels;
+	const TArray<TSharedPtr<FJsonValue>>* LabelValues = nullptr;
+	if (Params->TryGetArrayField(TEXT("actorLabels"), LabelValues) && LabelValues)
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *LabelValues)
+		{
+			FString Label;
+			if (Value.IsValid() && Value->TryGetString(Label) && !Label.IsEmpty())
+			{
+				ExactLabels.Add(Label);
+			}
+		}
+	}
+
+	if (ExactLabels.Num() == 0 && LabelPrefix.IsEmpty() && ClassName.IsEmpty() && Tag.IsEmpty())
+	{
+		return MCPError(TEXT("Provide at least one filter: actorLabels, labelPrefix, className, or tag"));
+	}
+
+	TArray<AActor*> Matches;
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* A = *It;
+		if (!A) continue;
+		const FString Label = A->GetActorLabel();
+		if (ExactLabels.Num() > 0 && !ExactLabels.Contains(Label)) continue;
+		if (!LabelPrefix.IsEmpty() && !Label.StartsWith(LabelPrefix)) continue;
+		if (!ClassName.IsEmpty() && !A->GetClass()->GetName().Contains(ClassName)) continue;
+		if (!Tag.IsEmpty() && !A->ActorHasTag(FName(*Tag))) continue;
+		Matches.Add(A);
+	}
+
+	// Report labels the caller asked for by name that no actor answers to, so
+	// a typo does not read as "nothing needed moving".
+	TArray<TSharedPtr<FJsonValue>> MissingLabels;
+	if (ExactLabels.Num() > 0)
+	{
+		TSet<FString> Found;
+		for (AActor* A : Matches) Found.Add(A->GetActorLabel());
+		for (const FString& Label : ExactLabels)
+		{
+			if (!Found.Contains(Label)) MissingLabels.Add(MakeShared<FJsonValueString>(Label));
+		}
+	}
+
+	const FName NewFolder(*FolderPath);
+	TArray<TSharedPtr<FJsonValue>> Entries;
+	int32 Changed = 0;
+	int32 Verified = 0;
+
+	auto Apply = [&]()
+	{
+		for (AActor* A : Matches)
+		{
+			const FString Previous = A->GetFolderPath().ToString();
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetStringField(TEXT("label"), A->GetActorLabel());
+			Entry->SetStringField(TEXT("previousFolderPath"), Previous);
+			Entry->SetStringField(TEXT("folderPath"), FolderPath);
+
+			const bool bNeedsChange = Previous != FolderPath;
+			Entry->SetBoolField(TEXT("changed"), bNeedsChange && !bDryRun);
+
+			if (bNeedsChange && !bDryRun)
+			{
+				A->Modify();
+				A->SetFolderPath(NewFolder);
+				++Changed;
+				// Read the value back rather than trusting the setter.
+				const bool bOk = A->GetFolderPath().ToString() == FolderPath;
+				Entry->SetBoolField(TEXT("verified"), bOk);
+				if (bOk) ++Verified;
+			}
+			Entries.Add(MakeShared<FJsonValueObject>(Entry));
+		}
+	};
+
+	if (bDryRun)
+	{
+		Apply();
+	}
+	else
+	{
+		const FScopedTransaction Transaction(
+			FText::FromString(OptionalString(Params, TEXT("transactionLabel"), TEXT("Set actor folder paths"))));
+		Apply();
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetBoolField(TEXT("dryRun"), bDryRun);
+	Result->SetStringField(TEXT("folderPath"), FolderPath);
+	Result->SetNumberField(TEXT("matched"), Matches.Num());
+	Result->SetNumberField(TEXT("changed"), Changed);
+	Result->SetNumberField(TEXT("verified"), Verified);
+	Result->SetArrayField(TEXT("actors"), Entries);
+	Result->SetArrayField(TEXT("missingLabels"), MissingLabels);
+	Result->SetStringField(TEXT("note"),
+		TEXT("Folder paths are editor-only organisation. The level is left dirty and unsaved; save it yourself when ready."));
+	return MCPResult(Result);
+}
+
 TSharedPtr<FJsonValue> FLevelHandlers::DeleteActors(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);

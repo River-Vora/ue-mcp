@@ -8,6 +8,8 @@
 #include "UObject/UObjectIterator.h"
 #include "Engine/Engine.h"
 #include "Engine/UserDefinedEnum.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #include "Kismet2/EnumEditorUtils.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
@@ -498,11 +500,17 @@ TSharedPtr<FJsonValue> FReflectionHandlers::ReflectEnum(const TSharedPtr<FJsonOb
 	UEnum* Enum = FindEnum(EnumName);
 	if (!Enum)
 	{
-		return MCPError(FString::Printf(TEXT("Enum not found: %s"), *EnumName));
+		const TArray<FString> Suggestions = SuggestEnumNames(EnumName);
+		return MCPError(Suggestions.Num() > 0
+			? FString::Printf(TEXT("Enum not found: %s. Close matches: %s"),
+				*EnumName, *FString::Join(Suggestions, TEXT(", ")))
+			: FString::Printf(TEXT("Enum not found: %s"), *EnumName));
 	}
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("enumName"), Enum->GetName());
+	Result->SetStringField(TEXT("enumPath"), Enum->GetPathName());
+	Result->SetBoolField(TEXT("userDefined"), Enum->IsA<UUserDefinedEnum>());
 	AddIfNonEmpty(Result, TEXT("tooltip"), ReadTooltip(Enum));
 
 	TArray<TSharedPtr<FJsonValue>> ValuesArray;
@@ -748,19 +756,74 @@ UEnum* FReflectionHandlers::FindEnum(const FString& EnumName)
 		return Enum;
 	}
 
-	// Short-name lookup via FindFirstObject (UE 5.6+ replacement). Tries
-	// the caller's spelling, then E-prefixed - the standard UE convention.
+	// #762: project enums were reported "not found" while Python could reach
+	// them. Two gaps: NativeFirst biases the search away from content-defined
+	// enums, and a UUserDefinedEnum that has not been loaded yet is not in the
+	// object graph to find at all. Try the caller's spelling and the
+	// E-prefixed UE convention, unbiased, then fall back to the asset registry
+	// and load the asset before giving up.
 	const TArray<FString> Candidates = { EnumName, TEXT("E") + EnumName };
 	for (const FString& Candidate : Candidates)
 	{
-		Enum = FindFirstObject<UEnum>(*Candidate, EFindFirstObjectOptions::NativeFirst);
+		Enum = FindFirstObject<UEnum>(*Candidate, EFindFirstObjectOptions::None);
 		if (Enum)
 		{
 			return Enum;
 		}
 	}
 
+	// Loaded-module sweep: an enum whose short name matches but whose outer
+	// package the lookups above did not reach.
+	for (TObjectIterator<UEnum> It; It; ++It)
+	{
+		UEnum* Candidate = *It;
+		if (!Candidate) continue;
+		const FString Name = Candidate->GetName();
+		if (Name == EnumName || Name == TEXT("E") + EnumName)
+		{
+			return Candidate;
+		}
+	}
+
+	// Unloaded UUserDefinedEnum assets: resolve through the asset registry and
+	// load, so a Blueprint enum behaves like a native one.
+	if (FModuleManager::Get().IsModuleLoaded(TEXT("AssetRegistry")))
+	{
+		IAssetRegistry& AssetRegistry =
+			FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+		TArray<FAssetData> EnumAssets;
+		AssetRegistry.GetAssetsByClass(UUserDefinedEnum::StaticClass()->GetClassPathName(), EnumAssets, true);
+		for (const FAssetData& Asset : EnumAssets)
+		{
+			const FString AssetName = Asset.AssetName.ToString();
+			if (AssetName == EnumName || AssetName == TEXT("E") + EnumName)
+			{
+				if (UEnum* Loaded = Cast<UEnum>(Asset.GetAsset()))
+				{
+					return Loaded;
+				}
+			}
+		}
+	}
+
 	return nullptr;
+}
+
+/** Enum short names close to a failed lookup, so the error can name alternatives. */
+static TArray<FString> SuggestEnumNames(const FString& EnumName, int32 MaxSuggestions = 8)
+{
+	TArray<FString> Suggestions;
+	const FString Needle = EnumName.ToLower();
+	for (TObjectIterator<UEnum> It; It && Suggestions.Num() < MaxSuggestions; ++It)
+	{
+		if (!*It) continue;
+		const FString Name = It->GetName();
+		if (Name.ToLower().Contains(Needle))
+		{
+			Suggestions.AddUnique(Name);
+		}
+	}
+	return Suggestions;
 }
 
 TSharedPtr<FJsonValue> FReflectionHandlers::SerializeProperty(FProperty* Prop, void* Data)

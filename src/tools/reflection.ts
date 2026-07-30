@@ -7,7 +7,7 @@ export const reflectionTool: ToolDef = categoryTool(
   {
     reflect_class:  bp("Reflect UClass. Params: className, includeInherited?", "reflect_class"),
     reflect_struct: bp("Reflect UScriptStruct. Params: structName", "reflect_struct"),
-    reflect_enum:   bp("Reflect UEnum. Params: enumName", "reflect_enum"),
+    reflect_enum:   bp("Reflect UEnum by full path, short name, or short name without the E prefix. Resolves native enums in any loaded module and loads unloaded Blueprint (UserDefinedEnum) assets via the asset registry. Returns enumPath, userDefined, and per-value name/value/displayName/tooltip; a failed lookup lists close matches (#762). Params: enumName", "reflect_enum"),
     list_classes:   bp("List classes. Params: parentFilter?, limit?", "list_classes"),
     list_tags:      bp("List gameplay tags. Params: filter?", "list_gameplay_tags"),
     create_tag:     bp("Create gameplay tag. Params: tag, comment?", "create_gameplay_tag"),
