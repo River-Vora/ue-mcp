@@ -521,14 +521,19 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 		// from the leader, so that is what has to have been evaluated.
 		const USkinnedMeshComponent* PoseSource =
 			bFollowsLeader ? Mesh->LeaderPoseComponent.Get() : static_cast<const USkinnedMeshComponent*>(Mesh);
-		if (!PoseSource)
-		{
-			return MCPError(FString::Printf(
-				TEXT("SkeletalMeshComponent '%s' on '%s' follows a leader pose component that no longer exists."),
-				*Mesh->GetName(), *ActorLabel));
-		}
 		const TArray<FTransform>& Spaces = PoseSource->GetComponentSpaceTransforms();
-		bool bAnyPosed = Spaces.Num() <= 1;
+		if (Spaces.Num() == 0)
+		{
+			// The zero-transform guard above is skipped for followers, so this
+			// is the only thing standing between an unregistered LEADER and a
+			// full set of identity transforms reported as measurements.
+			return MCPError(FString::Printf(
+				TEXT("SkeletalMeshComponent '%s' on '%s' has no bone transform data%s (not registered)."),
+				*Mesh->GetName(), *ActorLabel,
+				bFollowsLeader ? TEXT(" on its leader pose component") : TEXT("")));
+		}
+		// A single-bone skeleton is legitimately identity; more than one is not.
+		bool bAnyPosed = Spaces.Num() == 1;
 		const int32 Probe = FMath::Min(Spaces.Num(), 32);
 		for (int32 i = 0; i < Probe && !bAnyPosed; ++i)
 		{
@@ -772,12 +777,20 @@ TSharedPtr<FJsonValue> FEditorHandlers::SetMovementMode(const TSharedPtr<FJsonOb
 	}
 
 	bool bVelocityChanged = false;
+	FString Result_VelocityNote;
 	if (Params->HasField(TEXT("velocity")))
 	{
 		// Write through the component, not the actor: the actor has no velocity
 		// of its own and CharacterMovement is what integrates this next tick.
 		Movement->Velocity = OptionalVec3(Params, TEXT("velocity"));
 		bVelocityChanged = true;
+		if (Actor->GetLocalRole() != ROLE_Authority)
+		{
+			// On a simulated proxy or a corrected autonomous client the next
+			// replicated move overwrites this, and the response would otherwise
+			// report a value that is already gone.
+			Result_VelocityNote = TEXT("This actor is not the authority, so the next replicated move will overwrite the velocity written here. Drive it on the server (or use a listen-server PIE instance) for a value that persists.");
+		}
 	}
 
 	if (!bModeChanged && !bVelocityChanged)
@@ -793,15 +806,26 @@ TSharedPtr<FJsonValue> FEditorHandlers::SetMovementMode(const TSharedPtr<FJsonOb
 	Result->SetStringField(TEXT("previousMode"), PrevMode);
 	Result->SetNumberField(TEXT("previousCustomMode"), PrevCustom);
 	Result->SetObjectField(TEXT("previousVelocity"), VectorJson(PrevVelocity));
-	// Read back: SetMovementMode can refuse a mode the character cannot enter
-	// (flying with bCanFly off, swimming outside a volume), and silently
-	// reporting the requested mode would hide that.
+	// Read back rather than echoing the request. SetMovementMode substitutes
+	// MOVE_NavWalking with MOVE_Walking when there is no nav data; that is the
+	// only substitution it makes, so this catches that one case honestly
+	// instead of implying a broader validation the engine does not do.
 	Result->SetStringField(TEXT("mode"), UEnum::GetValueAsString(Movement->MovementMode));
 	Result->SetNumberField(TEXT("customMode"), Movement->CustomMovementMode);
 	Result->SetObjectField(TEXT("velocity"), VectorJson(Movement->Velocity));
+	if (!Result_VelocityNote.IsEmpty()) Result->SetStringField(TEXT("velocityNote"), Result_VelocityNote);
 	if (bModeChanged && Movement->MovementMode != RequestedMode)
 	{
-		Result->SetStringField(TEXT("note"), TEXT("The component did not adopt the requested mode; check bCanFly/bCanSwim and the character's current physics volume."));
+		Result->SetStringField(TEXT("note"), TEXT("The component substituted a different mode (SetMovementMode falls back from NavWalking to Walking when the world has no navigation data)."));
+	}
+	// The mode is accepted now but the physics update decides whether it holds:
+	// PhysSwimming drops back to Falling outside a water volume on the next
+	// tick, and nothing rejects it here. Say so rather than let a same-frame
+	// read-back read as confirmation that it stuck.
+	if (bModeChanged)
+	{
+		Result->SetStringField(TEXT("modeNote"),
+			TEXT("This is the mode as of this call. CharacterMovement re-evaluates on the next tick and can leave it (e.g. Swimming outside a water volume falls back to Falling) - sample it again after a tick to confirm it held."));
 	}
 	return MCPResult(Result);
 }
