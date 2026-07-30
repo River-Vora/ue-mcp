@@ -2,7 +2,7 @@
 
 This page lists ue-mcp's own category tools and actions. For the official Unreal 5.8 tools that ue-mcp wraps (surfaced inside these same categories), see [Native Tools](native-tools.md).
 
-UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->736+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
+UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->741+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
 
 !!! tip "First call in any session"
     Start with `project(action="get_status")` to check the connection, then `level(action="get_outliner")` or `asset(action="list")` to explore.
@@ -203,8 +203,8 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `add_interface` | Implement interface. Params: `blueprintPath, interfacePath` |
 | `override_function` | Override an inherited interface implementation (inherited via the parent class) or an overridable parent virtual function, with the matching signature so it actually binds as the override (create_function makes a blank, non-binding graph). Returns kind ('function' with a graphName, or 'event' with a nodeId in EventGraph). Event-shaped functions become override events unless preferFunction=true. Pass interfacePath to also implement the interface first if it is not present. Then wire the body with add_node (use nodeClass='CallParent' to chain to the base implementation). Params: `assetPath, functionName, source? ('auto'\|'interface'\|'parent', advisory), preferFunction?, interfacePath? (#688)` |
 | `list_overridable_functions` | List functions this Blueprint can override: inherited interface implementations and overridable parent virtuals. Each entry has name, source ('interface'\|'parent'), declaringClass, canBeEvent. Params: `assetPath (#688)` |
-| `list_graphs` | List all graphs in a blueprint. Returns `selector`/`objectPath` plus `duplicateIndex`/`duplicateCount`; pass `selector` back as `graphName` for unambiguous nested graph edits. Params: `assetPath` |
-| `resolve_graph` | Resolve a graph name to selectors accepted by graph actions. Duplicate nested AnimBP names such as `Locomotion` return every match with selectors like `Locomotion[3]` and ambiguity metadata. Params: `assetPath, graphName` |
+| `list_graphs` | List all graphs in a blueprint. Returns selector/objectPath plus duplicateIndex/duplicateCount; pass selector back as graphName for unambiguous nested graph edits. Params: `assetPath` |
+| `resolve_graph` | Resolve a Blueprint graph name to selectors accepted by read_graph/add_node/connect_pins and other graph actions. Duplicate nested AnimBP names such as Locomotion return every match with selectors like Locomotion[3], object paths, and ambiguity metadata. Params: `assetPath, graphName` |
 | `add_event_dispatcher` | Add event dispatcher (multicast delegate variable + signature graph + UFunction). Without parameters, broadcasters fire void(). With parameters, the signature graph gets typed user pins so K2Node_CallDelegate compiles cleanly (#276). Params: `blueprintPath, name, parameters?: [{name, type}] where type is bool/int/float/string/name/text/vector/rotator/transform/object:/Script/Module.Class/struct:/Script/Module.Struct` |
 | `duplicate` | Duplicate blueprint asset. Params: `sourcePath, destinationPath` |
 | `add_local_variable` | Add function-scope local variable. Params: `assetPath, functionName, name, varType?` |
@@ -522,6 +522,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 |--------|-------------|
 | `list` | List Niagara assets. Params: `directory?, recursive?` |
 | `get_info` | Inspect system. Params: `assetPath` |
+| `validate` | Verify gate: does this system actually emit? Reports per emitter whether it is enabled and has a spawn module + an enabled renderer. valid=false means empty shell. Params: `systemPath` |
 | `spawn` | Spawn VFX as a transient component (GC's before offscreen capture). For a findable preview use spawn_actor. Params: `systemPath, location, rotation?, label?` |
 | `spawn_actor` | Spawn a PERSISTENT, labeled NiagaraActor in the editor world (findable, re-activatable, survives capture - unlike spawn). Assigns the system and activates. Params: `systemPath, location?, rotation?, label?, activate? (default true) (#537)` |
 | `reactivate` | Reset + reactivate the NiagaraComponent on a placed actor (replay a burst before capturing). Params: `actorLabel (#537)` |
@@ -529,6 +530,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `create` | Create system. Params: `name, packagePath?` |
 | `create_emitter` | Create Niagara emitter. Params: `name, packagePath?, templatePath?` |
 | `add_emitter` | Add emitter to system. Params: `systemPath, emitterPath` |
+| `remove_emitter` | Remove an emitter from a system (CRUD delete). Params: `systemPath, emitterName? or emitterIndex?` |
 | `list_emitters` | List emitters in system. Params: `systemPath` |
 | `set_emitter_property` | Set emitter property. Params: `systemPath, emitterName?, propertyName, value` |
 | `list_modules` | List Niagara modules. Params: `directory?` |
@@ -543,6 +545,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `list_system_parameters` | List user-exposed system parameters. Params: `systemPath` |
 | `list_module_inputs` | List modules + their input pins for an emitter. Params: `systemPath, emitterName?, emitterIndex?, stackContext? (ParticleSpawn\|ParticleUpdate\|EmitterSpawn\|EmitterUpdate\|all - default all)` |
 | `set_module_input` | Set literal default on a module input pin. Params: `systemPath, moduleName, inputName, value, emitterName?, emitterIndex?, stackContext?` |
+| `add_module` | Add a stock /Niagara/Modules script to an emitter stack (the modules that make an emitter actually do anything). Params: `systemPath, moduleScript (e.g. /Niagara/Modules/Emitter/SpawnRate), stackContext (ParticleSpawn\|ParticleUpdate\|EmitterSpawn\|EmitterUpdate), emitterName?, emitterIndex?, targetIndex? (-1 appends)` |
 | `list_static_switches` | List static switch inputs on a module. Params: `systemPath, moduleName, emitterName?, emitterIndex?, stackContext?` |
 | `set_static_switch` | Set static switch value on a module's function call node. Params: `systemPath, moduleName, switchName, value, emitterName?, emitterIndex?, stackContext?` |
 | `create_module_from_hlsl` | Create a NiagaraScript module backed by a custom HLSL node. Params: `name, hlsl, packagePath?, inputs?:[{name,type}], outputs?:[{name,type}]` |
@@ -639,7 +642,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | Action | Description |
 |--------|-------------|
 | `start_editor` | Launch Unreal Editor with the current project and reconnect bridge |
-| `stop_editor` | Close Unreal Editor gracefully |
+| `stop_editor` | Close Unreal Editor gracefully (asks the editor to quit itself via the bridge; never an OS kill) |
 | `restart_editor` | Stop then start the editor |
 | `build_project` | Build the project's C++ code using Unreal Build Tool. Editor should be stopped first |
 | `execute_command` | Run console command. Params: `command` |
@@ -728,7 +731,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `is_class_loaded` | Report whether a UClass is currently loaded in the editor (loaded), whether it exists/is loadable (exists), and its owning module + that module's load state. Distinguishes 'not loaded yet' from 'does not exist'. Params: `className (short name, /Script/<Module>.<Class>, or BP class path) (#689)` |
 | `is_module_loaded` | Report whether a named module is currently loaded. Params: `moduleName (#689)` |
 | `list_loaded_modules` | Enumerate modules with runtime load state. Params: `filter? (case-insensitive substring), loadedOnly? (default false)` |
-| `inspect_save_game` | Load a SaveGame slot read-only and return its reflected `UPROPERTY(SaveGame)` values. Non-serializable properties are reported in `skippedProperties` instead of failing the call. Params: `slotName, userIndex? (default 0)` |
+| `inspect_save_game` | Load a SaveGame slot read-only and return its reflected UPROPERTY(SaveGame) values. Non-serializable properties are listed in skippedProperties instead of failing the call. Params: `slotName, userIndex? (default 0)` |
 
 ---
 
