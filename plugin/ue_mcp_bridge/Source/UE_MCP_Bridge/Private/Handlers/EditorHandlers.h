@@ -150,6 +150,7 @@ private:
 	static TSharedPtr<FJsonValue> GetObjectProperties(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadBoneTransforms(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> TeleportRuntimeActor(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetMovementMode(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> PieGetRuntimeValue(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> BuildLighting(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> BuildAll(const TSharedPtr<FJsonObject>& Params);

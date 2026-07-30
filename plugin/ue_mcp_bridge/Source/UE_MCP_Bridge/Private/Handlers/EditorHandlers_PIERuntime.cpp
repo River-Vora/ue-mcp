@@ -26,6 +26,7 @@
 #include "GameFramework/Character.h"
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/GameStateBase.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PawnMovementComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
@@ -664,6 +665,119 @@ TSharedPtr<FJsonValue> FEditorHandlers::TeleportRuntimeActor(const TSharedPtr<FJ
 	{
 		Result->SetStringField(TEXT("note"),
 			TEXT("Actor has no movement component; nothing would have fought the move."));
+	}
+	return MCPResult(Result);
+}
+
+
+// #757: set a live character's movement mode and velocity directly.
+//
+// The generic paths do exist - invoke_function with component=CharMoveComp can
+// reach SetMovementMode, and set_component_property can write Velocity - but
+// both require the caller to already know the component's name, the enum's
+// numeric value, and that MOVE_Custom needs a second argument. That is exactly
+// the knowledge the original report had to reconstruct in Python, and getting
+// the enum wrong fails silently: the character simply keeps its old mode.
+//
+// Params:
+//   actorLabel (the character), mode? ("walking"|"falling"|"flying"|"swimming"|
+//   "none"|"custom"), customMode? (0-255, only with mode=custom),
+//   velocity? {x,y,z}, world? (default pie), pieInstance?
+TSharedPtr<FJsonValue> FEditorHandlers::SetMovementMode(const TSharedPtr<FJsonObject>& Params)
+{
+	UWorld* World = ResolveWorldFromParams(Params, TEXT("pie"));
+	if (!World) return MCPError(TEXT("PIE is not running - set_movement_mode targets a live world"));
+
+	FString ActorLabel;
+	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+
+	AActor* Actor = FindActorByLabelNameOrPath(World, ActorLabel);
+	if (!Actor)
+	{
+		return MCPError(FString::Printf(TEXT("Actor not found in the live world (by label, name or path): %s"), *ActorLabel));
+	}
+
+	UCharacterMovementComponent* Movement = Actor->FindComponentByClass<UCharacterMovementComponent>();
+	if (!Movement)
+	{
+		return MCPError(FString::Printf(
+			TEXT("'%s' has no CharacterMovementComponent. Movement modes are a character concept; for other pawns write the movement component's properties with level(set_component_property, world='pie')."),
+			*ActorLabel));
+	}
+
+	const FString PrevMode = UEnum::GetValueAsString(Movement->MovementMode);
+	const uint8 PrevCustom = Movement->CustomMovementMode;
+	const FVector PrevVelocity = Movement->Velocity;
+
+	bool bModeChanged = false;
+	EMovementMode RequestedMode = MOVE_None;
+	const FString ModeStr = OptionalString(Params, TEXT("mode"));
+	if (!ModeStr.IsEmpty())
+	{
+		// Named modes only. Accepting a raw number here would let a caller set a
+		// value outside the enum, which reads as success and then behaves as None.
+		EMovementMode Mode = MOVE_None;
+		const FString Lower = ModeStr.ToLower();
+		if      (Lower == TEXT("none"))     Mode = MOVE_None;
+		else if (Lower == TEXT("walking"))  Mode = MOVE_Walking;
+		else if (Lower == TEXT("navwalking")) Mode = MOVE_NavWalking;
+		else if (Lower == TEXT("falling"))  Mode = MOVE_Falling;
+		else if (Lower == TEXT("swimming")) Mode = MOVE_Swimming;
+		else if (Lower == TEXT("flying"))   Mode = MOVE_Flying;
+		else if (Lower == TEXT("custom"))   Mode = MOVE_Custom;
+		else
+		{
+			return MCPError(FString::Printf(
+				TEXT("Unknown movement mode '%s'. Expected one of: none, walking, navwalking, falling, swimming, flying, custom."),
+				*ModeStr));
+		}
+
+		int32 CustomMode = OptionalInt(Params, TEXT("customMode"), 0);
+		if (Mode != MOVE_Custom && Params->HasField(TEXT("customMode")))
+		{
+			return MCPError(TEXT("customMode only applies with mode='custom'; passing it with another mode would be silently ignored."));
+		}
+		if (CustomMode < 0 || CustomMode > 255)
+		{
+			return MCPError(TEXT("customMode must be 0-255 (it is a uint8 on CharacterMovementComponent)."));
+		}
+
+		Movement->SetMovementMode(Mode, static_cast<uint8>(CustomMode));
+		RequestedMode = Mode;
+		bModeChanged = true;
+	}
+
+	bool bVelocityChanged = false;
+	if (Params->HasField(TEXT("velocity")))
+	{
+		// Write through the component, not the actor: the actor has no velocity
+		// of its own and CharacterMovement is what integrates this next tick.
+		Movement->Velocity = OptionalVec3(Params, TEXT("velocity"));
+		bVelocityChanged = true;
+	}
+
+	if (!bModeChanged && !bVelocityChanged)
+	{
+		return MCPError(TEXT("Nothing to do: pass 'mode' and/or 'velocity'."));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("component"), Movement->GetName());
+	Result->SetStringField(TEXT("world"), World->GetPathName());
+	Result->SetStringField(TEXT("netMode"), DescribePIENetMode(World));
+	Result->SetStringField(TEXT("previousMode"), PrevMode);
+	Result->SetNumberField(TEXT("previousCustomMode"), PrevCustom);
+	Result->SetObjectField(TEXT("previousVelocity"), VectorJson(PrevVelocity));
+	// Read back: SetMovementMode can refuse a mode the character cannot enter
+	// (flying with bCanFly off, swimming outside a volume), and silently
+	// reporting the requested mode would hide that.
+	Result->SetStringField(TEXT("mode"), UEnum::GetValueAsString(Movement->MovementMode));
+	Result->SetNumberField(TEXT("customMode"), Movement->CustomMovementMode);
+	Result->SetObjectField(TEXT("velocity"), VectorJson(Movement->Velocity));
+	if (bModeChanged && Movement->MovementMode != RequestedMode)
+	{
+		Result->SetStringField(TEXT("note"), TEXT("The component did not adopt the requested mode; check bCanFly/bCanSwim and the character's current physics volume."));
 	}
 	return MCPResult(Result);
 }
