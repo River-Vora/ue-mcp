@@ -91,6 +91,8 @@ private:
 
 	// Control Rig (#11)
 	static TSharedPtr<FJsonValue> ListControlRigVariables(const TSharedPtr<FJsonObject>& Params);
+	// #774: full RigVM model inspection - nodes, pins, links, variable metadata.
+	static TSharedPtr<FJsonValue> ReadControlRigGraph(const TSharedPtr<FJsonObject>& Params);
 	// #619 per-element Control Rig hierarchy metadata (name, type, index, parent)
 	static TSharedPtr<FJsonValue> ReadControlRigHierarchy(const TSharedPtr<FJsonObject>& Params);
 

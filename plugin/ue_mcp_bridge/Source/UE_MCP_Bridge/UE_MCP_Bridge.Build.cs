@@ -42,6 +42,7 @@ public class UE_MCP_Bridge : ModuleRules
 				"ContentBrowser",
 				"ControlRig",
 				"ControlRigDeveloper",
+				"RigVMDeveloper",
 				"DataValidation",
 				"EditorScriptingUtilities",
 				"EditorStyle",
