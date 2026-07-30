@@ -21,6 +21,8 @@
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 
+#include "UObject/StrongObjectPtr.h"
+
 #include "Chooser.h"
 #include "StructUtils/InstancedStruct.h"
 #include "EditorAssetLibrary.h"
@@ -388,10 +390,17 @@ TSharedPtr<FJsonValue> FChooserHandlers::RemapObjectReferences(const TSharedPtr<
 		Transaction = MakeUnique<FScopedTransaction>(FText::FromString(TEXT("MCP chooser remap object references")));
 	}
 
-	// Pass 1: decide and resolve. May load; must not write.
-	TMap<FString, UObject*> ResolvedTargets;
+	// Pass 1: decide and resolve. May load; must not write. Skipped entirely on
+	// a dry run - a preview writes nothing, so loading every destination asset
+	// to produce it is pure cost, and dryRun is the default.
+	//
+	// Targets are held strongly: a load here can compile a Blueprint, which
+	// collects garbage, and nothing else references an asset loaded a moment
+	// ago until pass 2 writes it.
+	TMap<FString, TStrongObjectPtr<UObject>> ResolvedTargets;
 	for (const FChooserObjectRef& Ref : Refs)
 	{
+		if (bDryRun) break;
 		const FString Cur = NormalizeObjectPath(Ref.ObjectPath);
 		FString Candidate;
 		if (bExact)
@@ -409,12 +418,17 @@ TSharedPtr<FJsonValue> FChooserHandlers::RemapObjectReferences(const TSharedPtr<
 		if (ResolvedTargets.Contains(Candidate)) continue;
 		UObject* Found = FindObject<UObject>(nullptr, *Candidate);
 		if (!Found) Found = LoadObject<UObject>(nullptr, *Candidate);
-		ResolvedTargets.Add(Candidate, Found);
+		ResolvedTargets.Add(Candidate, TStrongObjectPtr<UObject>(Found));
 	}
 
 	// Pass 2: re-walk so ValueAddr is fresh after any loading above, then write.
-	Refs.Reset();
-	GatherAllRefs(Chooser, Refs);
+	// A ref that only became visible because pass 1's loads resized the arrays
+	// is reported as unresolved rather than written blind - see the miss branch.
+	if (!bDryRun)
+	{
+		Refs.Reset();
+		GatherAllRefs(Chooser, Refs);
+	}
 
 	for (FChooserObjectRef& Ref : Refs)
 	{
@@ -454,7 +468,7 @@ TSharedPtr<FJsonValue> FChooserHandlers::RemapObjectReferences(const TSharedPtr<
 				{
 					Change->SetStringField(TEXT("error"), FString::Printf(TEXT("Not a valid object path: %s"), *NewPath));
 				}
-				else if (!OptionalBool(Params, TEXT("allowMissing"), false) && ResolvedTargets.FindRef(NewPath) == nullptr)
+				else if (!OptionalBool(Params, TEXT("allowMissing"), false) && !ResolvedTargets.FindRef(NewPath).IsValid())
 				{
 					Change->SetStringField(TEXT("error"), FString::Printf(
 						TEXT("Target does not exist: %s (pass allowMissing=true to write it anyway)"), *NewPath));
@@ -469,7 +483,7 @@ TSharedPtr<FJsonValue> FChooserHandlers::RemapObjectReferences(const TSharedPtr<
 			else if (FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(Ref.Property))
 			{
 				// Resolved in pass 1; no loading here, so ValueAddr stays valid.
-				UObject* NewTarget = ResolvedTargets.FindRef(NewPath);
+				UObject* NewTarget = ResolvedTargets.FindRef(NewPath).Get();
 				if (!NewTarget)
 				{
 					Change->SetStringField(TEXT("error"), FString::Printf(TEXT("Target not found: %s"), *NewPath));
