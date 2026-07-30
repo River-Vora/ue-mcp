@@ -796,32 +796,161 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReadAssetProperties(const TSharedPtr<FJso
 	// Return all properties with their values
 	bool bIncludeValues = OptionalBool(Params, TEXT("includeValues"));
 
-	TArray<TSharedPtr<FJsonValue>> PropsArray;
-	for (TFieldIterator<FProperty> It(Asset->GetClass()); It; ++It)
+	// #755: an object property returned only a reference path, so reading a
+	// data asset's nested payload (a LearningNeuralNetworkData subobject, an
+	// instanced config) meant a second call - or Python. expandDepth walks
+	// into subobjects OWNED by this asset and inlines their properties.
+	//
+	// Owned-only by default: following an arbitrary asset reference would drag
+	// half the content browser into one response. expandExternal lifts that
+	// for callers who really do want to follow a reference to another asset.
+	const int32 ExpandDepth = FMath::Clamp(OptionalInt(Params, TEXT("expandDepth"), 0), 0, 5);
+	const bool bExpandExternal = OptionalBool(Params, TEXT("expandExternal"), false);
+	// Hard cap so a deep or cyclic graph cannot produce a response big enough
+	// to drop the bridge connection.
+	const int32 MaxExpanded = FMath::Clamp(OptionalInt(Params, TEXT("maxExpandedObjects"), 64), 1, 512);
+
+	int32 ExpandedCount = 0;
+	bool bExpansionTruncated = false;
+	TSet<const UObject*> Visited;
+	Visited.Add(Asset);
+
+	// Declared before use so the lambdas can recurse into each other.
+	TFunction<void(UObject*, TSharedPtr<FJsonObject>&, int32)> ExpandObject;
+	// Walks any container (a UObject or a struct instance) emitting its
+	// properties, descending into struct members so subobject collections held
+	// inside a struct - material expressions, for one - are still reachable.
+	TFunction<void(UStruct*, const void*, TArray<TSharedPtr<FJsonValue>>&, int32)> WalkContainer;
+
+	WalkContainer = [&](UStruct* Struct, const void* Container, TArray<TSharedPtr<FJsonValue>>& Props, int32 Depth)
 	{
-		TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
-		P->SetStringField(TEXT("name"), (*It)->GetName());
-		P->SetStringField(TEXT("type"), (*It)->GetCPPType());
-		if (bIncludeValues)
+		for (TFieldIterator<FProperty> It(Struct); It; ++It)
 		{
-			if (bJsonValues)
+			FProperty* Prop = *It;
+			TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
+			P->SetStringField(TEXT("name"), Prop->GetName());
+			P->SetStringField(TEXT("type"), Prop->GetCPPType());
+			const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Container);
+			if (bIncludeValues)
 			{
-				const void* ValuePtr = (*It)->ContainerPtrToValuePtr<void>(Asset);
-				P->SetField(TEXT("value"), FMCPJsonSerializer::SerializeValue(ValuePtr, *It));
+				if (bJsonValues)
+				{
+					P->SetField(TEXT("value"), FMCPJsonSerializer::SerializeValue(ValuePtr, Prop));
+				}
+				else
+				{
+					FString ValueStr;
+					Prop->ExportText_Direct(ValueStr, ValuePtr, ValuePtr, Asset, PPF_None);
+					P->SetStringField(TEXT("value"), ValueStr);
+				}
 			}
-			else
+
+			if (Depth > 0)
 			{
-				P->SetStringField(TEXT("value"), ExportPropertyValue(*It, Asset, Asset));
+				// Arrays of owned subobjects are as common as single ones
+				// (material expressions, instanced configs, node graphs), and
+				// leaving them out would make expandDepth work for one shape
+				// of asset and silently not for the next.
+				if (FArrayProperty* ArrProp = CastField<FArrayProperty>(Prop))
+				{
+					if (FObjectPropertyBase* InnerObj = CastField<FObjectPropertyBase>(ArrProp->Inner))
+					{
+						FScriptArrayHelper Helper(ArrProp, ValuePtr);
+						TArray<TSharedPtr<FJsonValue>> Elems;
+						for (int32 ElemIdx = 0; ElemIdx < Helper.Num(); ++ElemIdx)
+						{
+							UObject* Sub = InnerObj->GetObjectPropertyValue(Helper.GetRawPtr(ElemIdx));
+							if (!Sub || !IsValid(Sub)) continue;
+							const bool bOwnedElem = Sub->IsIn(Asset);
+							if ((!bOwnedElem && !bExpandExternal) || Visited.Contains(Sub)) continue;
+							if (ExpandedCount >= MaxExpanded) { bExpansionTruncated = true; break; }
+							Visited.Add(Sub);
+							++ExpandedCount;
+							TSharedPtr<FJsonObject> E = MakeShared<FJsonObject>();
+							E->SetNumberField(TEXT("index"), ElemIdx);
+							E->SetStringField(TEXT("objectPath"), Sub->GetPathName());
+							E->SetStringField(TEXT("className"), Sub->GetClass()->GetName());
+							E->SetBoolField(TEXT("owned"), bOwnedElem);
+							ExpandObject(Sub, E, Depth - 1);
+							Elems.Add(MakeShared<FJsonValueObject>(E));
+						}
+						if (Elems.Num() > 0) P->SetArrayField(TEXT("objects"), Elems);
+					}
+				}
+				else if (FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(Prop))
+				{
+					UObject* Sub = ObjProp->GetObjectPropertyValue(ValuePtr);
+					// IsIn(Asset) is what makes this a SUBOBJECT rather than a
+					// reference to a separate asset.
+					const bool bOwned = Sub && Sub->IsIn(Asset);
+					if (Sub && IsValid(Sub) && (bOwned || bExpandExternal) && !Visited.Contains(Sub))
+					{
+						if (ExpandedCount >= MaxExpanded)
+						{
+							bExpansionTruncated = true;
+						}
+						else
+						{
+							Visited.Add(Sub);
+							++ExpandedCount;
+							TSharedPtr<FJsonObject> Nested = MakeShared<FJsonObject>();
+							Nested->SetStringField(TEXT("objectPath"), Sub->GetPathName());
+							Nested->SetStringField(TEXT("className"), Sub->GetClass()->GetName());
+							Nested->SetBoolField(TEXT("owned"), bOwned);
+							ExpandObject(Sub, Nested, Depth - 1);
+							P->SetObjectField(TEXT("object"), Nested);
+						}
+					}
+					else if (Sub && !Visited.Contains(Sub) && !bOwned && !bExpandExternal)
+					{
+						// Say why it was not followed rather than leaving a bare
+						// path that looks the same as an unexpandable value.
+						P->SetBoolField(TEXT("expandable"), true);
+					}
+				}
+				else if (FStructProperty* StructProp = CastField<FStructProperty>(Prop))
+				{
+					// Not counted against MaxExpanded: a struct is part of this
+					// object, not a separate one, so descending costs no extra
+					// object budget - only the objects it leads to do.
+					TArray<TSharedPtr<FJsonValue>> Inner;
+					WalkContainer(StructProp->Struct, ValuePtr, Inner, Depth);
+					if (Inner.Num() > 0)
+					{
+						TSharedPtr<FJsonObject> SObj = MakeShared<FJsonObject>();
+						SObj->SetStringField(TEXT("structType"), StructProp->Struct->GetName());
+						SObj->SetArrayField(TEXT("properties"), Inner);
+						P->SetObjectField(TEXT("struct"), SObj);
+					}
+				}
 			}
+			Props.Add(MakeShared<FJsonValueObject>(P));
 		}
-		PropsArray.Add(MakeShared<FJsonValueObject>(P));
-	}
+	};
+
+	ExpandObject = [&](UObject* Owner, TSharedPtr<FJsonObject>& Into, int32 Depth)
+	{
+		TArray<TSharedPtr<FJsonValue>> Props;
+		WalkContainer(Owner->GetClass(), Owner, Props, Depth);
+		Into->SetNumberField(TEXT("propertyCount"), Props.Num());
+		Into->SetArrayField(TEXT("properties"), Props);
+	};
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
 	Result->SetStringField(TEXT("className"), Asset->GetClass()->GetName());
-	Result->SetNumberField(TEXT("propertyCount"), PropsArray.Num());
-	Result->SetArrayField(TEXT("properties"), PropsArray);
+	ExpandObject(Asset, Result, ExpandDepth);
+	if (ExpandDepth > 0)
+	{
+		Result->SetNumberField(TEXT("expandedObjects"), ExpandedCount);
+		if (bExpansionTruncated)
+		{
+			Result->SetBoolField(TEXT("expansionTruncated"), true);
+			Result->SetStringField(TEXT("note"), FString::Printf(
+				TEXT("Stopped after %d expanded objects. Raise maxExpandedObjects, lower expandDepth, or read a specific subobject with editor(get_object_properties)."),
+				MaxExpanded));
+		}
+	}
 
 	return MCPResult(Result);
 }
