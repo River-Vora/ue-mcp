@@ -93,44 +93,27 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetVariableProperties(const TSharedPt
 		PrevTooltip = FoundVar->GetMetaData(FBlueprintMetadata::MD_Tooltip);
 	}
 
-	// Set expose on spawn
+	// Read every request and capture every previous value FIRST. Nothing below
+	// this point writes until the no-op check has run.
 	bool bExposeOnSpawn = false;
 	const bool bHasExposeOnSpawn = Params->TryGetBoolField(TEXT("exposeOnSpawn"), bExposeOnSpawn);
-	const bool bPrevExposeOnSpawn = FoundVar->HasMetaData(FBlueprintMetadata::MD_ExposeOnSpawn);
-	if (bHasExposeOnSpawn)
-	{
-		if (bExposeOnSpawn)
-		{
-			FoundVar->SetMetaData(FBlueprintMetadata::MD_ExposeOnSpawn, TEXT("true"));
-			FoundVar->PropertyFlags |= CPF_ExposeOnSpawn;
-		}
-		else
-		{
-			FoundVar->RemoveMetaData(FBlueprintMetadata::MD_ExposeOnSpawn);
-			FoundVar->PropertyFlags &= ~CPF_ExposeOnSpawn;
-		}
-	}
+	// Compare the effective state, not merely the presence of the metadata key:
+	// the key can exist with value "false", or exist while CPF_ExposeOnSpawn is
+	// clear, and treating that as "already true" hid a real change.
+	const bool bPrevExposeOnSpawn =
+		(FoundVar->PropertyFlags & CPF_ExposeOnSpawn) != 0 ||
+		(FoundVar->HasMetaData(FBlueprintMetadata::MD_ExposeOnSpawn) &&
+		 FoundVar->GetMetaData(FBlueprintMetadata::MD_ExposeOnSpawn).ToBool());
 
-	// Set instance editable
 	bool bInstanceEditable = false;
 	const bool bHasInstanceEditable = Params->TryGetBoolField(TEXT("instanceEditable"), bInstanceEditable);
 	const bool bWasEditableAtAll = (FoundVar->PropertyFlags & CPF_Edit) != 0;
+	const bool bWasPrivate = FoundVar->HasMetaData(FBlueprintMetadata::MD_Private);
 
-	// Set category
 	FString CategoryStr;
 	const bool bHasCategory = Params->TryGetStringField(TEXT("category"), CategoryStr);
-	if (bHasCategory)
-	{
-		FoundVar->SetMetaData(FBlueprintMetadata::MD_FunctionCategory, *CategoryStr);
-	}
-
-	// Set tooltip
 	FString TooltipStr;
 	const bool bHasTooltip = Params->TryGetStringField(TEXT("tooltip"), TooltipStr);
-	if (bHasTooltip)
-	{
-		FoundVar->SetMetaData(FBlueprintMetadata::MD_Tooltip, *TooltipStr);
-	}
 
 	// Detect no-op BEFORE writing anything. Previously every branch above had
 	// already mutated PropertyFlags by the time this ran, so a "nothing
@@ -150,6 +133,27 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetVariableProperties(const TSharedPt
 		return MCPResult(Noop);
 	}
 
+	if (bHasExposeOnSpawn)
+	{
+		if (bExposeOnSpawn)
+		{
+			FoundVar->SetMetaData(FBlueprintMetadata::MD_ExposeOnSpawn, TEXT("true"));
+			FoundVar->PropertyFlags |= CPF_ExposeOnSpawn;
+		}
+		else
+		{
+			FoundVar->RemoveMetaData(FBlueprintMetadata::MD_ExposeOnSpawn);
+			FoundVar->PropertyFlags &= ~CPF_ExposeOnSpawn;
+		}
+	}
+	if (bHasCategory)
+	{
+		FoundVar->SetMetaData(FBlueprintMetadata::MD_FunctionCategory, *CategoryStr);
+	}
+	if (bHasTooltip)
+	{
+		FoundVar->SetMetaData(FBlueprintMetadata::MD_Tooltip, *TooltipStr);
+	}
 	if (bHasInstanceEditable)
 	{
 		if (bInstanceEditable)
@@ -186,7 +190,14 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetVariableProperties(const TSharedPt
 	Payload->SetStringField(TEXT("path"), AssetPath);
 	Payload->SetStringField(TEXT("name"), VarName);
 	if (bHasExposeOnSpawn) Payload->SetBoolField(TEXT("exposeOnSpawn"), bPrevExposeOnSpawn);
-	if (bHasInstanceEditable) Payload->SetBoolField(TEXT("instanceEditable"), bPrevInstanceEditable);
+	if (bHasInstanceEditable)
+	{
+		Payload->SetBoolField(TEXT("instanceEditable"), bPrevInstanceEditable);
+		// Replaying instanceEditable=false alone cannot restore a variable that
+		// was private/not-editable, so carry that state explicitly.
+		Payload->SetBoolField(TEXT("wasPrivate"), bWasPrivate);
+		Payload->SetBoolField(TEXT("wasEditable"), bWasEditableAtAll);
+	}
 	if (bHasCategory) Payload->SetStringField(TEXT("category"), PrevCategory);
 	if (bHasTooltip) Payload->SetStringField(TEXT("tooltip"), PrevTooltip);
 	MCPSetRollback(Result, TEXT("set_variable_properties"), Payload);
