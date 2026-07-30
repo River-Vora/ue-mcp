@@ -33,6 +33,7 @@
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "UObject/UObjectIterator.h"
+#include "UObject/GCObjectScopeGuard.h"
 
 namespace
 {
@@ -245,6 +246,10 @@ namespace
 			}
 		}
 
+		// ProcessEvent can run arbitrary game code - including one that tears
+		// down the world and collects garbage - and the target is read again
+		// below to export out params.
+		FGCObjectScopeGuard TargetGuard(CallTarget);
 		CallTarget->ProcessEvent(Func, ParamBuf.GetData());
 
 		TSharedPtr<FJsonObject> OutVals = MakeShared<FJsonObject>();
@@ -356,6 +361,13 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 	TArray<TSharedPtr<FJsonValue>> Missing;
 	TSet<FString> Emitted;
 	int32 Count = 0;
+	// Bound the response. Exporting every reflected property of something like
+	// a GameState with replicated arrays builds a payload big enough to drop
+	// the bridge - the same failure asset(list) was just paginated for.
+	const int32 MaxProperties = FMath::Clamp(OptionalInt(Params, TEXT("limit"), 200), 1, 5000);
+	const int32 MaxValueChars = FMath::Clamp(OptionalInt(Params, TEXT("maxValueLength"), 2000), 64, 100000);
+	int32 Skipped = 0;
+	int32 TruncatedValues = 0;
 	for (TFieldIterator<FProperty> It(Target->GetClass(), EFieldIteratorFlags::IncludeSuper); It; ++It)
 	{
 		FProperty* P = *It;
@@ -365,8 +377,14 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 		{
 			continue;
 		}
+		if (Wanted.Num() == 0 && Count >= MaxProperties) { ++Skipped; continue; }
 		FString S;
 		P->ExportTextItem_Direct(S, P->ContainerPtrToValuePtr<void>(Target), nullptr, Target, PPF_None);
+		if (S.Len() > MaxValueChars)
+		{
+			S = S.Left(MaxValueChars) + FString::Printf(TEXT("... [truncated, %d chars]"), S.Len());
+			++TruncatedValues;
+		}
 		Props->SetStringField(P->GetName(), S);
 		Emitted.Add(P->GetName().ToLower());
 		++Count;
@@ -385,8 +403,16 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 	Result->SetStringField(TEXT("objectPath"), Description);
 	Result->SetStringField(TEXT("objectClass"), Target->GetClass()->GetName());
 	Result->SetNumberField(TEXT("propertyCount"), Count);
+	Result->SetNumberField(TEXT("skippedProperties"), Skipped);
+	Result->SetNumberField(TEXT("truncatedValues"), TruncatedValues);
 	Result->SetObjectField(TEXT("properties"), Props);
 	Result->SetArrayField(TEXT("missingProperties"), Missing);
+	if (Skipped > 0)
+	{
+		Result->SetStringField(TEXT("note"), FString::Printf(
+			TEXT("%d properties omitted past the %d limit. Pass propertyNames to target specific ones, or raise 'limit'."),
+			Skipped, MaxProperties));
+	}
 	return MCPResult(Result);
 }
 
@@ -428,6 +454,16 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 			*ActorLabel, *FString::Join(SkeletalComponents, TEXT(", "))));
 	}
 
+	// A component whose transforms have never been evaluated returns
+	// FTransform::Identity for every bone. Reporting that as measurement data
+	// is worse than failing - this handler exists to supply evidence.
+	if (!Mesh->GetNumComponentSpaceTransforms())
+	{
+		return MCPError(FString::Printf(
+			TEXT("SkeletalMeshComponent '%s' on '%s' has no evaluated bone transforms yet (every bone would read as identity). Is PIE running, and has the mesh ticked?"),
+			*Mesh->GetName(), *ActorLabel));
+	}
+
 	// "world" (default) or "component" space. Component space is what an
 	// animation assertion usually wants, since it is independent of where the
 	// actor happens to be standing.
@@ -450,9 +486,9 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 
 	auto AddSample = [&](const FString& Name, bool bIsSocket)
 	{
-		const FTransform WorldTransform = bIsSocket
-			? Mesh->GetSocketTransform(FName(*Name), RTS_World)
-			: Mesh->GetSocketTransform(FName(*Name), RTS_World);
+		// GetSocketTransform resolves sockets first, then bones, so one call
+		// covers both; bIsSocket only labels which one answered.
+		const FTransform WorldTransform = Mesh->GetSocketTransform(FName(*Name), RTS_World);
 		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
 		Entry->SetStringField(TEXT("name"), Name);
 		Entry->SetBoolField(TEXT("isSocket"), bIsSocket);
@@ -473,7 +509,9 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 				Unknown.Add(MakeShared<FJsonValueString>(Name));
 				continue;
 			}
-			AddSample(Name, bIsSocket && !bIsBone);
+			// A socket wins the lookup even when a bone shares its name, so
+			// report isSocket by what actually resolved, not by exclusion.
+			AddSample(Name, bIsSocket);
 		}
 	}
 	else

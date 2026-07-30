@@ -24,6 +24,7 @@
 #include "Chooser.h"
 #include "StructUtils/InstancedStruct.h"
 #include "EditorAssetLibrary.h"
+#include "ScopedTransaction.h"
 #include "UObject/UnrealType.h"
 #include "UObject/SoftObjectPtr.h"
 
@@ -345,6 +346,12 @@ TSharedPtr<FJsonValue> FChooserHandlers::RemapObjectReferences(const TSharedPtr<
 	TArray<TSharedPtr<FJsonValue>> Changes;
 	TSet<UObject*> Touched;
 	int32 Rewritten = 0;
+	// Rewriting references across a nested chooser tree must be undoable.
+	TUniquePtr<FScopedTransaction> Transaction;
+	if (!bDryRun)
+	{
+		Transaction = MakeUnique<FScopedTransaction>(FText::FromString(TEXT("MCP chooser remap object references")));
+	}
 
 	for (FChooserObjectRef& Ref : Refs)
 	{
@@ -358,7 +365,14 @@ TSharedPtr<FJsonValue> FChooserHandlers::RemapObjectReferences(const TSharedPtr<
 		else
 		{
 			if (!Current.StartsWith(FromPrefix, ESearchCase::IgnoreCase)) continue;
-			NewPath = ToPrefix + Current.RightChop(FromPrefix.Len());
+			// Rewrite the ORIGINAL reference, not the normalized one. Normalize
+			// collapses "/Game/Foo/Bar.Bar" to "/Game/Foo/Bar", and building the
+			// replacement from that produced a package-only path: soft refs
+			// became unresolvable and hard refs resolved to the UPackage.
+			const FString Original = Ref.ObjectPath;
+			const int32 PrefixAt = Original.Find(FromPrefix, ESearchCase::IgnoreCase);
+			if (PrefixAt == INDEX_NONE) continue;
+			NewPath = Original.Left(PrefixAt) + ToPrefix + Original.RightChop(PrefixAt + FromPrefix.Len());
 		}
 
 		TSharedPtr<FJsonObject> Change = RefToJson(Ref);
@@ -369,9 +383,25 @@ TSharedPtr<FJsonValue> FChooserHandlers::RemapObjectReferences(const TSharedPtr<
 			bool bOk = false;
 			if (FSoftObjectProperty* SoftProp = CastField<FSoftObjectProperty>(Ref.Property))
 			{
-				if (Ref.Owner) Ref.Owner->Modify();
-				SoftProp->SetPropertyValue(Ref.ValueAddr, FSoftObjectPtr(FSoftObjectPath(NewPath)));
-				bOk = true;
+				// Validate before writing: a soft ref accepts any string, so an
+				// unresolvable path would be stored silently and reported as a
+				// successful rewrite.
+				const FSoftObjectPath NewSoftPath(NewPath);
+				if (!NewSoftPath.IsValid())
+				{
+					Change->SetStringField(TEXT("error"), FString::Printf(TEXT("Not a valid object path: %s"), *NewPath));
+				}
+				else if (!OptionalBool(Params, TEXT("allowMissing"), false) && !NewSoftPath.ResolveObject() && !NewSoftPath.TryLoad())
+				{
+					Change->SetStringField(TEXT("error"), FString::Printf(
+						TEXT("Target does not exist: %s (pass allowMissing=true to write it anyway)"), *NewPath));
+				}
+				else
+				{
+					if (Ref.Owner) Ref.Owner->Modify();
+					SoftProp->SetPropertyValue(Ref.ValueAddr, FSoftObjectPtr(NewSoftPath));
+					bOk = true;
+				}
 			}
 			else if (FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(Ref.Property))
 			{
@@ -405,6 +435,8 @@ TSharedPtr<FJsonValue> FChooserHandlers::RemapObjectReferences(const TSharedPtr<
 
 	if (!bDryRun && Rewritten > 0)
 	{
+		// Recompile inside the transaction scope opened below by the caller's
+		// undo buffer entry; without a transaction Modify() only dirties.
 		for (UObject* Object : Touched)
 		{
 			if (Object) Object->MarkPackageDirty();

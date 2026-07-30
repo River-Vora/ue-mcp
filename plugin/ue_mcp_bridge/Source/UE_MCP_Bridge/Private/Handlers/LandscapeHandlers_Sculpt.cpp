@@ -22,6 +22,7 @@
 #include "LandscapeInfo.h"
 #include "LandscapeLayerInfoObject.h"
 #include "LandscapeProxy.h"
+#include "LandscapeEditLayer.h"
 #include "EditorScriptingUtilities/Public/EditorAssetLibrary.h"
 #include "ScopedTransaction.h"
 
@@ -105,6 +106,54 @@ namespace
 		return true;
 	}
 
+	/**
+	 * Resolve which edit layer to write into. UE 5.8 landscapes ALWAYS have
+	 * layer content (HasLayersContent/CanHaveLayersContent return true
+	 * unconditionally), so writing without a layer GUID targets the merged
+	 * heightmap - which the layer system then regenerates from the untouched
+	 * layer stack on the next tick, silently erasing the edit. Outside
+	 * Landscape Mode GetEditingLayer() is an invalid GUID, which is exactly
+	 * the case a headless bridge is always in.
+	 */
+	bool ResolveEditLayerGuid(ALandscape* Landscape, const TSharedPtr<FJsonObject>& Params, FGuid& OutGuid, FString& OutName, FString& OutError)
+	{
+		const FString WantedName = OptionalString(Params, TEXT("editLayer"));
+		const int32 WantedIndex = OptionalInt(Params, TEXT("editLayerIndex"), 0);
+
+		const TArray<const ULandscapeEditLayerBase*> Layers = Landscape->GetEditLayersConst();
+		if (Layers.Num() == 0)
+		{
+			OutError = TEXT("Landscape has no edit layers; cannot write a sculpt/paint edit that would survive the next layer update");
+			return false;
+		}
+
+		if (!WantedName.IsEmpty())
+		{
+			for (const ULandscapeEditLayerBase* Layer : Layers)
+			{
+				if (Layer && Layer->GetName().ToString().Equals(WantedName, ESearchCase::IgnoreCase))
+				{
+					OutGuid = Layer->GetGuid();
+					OutName = Layer->GetName().ToString();
+					return true;
+				}
+			}
+			TArray<FString> Names;
+			for (const ULandscapeEditLayerBase* Layer : Layers) { if (Layer) Names.Add(Layer->GetName().ToString()); }
+			OutError = FString::Printf(TEXT("Edit layer '%s' not found. Available: [%s]"), *WantedName, *FString::Join(Names, TEXT(", ")));
+			return false;
+		}
+
+		if (!Layers.IsValidIndex(WantedIndex) || !Layers[WantedIndex])
+		{
+			OutError = FString::Printf(TEXT("editLayerIndex %d is out of range (%d edit layers)"), WantedIndex, Layers.Num());
+			return false;
+		}
+		OutGuid = Layers[WantedIndex]->GetGuid();
+		OutName = Layers[WantedIndex]->GetName().ToString();
+		return true;
+	}
+
 	/** Smooth 0..1 brush weight for a point, given a falloff fraction. */
 	double BrushWeight(double DistanceFraction, double Falloff)
 	{
@@ -161,7 +210,16 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::Sculpt(const TSharedPtr<FJsonObject>&
 	TArray<uint16> Heights;
 	Heights.SetNumZeroed(Width * Height);
 
+	FGuid EditLayerGuid;
+	FString EditLayerName;
+	FString LayerError;
+	if (!ResolveEditLayerGuid(Landscape, Params, EditLayerGuid, EditLayerName, LayerError))
+	{
+		return MCPError(LayerError);
+	}
+
 	FLandscapeEditDataInterface EditData(Info);
+	EditData.SetEditLayer(EditLayerGuid);
 	EditData.GetHeightData(X1, Y1, X2, Y2, Heights.GetData(), 0);
 
 	const FVector Scale = Landscape->ActorToWorld().GetScale3D();
@@ -208,6 +266,7 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::Sculpt(const TSharedPtr<FJsonObject>&
 	{
 		const FScopedTransaction Transaction(FText::FromString(TEXT("MCP landscape sculpt")));
 		Landscape->Modify();
+		FScopedSetLandscapeEditingLayer EditingLayer(Landscape, EditLayerGuid);
 		EditData.SetHeightData(X1, Y1, X2, Y2, Heights.GetData(), 0, /*InCalcNormals=*/true);
 		EditData.Flush();
 	}
@@ -220,6 +279,7 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::Sculpt(const TSharedPtr<FJsonObject>&
 	Result->SetNumberField(TEXT("radius"), Radius);
 	Result->SetNumberField(TEXT("amount"), Amount);
 	Result->SetNumberField(TEXT("verticesTouched"), Touched);
+	Result->SetStringField(TEXT("editLayer"), EditLayerName);
 	Result->SetNumberField(TEXT("rectX1"), X1);
 	Result->SetNumberField(TEXT("rectY1"), Y1);
 	Result->SetNumberField(TEXT("rectX2"), X2);
@@ -289,7 +349,16 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::PaintLayer(const TSharedPtr<FJsonObje
 	TArray<uint8> Weights;
 	Weights.SetNumZeroed(Width * Height);
 
+	FGuid EditLayerGuid;
+	FString EditLayerName;
+	FString LayerError;
+	if (!ResolveEditLayerGuid(Landscape, Params, EditLayerGuid, EditLayerName, LayerError))
+	{
+		return MCPError(LayerError);
+	}
+
 	FLandscapeEditDataInterface EditData(Info);
+	EditData.SetEditLayer(EditLayerGuid);
 	EditData.GetWeightData(LayerInfo, X1, Y1, X2, Y2, Weights.GetData(), 0);
 
 	const FVector Scale = Landscape->ActorToWorld().GetScale3D();
@@ -318,10 +387,12 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::PaintLayer(const TSharedPtr<FJsonObje
 	{
 		const FScopedTransaction Transaction(FText::FromString(TEXT("MCP landscape paint")));
 		Landscape->Modify();
-		// bWeightAdjust normalises the other layers so the weights still sum to
-		// 1; without it a painted layer silently fights whatever was there.
+		// The 9-arg overload taking bWeightAdjust/bTotalWeightAdjust is
+		// deprecated in 5.7 and its body DISCARDS both flags, so calling it
+		// would let us claim a renormalisation that never happened.
+		FScopedSetLandscapeEditingLayer EditingLayer(Landscape, EditLayerGuid);
 		EditData.SetAlphaData(LayerInfo, X1, Y1, X2, Y2, Weights.GetData(), 0,
-			ELandscapeLayerPaintingRestriction::None, /*bWeightAdjust=*/true, /*bTotalWeightAdjust=*/false);
+			ELandscapeLayerPaintingRestriction::None);
 		EditData.Flush();
 	}
 	Landscape->PostEditChange();
@@ -333,6 +404,7 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::PaintLayer(const TSharedPtr<FJsonObje
 	Result->SetNumberField(TEXT("strength"), Strength);
 	Result->SetNumberField(TEXT("radius"), Radius);
 	Result->SetNumberField(TEXT("verticesTouched"), Touched);
-	Result->SetStringField(TEXT("note"), TEXT("Other layer weights were renormalised. The level is left dirty and unsaved."));
+	Result->SetStringField(TEXT("editLayer"), EditLayerName);
+	Result->SetStringField(TEXT("note"), TEXT("Weights are written as given; the engine no longer renormalises other layers for you, so set them explicitly if they must sum to 1. The level is left dirty and unsaved."));
 	return MCPResult(Result);
 }

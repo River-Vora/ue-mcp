@@ -765,26 +765,25 @@ UEnum* FReflectionHandlers::FindEnum(const FString& EnumName)
 	// object graph to find at all. Try the caller's spelling and the
 	// E-prefixed UE convention, unbiased, then fall back to the asset registry
 	// and load the asset before giving up.
+	// NativeFirst FIRST: it is the deterministic tiebreak. Dropping it made a
+	// project enum shadow a native one of the same name in object-hash order,
+	// so reflect_enum could answer differently between editor sessions. Only
+	// widen to an unbiased search once the native lookup has failed.
 	const TArray<FString> Candidates = { EnumName, TEXT("E") + EnumName };
+	for (const FString& Candidate : Candidates)
+	{
+		Enum = FindFirstObject<UEnum>(*Candidate, EFindFirstObjectOptions::NativeFirst);
+		if (Enum)
+		{
+			return Enum;
+		}
+	}
 	for (const FString& Candidate : Candidates)
 	{
 		Enum = FindFirstObject<UEnum>(*Candidate, EFindFirstObjectOptions::None);
 		if (Enum)
 		{
 			return Enum;
-		}
-	}
-
-	// Loaded-module sweep: an enum whose short name matches but whose outer
-	// package the lookups above did not reach.
-	for (TObjectIterator<UEnum> It; It; ++It)
-	{
-		UEnum* Candidate = *It;
-		if (!Candidate) continue;
-		const FString Name = Candidate->GetName();
-		if (Name == EnumName || Name == TEXT("E") + EnumName)
-		{
-			return Candidate;
 		}
 	}
 

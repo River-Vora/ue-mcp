@@ -175,7 +175,7 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 TSharedPtr<FJsonValue> FLevelHandlers::GetOutliner(const TSharedPtr<FJsonObject>& Params)
 {
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
 	FString ClassFilter = OptionalString(Params, TEXT("classFilter"));
@@ -356,7 +356,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::PlaceActor(const TSharedPtr<FJsonObject>&
 	// #585: respect world:pie so the actor spawns into the running PIE world
 	// instead of silently landing in the editor world.
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
@@ -608,7 +608,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentTree(const TSharedPtr<FJsonOb
 	}
 
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World)
 	{
 		return MCPError(FString::Printf(TEXT("World '%s' not available"), *WorldScope));
@@ -817,7 +817,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetRelativeTransform(const TSharedPtr<FJs
 	if (auto Err = RequireStringAlt(Params, TEXT("referenceLabel"), TEXT("reference"), ReferenceLabel)) return Err;
 
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(FString::Printf(TEXT("World '%s' not available"), *WorldScope));
 
 	AActor* TargetActor = FindActorByLabel(World, TargetLabel);
@@ -956,7 +956,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::MoveActor(const TSharedPtr<FJsonObject>& 
 	// resolves and the live actor moves. FindActorByLabelOrName also matches the
 	// runtime instance name PIE shows.
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	AActor* Actor = FindActorByLabelOrName(World, ActorLabel);
@@ -1010,7 +1010,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::AimActorAt(const TSharedPtr<FJsonObject>&
 	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
 
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	AActor* Actor = FindActorByLabel(World, ActorLabel);
@@ -1071,7 +1071,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::NavProjectPoint(const TSharedPtr<FJsonObj
 	const FVector Point = OptionalVec3(Params, TEXT("point"), FVector::ZeroVector);
 
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	UNavigationSystemV1* Nav = UNavigationSystemV1::GetCurrent(World);
@@ -1372,12 +1372,25 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 	FString PropertyName;
 	if (auto Err = RequireString(Params, TEXT("propertyName"), PropertyName)) return Err;
 
-	REQUIRE_EDITOR_WORLD(World);
+	// #763: this was hard-gated to the editor world, so runtime component
+	// writes - setting a movement mode or a gameplay field on a live PIE
+	// component - had no native path at all. Honour world/pieInstance like the
+	// other actor-facing actions.
+	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor")).ToLower();
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
+	if (!World)
+	{
+		return MCPError(WorldScope == TEXT("pie")
+			? TEXT("PIE not running (or no such pieInstance). See editor(list_pie_instances).")
+			: TEXT("Editor world not available"));
+	}
+	const bool bRuntimeWorld = World->IsGameWorld();
 
-	AActor* TargetActor = FindActorByLabel(World, ActorLabel);
+	AActor* TargetActor = FindActorByLabelNameOrPath(World, ActorLabel);
 	if (!TargetActor)
 	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+		return MCPError(FString::Printf(TEXT("Actor not found in the %s world: %s"),
+			bRuntimeWorld ? TEXT("PIE") : TEXT("editor"), *ActorLabel));
 	}
 
 	UActorComponent* TargetComp = FindComponentOnActor(TargetActor, ComponentName);
@@ -1577,7 +1590,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentDetails(const TSharedPtr<FJso
 	TArray<FString> PropFilter = JsonArrayToStringList(PropNamesArr);
 
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
 	AActor* TargetActor = FindActorByLabelNameOrPath(World, ActorLabel);
@@ -1856,7 +1869,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorsByClass(const TSharedPtr<FJsonOb
 	if (auto Err = RequireString(Params, TEXT("className"), ClassName)) return Err;
 
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	// #675: resolve className to an actual UClass so Blueprint subclasses of a
@@ -1924,7 +1937,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorsByComponentClass(const TSharedPt
 	if (auto Err = RequireStringAlt(Params, TEXT("componentClass"), TEXT("className"), ComponentClass)) return Err;
 
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	TArray<TSharedPtr<FJsonValue>> Out;
@@ -1969,7 +1982,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorsByComponentClass(const TSharedPt
 TSharedPtr<FJsonValue> FLevelHandlers::CountActorsByClass(const TSharedPtr<FJsonObject>& Params)
 {
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	const int32 TopN = OptionalInt(Params, TEXT("topN"), 0);
@@ -2020,7 +2033,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::CountActorsByClass(const TSharedPtr<FJson
 TSharedPtr<FJsonValue> FLevelHandlers::GetRVTSummary(const TSharedPtr<FJsonObject>& Params)
 {
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	TArray<TSharedPtr<FJsonValue>> VolumesArr;
@@ -2158,7 +2171,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorBounds(const TSharedPtr<FJsonObje
 	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
 
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
 	AActor* Actor = FindActorByLabelNameOrPath(World, ActorLabel);
@@ -2264,7 +2277,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorProperty(const TSharedPtr<FJsonOb
 	const bool bForce = OptionalBool(Params, TEXT("force"), false);
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
 
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World)
 	{
 		return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
@@ -3047,9 +3060,14 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorFolderPath(const TSharedPtr<FJson
 {
 	REQUIRE_EDITOR_WORLD(World);
 
-	FString FolderPath;
-	if (auto Err = RequireString(Params, TEXT("folderPath"), FolderPath)) return Err;
-	// An empty folder path is legitimate: it moves actors back to the root.
+	// An empty folder path is legitimate - it moves actors back to the root -
+	// so the parameter must be PRESENT but may be empty. RequireString rejects
+	// empty strings, which made the documented root-move impossible.
+	if (!Params->HasField(TEXT("folderPath")))
+	{
+		return MCPError(TEXT("Missing required parameter 'folderPath' (pass \"\" to move actors to the root)"));
+	}
+	FString FolderPath = OptionalString(Params, TEXT("folderPath"));
 	FolderPath = FolderPath.TrimStartAndEnd().Replace(TEXT("\\"), TEXT("/"));
 
 	const FString LabelPrefix = OptionalString(Params, TEXT("labelPrefix"));

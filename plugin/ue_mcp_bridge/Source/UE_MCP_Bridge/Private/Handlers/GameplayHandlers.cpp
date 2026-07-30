@@ -107,8 +107,12 @@ void FGameplayHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("create_input_mapping_context"), &CreateInputMappingContext);
 	Registry.RegisterHandler(TEXT("read_imc"), &ReadImc);
 	// #778: superseded by GetInputMappingContexts, which covers every PIE world
-	// rather than only the primary one. Kept as an alias so raw-bridge callers
-	// and older clients keep working.
+	// rather than only the primary one. The old name stays registered so it does
+	// not become "Unknown method", but the RESPONSE SHAPE changed: results are
+	// now nested under worlds[].players[] and the context array is
+	// mappingContexts (was appliedContexts, with imc -> path). A caller reading
+	// the old shape must be updated - this is name compatibility, not contract
+	// compatibility.
 	Registry.RegisterHandler(TEXT("get_applied_imcs"), &GetInputMappingContexts);
 	Registry.RegisterHandler(TEXT("list_imc_mappings"), &ReadImc);
 	Registry.RegisterHandler(TEXT("add_imc_mapping"), &AddImcMapping);
@@ -870,7 +874,7 @@ TSharedPtr<FJsonValue> FGameplayHandlers::GetStateTreeRuntime(const TSharedPtr<F
 	FString ActorLabel;
 	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("pie"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
 	AActor* Actor = FindActorByLabelNameOrPath(World, ActorLabel);

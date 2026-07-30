@@ -803,13 +803,16 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 	FString ActorLabel;
 	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
 
+	// #778: this used GEditor->GetPIEWorldContext(), which is always the
+	// primary (server) context, so 'pieInstance' could never reach it and a
+	// client world was unaddressable. Route through the shared resolver.
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor")).ToLower();
-	UWorld* World = nullptr;
-	if (WorldScope == TEXT("pie"))
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
+	if (!World)
 	{
-		FWorldContext* PieCtx = GEditor ? GEditor->GetPIEWorldContext() : nullptr;
-		World = PieCtx ? PieCtx->World() : nullptr;
-		if (!World) return MCPError(TEXT("PIE not running - cannot invoke against PIE world"));
+		return MCPError(WorldScope == TEXT("pie")
+			? TEXT("PIE not running (or no such pieInstance) - cannot invoke against PIE world. See editor(list_pie_instances).")
+			: TEXT("No editor world available"));
 	}
 	else
 	{

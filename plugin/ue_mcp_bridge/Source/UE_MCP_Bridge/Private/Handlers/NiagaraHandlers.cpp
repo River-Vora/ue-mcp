@@ -1619,7 +1619,14 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SetModuleInput(const TSharedPtr<FJsonOb
 		? TEXT("Written through the stack override map - the same path the Niagara stack editor uses, so the value applies. Verify with list_module_inputs.")
 		: TEXT("Written as a pin default on the function-call node (this input is not override-map bound). Verify with list_module_inputs."));
 
-	// Rollback: restore previous pin default
+	// Rollback: only meaningful when we captured a REAL previous value. On the
+	// override-map path previousValue is a placeholder, and emitting a rollback
+	// for it would write the literal text "(unread: override map)" into a
+	// numeric or colour input.
+	if (WritePath == TEXT("overrideMap"))
+	{
+		return MCPResult(Res);
+	}
 	TSharedPtr<FJsonObject> RbPayload = MakeShared<FJsonObject>();
 	RbPayload->SetStringField(TEXT("systemPath"), SystemPath);
 	RbPayload->SetStringField(TEXT("moduleName"), ModuleName);
