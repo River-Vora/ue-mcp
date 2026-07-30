@@ -46,6 +46,7 @@
 #include "Perception/AISenseConfig.h"
 #include "NavAreas/NavArea.h"
 #include "Builders/CubeBuilder.h"
+#include "ActorFactories/ActorFactory.h"
 #include "GameFramework/WorldSettings.h"
 #include "UObject/UnrealType.h"
 #include "BehaviorTree/BlackboardData.h"
@@ -1121,23 +1122,31 @@ TSharedPtr<FJsonValue> FGameplayHandlers::SpawnNavModifierVolume(const TSharedPt
 		NewVolume->SetAreaClass(AreaClass);
 	}
 
-	// extent is a half-size in world units; the brush is a box built around the
-	// actor origin. Applied after spawn so it composes with scale.
-	if (Params->HasField(TEXT("extent")))
+	// A bare SpawnActor leaves an AVolume with Brush == nullptr, so the volume
+	// has NO geometry at all - it bounds nothing and modifies nothing no matter
+	// what area class it carries. Every call this action has ever served
+	// produced one of those and reported created: true. Building the brush is
+	// therefore unconditional, not gated on the caller passing extent.
+	//
+	// extent is a half-size in world units, defaulting to the editor's own
+	// 200-unit box. Uses the engine's volume-factory helper rather than a
+	// hand-rolled Build: the model, polys, brush component wiring and
+	// csgPrepMovingBrush all have to happen, and doing a subset silently
+	// yields an actor that looks spawned and is inert.
+	const FVector Extent = Params->HasField(TEXT("extent"))
+		? OptionalVec3(Params, TEXT("extent"), FVector(100.f, 100.f, 100.f))
+		: FVector(100.f, 100.f, 100.f);
+	if (Extent.X <= 0.f || Extent.Y <= 0.f || Extent.Z <= 0.f)
 	{
-		const FVector Extent = OptionalVec3(Params, TEXT("extent"), FVector(100.f, 100.f, 100.f));
-		if (Extent.X <= 0.f || Extent.Y <= 0.f || Extent.Z <= 0.f)
-		{
-			World->DestroyActor(NewVolume);
-			return MCPError(TEXT("extent must be positive on every axis (it is a half-size, not a corner)."));
-		}
-		UCubeBuilder* Builder = NewObject<UCubeBuilder>();
+		World->DestroyActor(NewVolume);
+		return MCPError(TEXT("extent must be positive on every axis (it is a half-size, not a corner)."));
+	}
+	{
+		UCubeBuilder* Builder = NewObject<UCubeBuilder>(NewVolume);
 		Builder->X = Extent.X * 2.f;
 		Builder->Y = Extent.Y * 2.f;
 		Builder->Z = Extent.Z * 2.f;
-		NewVolume->PreEditChange(nullptr);
-		Builder->Build(World, NewVolume);
-		NewVolume->PostEditChange();
+		UActorFactory::CreateBrushForVolumeActor(NewVolume, Builder);
 	}
 
 	const FString FinalLabel = NewVolume->GetActorLabel();
@@ -1148,6 +1157,15 @@ TSharedPtr<FJsonValue> FGameplayHandlers::SpawnNavModifierVolume(const TSharedPt
 	Result->SetStringField(TEXT("actorName"), NewVolume->GetName());
 	Result->SetStringField(TEXT("areaClass"), NewVolume->GetAreaClass()
 		? NewVolume->GetAreaClass()->GetName() : TEXT("(default)"));
+	// Read the built bounds back rather than echoing the request: a volume that
+	// reports created with a zero extent is the exact failure being fixed here.
+	FVector BoundsOrigin, BoundsExtent;
+	NewVolume->GetActorBounds(/*bOnlyCollidingComponents=*/false, BoundsOrigin, BoundsExtent);
+	TSharedPtr<FJsonObject> ExtentJson = MakeShared<FJsonObject>();
+	ExtentJson->SetNumberField(TEXT("x"), BoundsExtent.X);
+	ExtentJson->SetNumberField(TEXT("y"), BoundsExtent.Y);
+	ExtentJson->SetNumberField(TEXT("z"), BoundsExtent.Z);
+	Result->SetObjectField(TEXT("extent"), ExtentJson);
 
 	TSharedPtr<FJsonObject> LocationResult = MakeShared<FJsonObject>();
 	FVector ActorLocation = NewVolume->GetActorLocation();
