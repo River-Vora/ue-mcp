@@ -45,8 +45,7 @@
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISenseConfig.h"
 #include "NavAreas/NavArea.h"
-#include "Builders/CubeBuilder.h"
-#include "ActorFactories/ActorFactory.h"
+#include "VolumeHelpers_Internal.h"
 #include "GameFramework/WorldSettings.h"
 #include "UObject/UnrealType.h"
 #include "BehaviorTree/BlackboardData.h"
@@ -1128,11 +1127,11 @@ TSharedPtr<FJsonValue> FGameplayHandlers::SpawnNavModifierVolume(const TSharedPt
 	// produced one of those and reported created: true. Building the brush is
 	// therefore unconditional, not gated on the caller passing extent.
 	//
-	// extent is a half-size in world units, defaulting to the editor's own
-	// 200-unit box. Uses the engine's volume-factory helper rather than a
-	// hand-rolled Build: the model, polys, brush component wiring and
-	// csgPrepMovingBrush all have to happen, and doing a subset silently
-	// yields an actor that looks spawned and is inert.
+	// extent is a half-size in world units, defaulting to a 200-unit box.
+	// Reuses the shared helper spawn_volume has used since #238 rather than a
+	// hand-rolled UCubeBuilder::Build - the model, polys, brush-component
+	// wiring and csgPrepMovingBrush all have to happen, and doing a subset
+	// silently yields the same inert actor.
 	const FVector Extent = Params->HasField(TEXT("extent"))
 		? OptionalVec3(Params, TEXT("extent"), FVector(100.f, 100.f, 100.f))
 		: FVector(100.f, 100.f, 100.f);
@@ -1141,13 +1140,7 @@ TSharedPtr<FJsonValue> FGameplayHandlers::SpawnNavModifierVolume(const TSharedPt
 		World->DestroyActor(NewVolume);
 		return MCPError(TEXT("extent must be positive on every axis (it is a half-size, not a corner)."));
 	}
-	{
-		UCubeBuilder* Builder = NewObject<UCubeBuilder>(NewVolume);
-		Builder->X = Extent.X * 2.f;
-		Builder->Y = Extent.Y * 2.f;
-		Builder->Z = Extent.Z * 2.f;
-		UActorFactory::CreateBrushForVolumeActor(NewVolume, Builder);
-	}
+	UEMCP::BuildVolumeAsCube(World, NewVolume, Extent);
 
 	const FString FinalLabel = NewVolume->GetActorLabel();
 

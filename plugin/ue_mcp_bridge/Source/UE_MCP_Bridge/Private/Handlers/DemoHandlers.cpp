@@ -2,6 +2,8 @@
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 
+#include "VolumeHelpers_Internal.h"
+
 // Core / Editor
 #include "Editor.h"
 #include "Editor/EditorEngine.h"
@@ -1062,7 +1064,10 @@ TSharedPtr<FJsonObject> FDemoHandlers::StepPcgScatter()
 
 	PCGVol->SetActorLabel(TEXT("Demo_PCGScatter"));
 	PCGVol->SetFolderPath(*DemoConstants::FOLDER);
-	PCGVol->SetActorScale3D(FVector(30.0, 30.0, 3.0));
+	// Scale alone leaves an AVolume's bounds at zero because a bare SpawnActor
+	// gives it no brush, so the PCG surface sampler had nothing to scatter
+	// within. Same fix spawn_volume has carried since #238.
+	UEMCP::BuildVolumeAsCube(World, PCGVol, FVector(3000.0, 3000.0, 300.0));
 
 	// Create a PCG graph directly (no factory needed)
 	UPCGComponent* PCGComp = PCGVol->FindComponentByClass<UPCGComponent>();
