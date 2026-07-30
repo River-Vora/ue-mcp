@@ -372,11 +372,11 @@ TSharedPtr<FJsonValue> FChooserHandlers::RemapObjectReferences(const TSharedPtr<
 	TArray<FChooserObjectRef> Refs;
 	GatherAllRefs(Chooser, Refs);
 
-	// ValueAddr points into TArray storage inside an FInstancedStruct, and a
+	// ValueAddr points into TArray storage inside an FInstancedStruct, and any
 	// load can run PostLoad and editor callbacks that resize those arrays,
-	// leaving later addresses dangling. Object lookups below therefore prefer
-	// an already-loaded object, and soft refs are validated by path without
-	// forcing a load unless the caller asked for existence checking.
+	// leaving every later address dangling. So resolve/validate EVERY target in
+	// a first pass (loads allowed), then re-walk to get fresh addresses and
+	// write in a second pass with no loading at all.
 	const FString NormFrom = NormalizeObjectPath(From);
 	TArray<TSharedPtr<FJsonValue>> Changes;
 	TSet<UObject*> Touched;
@@ -387,6 +387,34 @@ TSharedPtr<FJsonValue> FChooserHandlers::RemapObjectReferences(const TSharedPtr<
 	{
 		Transaction = MakeUnique<FScopedTransaction>(FText::FromString(TEXT("MCP chooser remap object references")));
 	}
+
+	// Pass 1: decide and resolve. May load; must not write.
+	TMap<FString, UObject*> ResolvedTargets;
+	for (const FChooserObjectRef& Ref : Refs)
+	{
+		const FString Cur = NormalizeObjectPath(Ref.ObjectPath);
+		FString Candidate;
+		if (bExact)
+		{
+			if (Cur != NormFrom) continue;
+			Candidate = To;
+		}
+		else
+		{
+			if (!Cur.StartsWith(FromPrefix, ESearchCase::IgnoreCase)) continue;
+			const int32 At = Ref.ObjectPath.Find(FromPrefix, ESearchCase::IgnoreCase);
+			if (At == INDEX_NONE) continue;
+			Candidate = Ref.ObjectPath.Left(At) + ToPrefix + Ref.ObjectPath.RightChop(At + FromPrefix.Len());
+		}
+		if (ResolvedTargets.Contains(Candidate)) continue;
+		UObject* Found = FindObject<UObject>(nullptr, *Candidate);
+		if (!Found) Found = LoadObject<UObject>(nullptr, *Candidate);
+		ResolvedTargets.Add(Candidate, Found);
+	}
+
+	// Pass 2: re-walk so ValueAddr is fresh after any loading above, then write.
+	Refs.Reset();
+	GatherAllRefs(Chooser, Refs);
 
 	for (FChooserObjectRef& Ref : Refs)
 	{
@@ -426,7 +454,7 @@ TSharedPtr<FJsonValue> FChooserHandlers::RemapObjectReferences(const TSharedPtr<
 				{
 					Change->SetStringField(TEXT("error"), FString::Printf(TEXT("Not a valid object path: %s"), *NewPath));
 				}
-				else if (!OptionalBool(Params, TEXT("allowMissing"), false) && !NewSoftPath.ResolveObject() && !NewSoftPath.TryLoad())
+				else if (!OptionalBool(Params, TEXT("allowMissing"), false) && ResolvedTargets.FindRef(NewPath) == nullptr)
 				{
 					Change->SetStringField(TEXT("error"), FString::Printf(
 						TEXT("Target does not exist: %s (pass allowMissing=true to write it anyway)"), *NewPath));
@@ -440,10 +468,8 @@ TSharedPtr<FJsonValue> FChooserHandlers::RemapObjectReferences(const TSharedPtr<
 			}
 			else if (FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(Ref.Property))
 			{
-				// Prefer an already-loaded object so the common case performs no
-				// load at all, and therefore cannot invalidate ValueAddr.
-				UObject* NewTarget = FindObject<UObject>(nullptr, *NewPath);
-				if (!NewTarget) NewTarget = LoadObject<UObject>(nullptr, *NewPath);
+				// Resolved in pass 1; no loading here, so ValueAddr stays valid.
+				UObject* NewTarget = ResolvedTargets.FindRef(NewPath);
 				if (!NewTarget)
 				{
 					Change->SetStringField(TEXT("error"), FString::Printf(TEXT("Target not found: %s"), *NewPath));
