@@ -3,6 +3,10 @@
 // translation-unit partition, not a new class. Handler registration
 // stays in EditorHandlers.cpp::RegisterHandlers.
 
+#include "Editor.h"
+#include "Engine/Engine.h"
+#include "Misc/OutputDeviceRedirector.h"
+
 #include "EditorHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
@@ -11,10 +15,9 @@
 #include "HandlerJsonProperty.h"
 #include "JsonSerializer.h"
 #include "Containers/Ticker.h"
-#include "Editor.h"
 #include "Editor/EditorEngine.h"
+#include "Engine/Blueprint.h"
 #include "Engine/World.h"
-#include "Engine/Engine.h"
 #include "EngineUtils.h"
 #include "Engine/GameInstance.h"
 #include "Engine/LocalPlayer.h"
@@ -31,10 +34,116 @@
 #include "UObject/Package.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "Settings/LevelEditorPlaySettings.h"
 
 namespace
 {
+	static const TCHAR* IgnoreBlueprintErrorsMarker = TEXT("UE_MCP_ALLOW_IGNORE_BLUEPRINT_ERRORS=true");
+	static FDelegateHandle IgnoreErrorsPostPIEHandle;
+	static FDelegateHandle IgnoreErrorsEndPIEHandle;
+	static FTSTicker::FDelegateHandle IgnoreErrorsTimeoutHandle;
+	static bool bIgnoreErrorsBypassArmed = false;
+	static TArray<TWeakObjectPtr<UBlueprint>> SuppressedBlueprintWarnings;
+
+	static void RestoreIgnoreBlueprintErrorsState(bool bFromTimeoutTicker = false)
+	{
+		if (!bIgnoreErrorsBypassArmed)
+		{
+			return;
+		}
+
+		for (const TWeakObjectPtr<UBlueprint>& Blueprint : SuppressedBlueprintWarnings)
+		{
+			if (Blueprint.IsValid())
+			{
+				Blueprint->bDisplayCompilePIEWarning = true;
+			}
+		}
+		SuppressedBlueprintWarnings.Reset();
+		bIgnoreErrorsBypassArmed = false;
+
+		if (IgnoreErrorsPostPIEHandle.IsValid())
+		{
+			FEditorDelegates::PostPIEStarted.Remove(IgnoreErrorsPostPIEHandle);
+			IgnoreErrorsPostPIEHandle.Reset();
+		}
+		if (IgnoreErrorsEndPIEHandle.IsValid())
+		{
+			FEditorDelegates::EndPIE.Remove(IgnoreErrorsEndPIEHandle);
+			IgnoreErrorsEndPIEHandle.Reset();
+		}
+		if (!bFromTimeoutTicker && IgnoreErrorsTimeoutHandle.IsValid())
+		{
+			FTSTicker::GetCoreTicker().RemoveTicker(IgnoreErrorsTimeoutHandle);
+		}
+		IgnoreErrorsTimeoutHandle.Reset();
+	}
+
+	static void ArmIgnoreBlueprintErrorsForNextPIELaunch(const TArray<UBlueprint*>& Blueprints)
+	{
+		SuppressedBlueprintWarnings.Reset(Blueprints.Num());
+		for (UBlueprint* Blueprint : Blueprints)
+		{
+			Blueprint->bDisplayCompilePIEWarning = false;
+			SuppressedBlueprintWarnings.Add(Blueprint);
+		}
+		bIgnoreErrorsBypassArmed = true;
+
+		IgnoreErrorsPostPIEHandle = FEditorDelegates::PostPIEStarted.AddLambda(
+			[](bool) { RestoreIgnoreBlueprintErrorsState(); });
+		IgnoreErrorsEndPIEHandle = FEditorDelegates::EndPIE.AddLambda(
+			[](bool) { RestoreIgnoreBlueprintErrorsState(); });
+
+		const double Deadline = FPlatformTime::Seconds() + 30.0;
+		IgnoreErrorsTimeoutHandle = FTSTicker::GetCoreTicker().AddTicker(
+			FTickerDelegate::CreateLambda([Deadline](float)
+			{
+				if (FPlatformTime::Seconds() < Deadline)
+				{
+					return true;
+				}
+				RestoreIgnoreBlueprintErrorsState(true);
+				return false;
+			}));
+	}
+
+	static FString FindIgnoreBlueprintErrorsInstructionFile()
+	{
+		FString Directory = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+		FPaths::NormalizeDirectoryName(Directory);
+		const TCHAR* Candidates[] = {
+			TEXT("AGENTS.md"),
+			TEXT("CLAUDE.md"),
+			TEXT(".codex/instructions.md"),
+		};
+
+		while (!Directory.IsEmpty())
+		{
+			for (const TCHAR* RelativePath : Candidates)
+			{
+				const FString Candidate = FPaths::Combine(Directory, RelativePath);
+				FString Contents;
+				if (FFileHelper::LoadFileToString(Contents, *Candidate)
+					&& Contents.Contains(IgnoreBlueprintErrorsMarker, ESearchCase::CaseSensitive))
+				{
+					return Candidate;
+				}
+			}
+
+			const FString Parent = FPaths::GetPath(Directory);
+			if (Parent.IsEmpty() || Parent == Directory)
+			{
+				break;
+			}
+			Directory = Parent;
+		}
+
+		return FString();
+	}
+
 	static ULevelEditorPlaySettings* GetPlaySettingsForRW()
 	{
 		return GetMutableDefault<ULevelEditorPlaySettings>();
@@ -169,6 +278,89 @@ TSharedPtr<FJsonValue> FEditorHandlers::PieControl(const TSharedPtr<FJsonObject>
 				return MCPError(FString::Printf(TEXT("AssetRegistry still loading after %.1fs; PIE start aborted. Pass assetRegistryTimeoutSeconds to extend the wait, or retry later."), TimeoutSec));
 			}
 			Result->SetBoolField(TEXT("waitedForAssetRegistry"), true);
+		}
+
+		bool bIgnoreBlueprintErrors = false;
+		Params->TryGetBoolField(TEXT("ignoreBlueprintErrors"), bIgnoreBlueprintErrors);
+		if (bIgnoreBlueprintErrors)
+		{
+			if (bIgnoreErrorsBypassArmed)
+			{
+				return MCPError(TEXT("A Blueprint-error bypass PIE launch is already pending"));
+			}
+
+			FString AuthorizationSource;
+			Params->TryGetStringField(TEXT("authorizationSource"), AuthorizationSource);
+			FString AuthorizationFile;
+			if (AuthorizationSource == TEXT("instructions_file"))
+			{
+				AuthorizationFile = FindIgnoreBlueprintErrorsInstructionFile();
+				if (AuthorizationFile.IsEmpty())
+				{
+					return MCPError(FString::Printf(
+						TEXT("Blueprint-error bypass is not authorized. Add the exact marker %s to AGENTS.md, CLAUDE.md, or .codex/instructions.md at/above the project directory, or use the MCP approval-gated editor action."),
+						IgnoreBlueprintErrorsMarker));
+				}
+			}
+			else if (AuthorizationSource != TEXT("user_approval"))
+			{
+				return MCPError(TEXT("Blueprint-error bypass requires authorizationSource=user_approval from the MCP approval gate or a verified instructions_file marker"));
+			}
+
+			TArray<UBlueprint*> BlueprintsToSuppress;
+			TArray<TSharedPtr<FJsonValue>> ErroredBlueprints;
+			TArray<TSharedPtr<FJsonValue>> MustCompileBlueprints;
+			for (TObjectIterator<UBlueprint> It; It; ++It)
+			{
+				UBlueprint* Blueprint = *It;
+				if (!IsValid(Blueprint))
+				{
+					continue;
+				}
+
+				const bool bWillCompileBecauseDirty =
+					!FBlueprintEditorUtils::IsDataOnlyBlueprint(Blueprint)
+					&& Blueprint->IsPossiblyDirty()
+					&& Blueprint->Status != BS_Unknown;
+				const bool bErroredLevelBlueprint =
+					FBlueprintEditorUtils::IsLevelScriptBlueprint(Blueprint)
+					&& Blueprint->Status == BS_Error;
+				if (bWillCompileBecauseDirty || bErroredLevelBlueprint)
+				{
+					MustCompileBlueprints.Add(MakeShared<FJsonValueString>(Blueprint->GetPathName()));
+				}
+				else if (Blueprint->Status == BS_Error && Blueprint->bDisplayCompilePIEWarning)
+				{
+					ErroredBlueprints.Add(MakeShared<FJsonValueString>(Blueprint->GetPathName()));
+					BlueprintsToSuppress.Add(Blueprint);
+				}
+			}
+
+			if (!MustCompileBlueprints.IsEmpty())
+			{
+				TSharedPtr<FJsonObject> Blocked = MakeShared<FJsonObject>();
+				Blocked->SetBoolField(TEXT("success"), false);
+				Blocked->SetBoolField(TEXT("blocked"), true);
+				Blocked->SetStringField(TEXT("code"), TEXT("blueprints_require_compile"));
+				Blocked->SetStringField(
+					TEXT("error"),
+					TEXT("Blueprint-error bypass only applies to already-compiled, saved Blueprint errors. Compile and save the listed dirty or errored Level Blueprints first."));
+				Blocked->SetArrayField(TEXT("blueprints"), MustCompileBlueprints);
+				return MCPResult(Blocked);
+			}
+
+			ArmIgnoreBlueprintErrorsForNextPIELaunch(BlueprintsToSuppress);
+			Result->SetBoolField(TEXT("ignoredBlueprintErrors"), true);
+			Result->SetNumberField(TEXT("ignoredBlueprintErrorCount"), BlueprintsToSuppress.Num());
+			Result->SetStringField(TEXT("authorizationSource"), AuthorizationSource);
+			if (!AuthorizationFile.IsEmpty())
+			{
+				Result->SetStringField(TEXT("authorizationFile"), AuthorizationFile);
+			}
+			Result->SetArrayField(TEXT("loadedErroredBlueprints"), ErroredBlueprints);
+			Result->SetStringField(
+				TEXT("warning"),
+				TEXT("PIE may run stale or invalid Blueprint bytecode. Suppressed warning flags are restored after this PIE launch is processed."));
 		}
 
 		FRequestPlaySessionParams SessionParams;

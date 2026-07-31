@@ -1,9 +1,40 @@
 import { z } from "zod";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { categoryTool, bp, directive, type ToolDef, type ToolContext } from "../types.js";
 import { startEditor, stopEditor, restartEditor, buildProject } from "../editor-control.js";
 import { pushWorkaround, workaroundCount } from "../workaround-tracker.js";
 import { searchTools } from "../tool-search.js";
 import { Vec3, Rotator } from "../schemas.js";
+
+const IGNORE_BLUEPRINT_ERRORS_MARKER = "UE_MCP_ALLOW_IGNORE_BLUEPRINT_ERRORS=true";
+const INSTRUCTION_FILE_CANDIDATES = [
+  "AGENTS.md",
+  "CLAUDE.md",
+  path.join(".codex", "instructions.md"),
+] as const;
+
+function findIgnoreBlueprintErrorsAuthorization(projectDir: string | null): string | null {
+  if (!projectDir) return null;
+
+  let current = path.resolve(projectDir);
+  while (true) {
+    for (const relativePath of INSTRUCTION_FILE_CANDIDATES) {
+      const candidate = path.join(current, relativePath);
+      try {
+        if (fs.readFileSync(candidate, "utf8").includes(IGNORE_BLUEPRINT_ERRORS_MARKER)) {
+          return candidate;
+        }
+      } catch {
+        // Missing and unreadable instruction files are not authorization.
+      }
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
 
 export const editorTool: ToolDef = categoryTool(
   "editor",
@@ -155,6 +186,67 @@ export const editorTool: ToolDef = categoryTool(
     get_property: bp("Read UObject property. Params: objectPath, propertyName", "get_property"),
     describe_object: bp("Describe a UObject and optionally list/read properties. Params: objectPath, includeProperties?, includeValues?, propertyNames?", "describe_object"),
     play_in_editor: bp("PIE control. Params: pieAction (start|stop|status), waitForAssetRegistry? (start only; default true - block until the AssetRegistry initial scan completes before requesting PIE, otherwise PIE silently no-ops on cold editor starts), assetRegistryTimeoutSeconds? (default 180) (#406)", "pie_control", (p) => ({ action: p.pieAction ?? "status", waitForAssetRegistry: p.waitForAssetRegistry, assetRegistryTimeoutSeconds: p.assetRegistryTimeoutSeconds })),
+    play_in_editor_ignore_blueprint_errors: {
+      description: `Start PIE while suppressing unresolved Blueprint compiler-error dialogs for this launch only. This can run stale or invalid Blueprint bytecode, so it requires either an MCP user-approval prompt or the exact marker ${IGNORE_BLUEPRINT_ERRORS_MARKER} in AGENTS.md, CLAUDE.md, or .codex/instructions.md at/above the project directory. Params: waitForAssetRegistry? (default true), assetRegistryTimeoutSeconds? (default 180).`,
+      handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
+        const authorizationFile = findIgnoreBlueprintErrorsAuthorization(ctx.project.projectDir);
+        let authorizationSource = "instructions_file";
+
+        if (!authorizationFile) {
+          authorizationSource = "user_approval";
+          if (!ctx.elicit) {
+            return {
+              success: false,
+              blocked: true,
+              code: "approval_required",
+              message: `This action requires a user approval prompt, or ${IGNORE_BLUEPRINT_ERRORS_MARKER} in a recognized instruction file. The connected MCP client does not support elicitation.`,
+            };
+          }
+
+          let approval;
+          try {
+            approval = await ctx.elicit({
+              message: [
+                "Start Play In Editor while bypassing unresolved Blueprint compiler-error dialogs?",
+                "",
+                "PIE may run stale or invalid Blueprint bytecode. Runtime behavior and validation results may be unreliable until those Blueprint errors are fixed.",
+                "",
+                "Approve only for this PIE launch.",
+              ].join("\n"),
+              requestedSchema: {
+                type: "object",
+                properties: {},
+              },
+            });
+          } catch (error) {
+            return {
+              success: false,
+              blocked: true,
+              code: "approval_prompt_failed",
+              message: error instanceof Error ? error.message : String(error),
+            };
+          }
+
+          if (approval.action !== "accept") {
+            return {
+              success: false,
+              blocked: true,
+              code: approval.action === "decline" ? "user_declined" : "user_cancelled",
+              message: "PIE was not started because bypass approval was not granted.",
+            };
+          }
+        }
+
+        return ctx.bridge.call("pie_control", {
+          action: "start",
+          ignoreBlueprintErrors: true,
+          authorizationSource,
+          authorizationFile,
+          waitForAssetRegistry: p.waitForAssetRegistry,
+          assetRegistryTimeoutSeconds: p.assetRegistryTimeoutSeconds,
+        });
+      },
+    },
     get_runtime_value: bp("Read PIE actor property. Params: actorLabel, propertyName (supports dotted paths: component.field or component.struct.field for nested reads on component subobjects, #344/#381)", "get_runtime_value"),
     get_pie_pawn: bp("Resolve the controlled pawn in the active PIE world. Params: playerIndex? (default 0). Returns actorLabel/class/location/rotation (#228/#229)", "get_pie_pawn", (p) => ({ playerIndex: p.playerIndex })),
     list_pie_instances: bp("List the running PIE worlds with their instance id, net mode (standalone|listenServer|dedicatedServer|client), player count and whether they own a game viewport. In a multiplayer PIE session every other runtime action resolves the primary world (the server) unless you pass pieInstance, so this is how you discover that a client exists and what id addresses it. Params: none (#778)", "list_pie_instances"),
