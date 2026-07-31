@@ -82,5 +82,59 @@ describe("SkyLight mobility regression", () => {
       String(component.class).includes("SkyLightComponent"),
     );
     expect(restoredSky?.mobility).toBe(previousMobility);
+
+    // Exercise both setter orderings in one self-inverse operation:
+    // Movable -> Static applies properties before demotion, and rollback
+    // Static -> Movable promotes before restoring those properties.
+    const baselineIntensity = 1.25;
+    const changedIntensity = 2.75;
+    const changedColor = { r: 211, g: 67, b: 29 };
+    const baseline = await callBridge(bridge, "set_light_properties", {
+      actorLabel: label,
+      mobility: "movable",
+      intensity: baselineIntensity,
+      color: originalColor,
+    });
+    expect(baseline.ok, baseline.error).toBe(true);
+    expect((baseline.result as Record<string, unknown>).success).not.toBe(false);
+
+    const combined = await callBridge(bridge, "set_light_properties", {
+      actorLabel: label,
+      mobility: "static",
+      intensity: changedIntensity,
+      color: changedColor,
+    });
+    expect(combined.ok, combined.error).toBe(true);
+    const combinedResult = combined.result as Record<string, unknown>;
+    expect(combinedResult.success).not.toBe(false);
+    expect(combinedResult.mobility).toBe("static");
+    expect(combinedResult.intensity).toBeCloseTo(changedIntensity);
+    const combinedColor = combinedResult.color as Record<string, number>;
+    expect(Math.abs(combinedColor.r - changedColor.r)).toBeLessThan(2);
+    expect(Math.abs(combinedColor.g - changedColor.g)).toBeLessThan(2);
+    expect(Math.abs(combinedColor.b - changedColor.b)).toBeLessThan(2);
+
+    const combinedRollback = combinedResult.rollback as {
+      method: string;
+      payload: Record<string, unknown>;
+    };
+    expect(combinedRollback.payload.mobility).toBe("movable");
+    expect(combinedRollback.payload.intensity).toBeCloseTo(baselineIntensity);
+    expect(combinedRollback.payload).toHaveProperty("color");
+
+    const combinedRolledBack = await callBridge(
+      bridge,
+      combinedRollback.method,
+      combinedRollback.payload,
+    );
+    expect(combinedRolledBack.ok, combinedRolledBack.error).toBe(true);
+    const combinedRolledBackResult = combinedRolledBack.result as Record<string, unknown>;
+    expect(combinedRolledBackResult.success).not.toBe(false);
+    expect(combinedRolledBackResult.mobility).toBe("movable");
+    expect(combinedRolledBackResult.intensity).toBeCloseTo(baselineIntensity);
+    const combinedRolledBackColor = combinedRolledBackResult.color as Record<string, number>;
+    expect(Math.abs(combinedRolledBackColor.r - originalColor.r)).toBeLessThan(2);
+    expect(Math.abs(combinedRolledBackColor.g - originalColor.g)).toBeLessThan(2);
+    expect(Math.abs(combinedRolledBackColor.b - originalColor.b)).toBeLessThan(2);
   });
 });

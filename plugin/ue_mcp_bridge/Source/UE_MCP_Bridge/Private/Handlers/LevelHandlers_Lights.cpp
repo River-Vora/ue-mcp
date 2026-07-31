@@ -262,6 +262,61 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetLightProperties(const TSharedPtr<FJson
 			bComponentModified = true;
 		}
 	};
+	auto ApplyMobility = [&](EComponentMobility::Type NewMobility)
+	{
+		PrepareComponentMutation();
+		PropertyComponent->SetMobility(NewMobility);
+		PropertyComponent->MarkRenderStateDirty();
+	};
+
+	// Parse mobility before the light properties so setters never run while a
+	// registered component is Static. UE deliberately ignores intensity, color,
+	// scattering, radius, and cone updates in that state. Promote first when the
+	// requested final mobility is dynamic; otherwise promote temporarily and
+	// restore Static after applying the properties.
+	FString MobilityStr;
+	const bool bHasMobilityRequest =
+		Params->TryGetStringField(TEXT("mobility"), MobilityStr) && !MobilityStr.IsEmpty();
+	EComponentMobility::Type RequestedMobility = PreviousMobility;
+	if (bHasMobilityRequest)
+	{
+		RequestedMobility = EComponentMobility::Movable;
+		if (MobilityStr.Equals(TEXT("Static"), ESearchCase::IgnoreCase))
+		{
+			RequestedMobility = EComponentMobility::Static;
+		}
+		else if (MobilityStr.Equals(TEXT("Stationary"), ESearchCase::IgnoreCase))
+		{
+			RequestedMobility = EComponentMobility::Stationary;
+		}
+	}
+
+	double DynamicPropertyProbe = 0.0;
+	const TSharedPtr<FJsonObject>* DynamicColorProbe = nullptr;
+	const bool bHasDynamicLightPropertyRequest =
+		Params->TryGetNumberField(TEXT("intensity"), DynamicPropertyProbe)
+		|| Params->TryGetObjectField(TEXT("color"), DynamicColorProbe)
+		|| Params->TryGetNumberField(TEXT("volumetricScatteringIntensity"), DynamicPropertyProbe)
+		|| (PointComponent && Params->TryGetNumberField(TEXT("sourceRadius"), DynamicPropertyProbe))
+		|| (SpotComponent && Params->TryGetNumberField(TEXT("innerConeAngle"), DynamicPropertyProbe))
+		|| (SpotComponent && Params->TryGetNumberField(TEXT("outerConeAngle"), DynamicPropertyProbe));
+	bool bMobilityAppliedBeforeProperties = false;
+	bool bTemporarilyPromotedStatic = false;
+	if (PreviousMobility == EComponentMobility::Static && bHasDynamicLightPropertyRequest)
+	{
+		if (bHasMobilityRequest && RequestedMobility != EComponentMobility::Static)
+		{
+			ApplyMobility(RequestedMobility);
+			bAnyChange = true;
+			bChangedMobility = true;
+			bMobilityAppliedBeforeProperties = true;
+		}
+		else
+		{
+			ApplyMobility(EComponentMobility::Stationary);
+			bTemporarilyPromotedStatic = true;
+		}
+	}
 
 	double Intensity = 0.0;
 	if (Params->TryGetNumberField(TEXT("intensity"), Intensity))
@@ -354,24 +409,17 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetLightProperties(const TSharedPtr<FJson
 		bChangedRotation = true;
 	}
 
-	// #310: mobility setter — static/stationary/movable.
-	FString MobilityStr;
-	if (Params->TryGetStringField(TEXT("mobility"), MobilityStr) && !MobilityStr.IsEmpty())
+	// #310: mobility setter - static/stationary/movable. Demotions happen
+	// after property setters; promotions required by those setters happened above.
+	if (bHasMobilityRequest && !bMobilityAppliedBeforeProperties)
 	{
-		EComponentMobility::Type NewMobility = EComponentMobility::Movable;
-		if (MobilityStr.Equals(TEXT("Static"), ESearchCase::IgnoreCase))
-		{
-			NewMobility = EComponentMobility::Static;
-		}
-		else if (MobilityStr.Equals(TEXT("Stationary"), ESearchCase::IgnoreCase))
-		{
-			NewMobility = EComponentMobility::Stationary;
-		}
-		PrepareComponentMutation();
-		PropertyComponent->SetMobility(NewMobility);
-		PropertyComponent->MarkRenderStateDirty();
+		ApplyMobility(RequestedMobility);
 		bAnyChange = true;
 		bChangedMobility = true;
+	}
+	else if (bTemporarilyPromotedStatic)
+	{
+		ApplyMobility(PreviousMobility);
 	}
 
 	if (bAnyChange)
