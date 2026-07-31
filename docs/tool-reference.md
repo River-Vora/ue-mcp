@@ -380,6 +380,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `set_blend_sample` | Move an existing BlendSpace sample or swap its animation. Params: `assetPath, sampleIndex, position? {x,y} (or flat x,y), animation? (#272)` |
 | `list` | List anim assets. Params: `directory?, recursive?` |
 | `create_montage` | Create montage. Params: `animSequencePath, name?, packagePath?` |
+| `author_montages_batch` | Batch-author montages with slot/blend configuration, sections, custom notify classes/properties, per-item errors, idempotency, saving, and rollback metadata. Params: `items[]` |
 | `create_anim_blueprint` | Create AnimBP. Params: `skeletonPath, name?, packagePath?, parentClass?` |
 | `create_blendspace` | Create blendspace (2D). Params: `skeletonPath, name?, packagePath?, axisHorizontal?, axisVertical?` |
 | `create_blendspace_1d` | Create BlendSpace1D. Params: `skeletonPath, name?, packagePath?, axisName? (default Speed), axisMin?, axisMax?, gridNum? (#459)` |
