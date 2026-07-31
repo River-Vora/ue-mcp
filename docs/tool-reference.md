@@ -2,7 +2,7 @@
 
 This page lists ue-mcp's own category tools and actions. For the official Unreal 5.8 tools that ue-mcp wraps (surfaced inside these same categories), see [Native Tools](native-tools.md).
 
-UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->759+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
+UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->761+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
 
 !!! tip "First call in any session"
     Start with `project(action="get_status")` to check the connection, then `level(action="get_outliner")` or `asset(action="list")` to explore.
@@ -300,6 +300,8 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `list_actor_tags` | List an actor's Tags. Params: `actorLabel (#219)` |
 | `attach_actor` | Attach actor as child. Params: `childLabel, parentLabel, attachRule? (KeepWorld\|KeepRelative\|SnapToTarget; default KeepWorld), socketName? (#205)` |
 | `detach_actor` | Detach actor from parent. Params: `childLabel (#205)` |
+| `attach_component` | Attach an actor root or exact named child SceneComponent to an actor root or exact named parent SceneComponent. A non-root child changes only component hierarchy, not actor parentage. An already-matching attachment is a no-op and does not reapply transform rules. Returns verified resolved component and socket details; native attachment failure is an error. Params: `childLabel, parentLabel, childComponentName? (default child root), parentComponentName? (default parent root), socketName?, attachRule? (KeepWorld\|KeepRelative\|SnapToTarget; default KeepWorld), weldSimulatedBodies? (default false)` |
+| `detach_component` | Detach an actor root or exact named child SceneComponent while preserving world transform. Omitted childComponentName selects the actor root. An already-detached component is a verified no-op. Returns previous parent component/socket details plus alreadyDetached and detachmentChanged. Params: `childLabel, childComponentName?` |
 | `set_actor_mobility` | Set actor root component Mobility. Params: `actorLabel, mobility (static\|stationary\|movable) (#205)` |
 | `get_current_edit_level` | Read the active edit-target sub-level (#204) |
 | `set_current_edit_level` | Set the active edit-target sub-level so subsequent spawns land in it. Params: `levelName (e.g. SubLevel_A) (#204)` |
