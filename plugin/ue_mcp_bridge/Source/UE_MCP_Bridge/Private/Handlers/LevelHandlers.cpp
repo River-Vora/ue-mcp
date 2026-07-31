@@ -3519,11 +3519,44 @@ TSharedPtr<FJsonValue> FLevelHandlers::AttachComponent(const TSharedPtr<FJsonObj
 		return MCPResult(Result);
 	}
 
-	// Root-component attachment also reparents the actor, so apply the editor's
-	// actor-level parenting checks. Named child components rely on the native
-	// component self/cycle checks and do not alter actor parentage.
-	if (ChildComponent == Child->GetRootComponent() && GEditor)
+	// Reject topology that native AttachToComponent would refuse before calling
+	// Modify(), so failed self/cycle requests cannot create undo or dirty state.
+	if (ChildComponent == ParentComponent)
 	{
+		return MCPError(FString::Printf(
+			TEXT("Cannot attach component '%s' on actor '%s' to itself"),
+			*ChildComponent->GetName(),
+			*ChildLabel));
+	}
+	if (ParentComponent->IsAttachedTo(ChildComponent))
+	{
+		return MCPError(FString::Printf(
+			TEXT("Cannot attach component '%s' on actor '%s' beneath its descendant component '%s' on actor '%s'"),
+			*ChildComponent->GetName(),
+			*ChildLabel,
+			*ParentComponent->GetName(),
+			*ParentLabel));
+	}
+	if (!ParentComponent->CanAttachAsChild(ChildComponent, Socket))
+	{
+		return MCPError(FString::Printf(
+			TEXT("Parent component '%s' on actor '%s' cannot accept child component '%s' on actor '%s' at socket '%s'"),
+			*ParentComponent->GetName(),
+			*ParentLabel,
+			*ChildComponent->GetName(),
+			*ChildLabel,
+			Socket == NAME_None ? TEXT("") : *Socket.ToString()));
+	}
+
+	// Even when only a named non-root component is reparented, a cross-actor
+	// reference must obey the editor's actor-domain rules (level, content bundle,
+	// external data layer, World Partition ownership, and actor-level cycles).
+	if (Child != Parent)
+	{
+		if (!GEditor)
+		{
+			return MCPError(TEXT("Editor actor-parenting validation is unavailable"));
+		}
 		FText ParentingReason;
 		if (!GEditor->CanParentActors(Parent, Child, &ParentingReason))
 		{
@@ -3546,8 +3579,9 @@ TSharedPtr<FJsonValue> FLevelHandlers::AttachComponent(const TSharedPtr<FJsonObj
 			*ParentLabel));
 	}
 
-	Child->Modify();
-	ChildComponent->Modify();
+	// Record transaction state without dirtying until native attachment succeeds.
+	Child->Modify(false);
+	ChildComponent->Modify(false);
 	Parent->Modify(false);
 	ParentComponent->Modify(false);
 	if (PreviousParent)

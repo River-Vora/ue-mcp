@@ -349,6 +349,143 @@ describe("level — write (with cleanup)", () => {
     expect(alreadyDetachedResult.previousParentLabel).toBe("");
     expect(alreadyDetachedResult.previousParentComponentName).toBe("");
     expect(alreadyDetachedResult.previousSocketName).toBe("");
+
+    const sameActorParentComponentName = "SocketParentComponent";
+    const addedSameActorParent = await callBridge(bridge, "add_component_to_actor", {
+      actorLabel: childLabel,
+      componentClass: "SceneComponent",
+      componentName: sameActorParentComponentName,
+    });
+    expect(addedSameActorParent.ok, addedSameActorParent.error).toBe(true);
+    expect((addedSameActorParent.result as Record<string, unknown>).success).not.toBe(false);
+
+    const sameActorAttach = await callBridge(bridge, "attach_component", {
+      childLabel,
+      parentLabel: childLabel,
+      childComponentName,
+      parentComponentName: sameActorParentComponentName,
+    });
+    expect(sameActorAttach.ok, sameActorAttach.error).toBe(true);
+    expect((sameActorAttach.result as Record<string, unknown>).success).not.toBe(false);
+
+    const selfAttach = await callBridge(bridge, "attach_component", {
+      childLabel,
+      parentLabel: childLabel,
+      childComponentName,
+      parentComponentName: childComponentName,
+    });
+    expect(selfAttach.ok, selfAttach.error).toBe(true);
+    const selfAttachResult = selfAttach.result as Record<string, unknown>;
+    expect(selfAttachResult.success).toBe(false);
+    expect(String(selfAttachResult.error)).toContain("to itself");
+
+    const cycleAttach = await callBridge(bridge, "attach_component", {
+      childLabel,
+      parentLabel: childLabel,
+      childComponentName: sameActorParentComponentName,
+      parentComponentName: childComponentName,
+    });
+    expect(cycleAttach.ok, cycleAttach.error).toBe(true);
+    const cycleAttachResult = cycleAttach.result as Record<string, unknown>;
+    expect(cycleAttachResult.success).toBe(false);
+    expect(String(cycleAttachResult.error)).toContain("descendant");
+
+    const afterRejectedTopology = await callBridge(bridge, "get_component_tree", { actorLabel: childLabel });
+    expect(afterRejectedTopology.ok, afterRejectedTopology.error).toBe(true);
+    const afterRejectedComponents = ((afterRejectedTopology.result as Record<string, unknown>).components ?? []) as Array<Record<string, unknown>>;
+    const afterRejectedChild = afterRejectedComponents.find((component) => component.name === childComponentName);
+    expect(afterRejectedChild?.attachParent).toBe(sameActorParentComponentName);
+  });
+
+  it("attach_component rejects cross-level named-component references", async () => {
+    const suffix = Date.now();
+    const parentLabel = `MCPTest_CrossLevelParent_${suffix}`;
+    const childLabel = `MCPTest_CrossLevelChild_${suffix}`;
+    const childComponentName = "CrossLevelChildComponent";
+    const sublevelPath = "/Engine/Maps/Entry";
+    const sublevelName = "Entry";
+
+    const current = await callBridge(bridge, "get_current_edit_level");
+    expect(current.ok, current.error).toBe(true);
+    const currentResult = current.result as Record<string, unknown>;
+    const originalLevelName = String(currentResult.levelName);
+    let sublevelAdded = false;
+
+    try {
+      const addedSublevel = await callBridge(bridge, "add_streaming_sublevel", {
+        levelPath: sublevelPath,
+        initiallyLoaded: true,
+        initiallyVisible: true,
+      });
+      expect(addedSublevel.ok, addedSublevel.error).toBe(true);
+      expect((addedSublevel.result as Record<string, unknown>).success).not.toBe(false);
+      sublevelAdded = true;
+
+      const selectedSublevel = await callBridge(bridge, "set_current_edit_level", {
+        levelName: sublevelName,
+      });
+      expect(selectedSublevel.ok, selectedSublevel.error).toBe(true);
+      expect((selectedSublevel.result as Record<string, unknown>).success).not.toBe(false);
+
+      const parent = await callBridge(bridge, "place_actor", {
+        actorClass: "/Script/Engine.StaticMeshActor",
+        label: parentLabel,
+        staticMesh: "/Engine/BasicShapes/Cube.Cube",
+      });
+      expect(parent.ok, parent.error).toBe(true);
+      expect((parent.result as Record<string, unknown>).success).not.toBe(false);
+
+      const restoredPersistent = await callBridge(bridge, "set_current_edit_level", {
+        levelName: originalLevelName,
+      });
+      expect(restoredPersistent.ok, restoredPersistent.error).toBe(true);
+      expect((restoredPersistent.result as Record<string, unknown>).success).not.toBe(false);
+
+      const child = await callBridge(bridge, "place_actor", {
+        actorClass: "/Script/Engine.StaticMeshActor",
+        label: childLabel,
+        staticMesh: "/Engine/BasicShapes/Cube.Cube",
+      });
+      expect(child.ok, child.error).toBe(true);
+      expect((child.result as Record<string, unknown>).success).not.toBe(false);
+
+      const addedChildComponent = await callBridge(bridge, "add_component_to_actor", {
+        actorLabel: childLabel,
+        componentClass: "SceneComponent",
+        componentName: childComponentName,
+      });
+      expect(addedChildComponent.ok, addedChildComponent.error).toBe(true);
+      expect((addedChildComponent.result as Record<string, unknown>).success).not.toBe(false);
+
+      const beforeTree = await callBridge(bridge, "get_component_tree", { actorLabel: childLabel });
+      expect(beforeTree.ok, beforeTree.error).toBe(true);
+      const beforeComponents = ((beforeTree.result as Record<string, unknown>).components ?? []) as Array<Record<string, unknown>>;
+      const beforeChild = beforeComponents.find((component) => component.name === childComponentName);
+      const previousAttachParent = beforeChild?.attachParent;
+
+      const rejected = await callBridge(bridge, "attach_component", {
+        childLabel,
+        parentLabel,
+        childComponentName,
+      });
+      expect(rejected.ok, rejected.error).toBe(true);
+      const rejectedResult = rejected.result as Record<string, unknown>;
+      expect(rejectedResult.success).toBe(false);
+      expect(String(rejectedResult.error)).toContain("same level");
+
+      const afterTree = await callBridge(bridge, "get_component_tree", { actorLabel: childLabel });
+      expect(afterTree.ok, afterTree.error).toBe(true);
+      const afterComponents = ((afterTree.result as Record<string, unknown>).components ?? []) as Array<Record<string, unknown>>;
+      const afterChild = afterComponents.find((component) => component.name === childComponentName);
+      expect(afterChild?.attachParent).toBe(previousAttachParent);
+    } finally {
+      await callBridge(bridge, "set_current_edit_level", { levelName: originalLevelName });
+      await callBridge(bridge, "delete_actor", { actorLabel: childLabel });
+      await callBridge(bridge, "delete_actor", { actorLabel: parentLabel });
+      if (sublevelAdded) {
+        await callBridge(bridge, "remove_streaming_sublevel", { levelName: sublevelName });
+      }
+    }
   });
 
   it("delete_actor", async () => {
