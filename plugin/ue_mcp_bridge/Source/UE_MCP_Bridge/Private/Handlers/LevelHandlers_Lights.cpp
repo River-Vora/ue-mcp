@@ -288,8 +288,11 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetLightProperties(const TSharedPtr<FJson
 		{
 			NewMobility = EComponentMobility::Stationary;
 		}
-		LightComponent->SetMobility(NewMobility);
-		LightComponent->MarkRenderStateDirty();
+		USceneComponent* MobilityComponent = LightComponent
+			? static_cast<USceneComponent*>(LightComponent)
+			: static_cast<USceneComponent*>(SkyForProps);
+		MobilityComponent->SetMobility(NewMobility);
+		MobilityComponent->MarkRenderStateDirty();
 		bAnyChange = true;
 	}
 
