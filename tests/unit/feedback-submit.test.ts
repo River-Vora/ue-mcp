@@ -54,6 +54,10 @@ const CACHED_USER = {
 
 describe("feedback(submit) elicitation gate", () => {
   beforeEach(() => {
+    // Routing (plugin-registry lookup) is exercised in feedback-routing.test.ts
+    // and feedback-submit-routing.test.ts. Pinning it off here keeps this file
+    // about the approval gate and keeps it off the network.
+    process.env.UE_MCP_FEEDBACK_ROUTING = "off";
     clearWorkarounds();
     mockSubmitFeedback.mockReset();
     mockReadUserAuth.mockReset();
@@ -130,7 +134,10 @@ describe("feedback(submit) elicitation gate", () => {
   // client that answers without rendering a form) is covered separately below;
   // disabling the timing heuristic here keeps both deterministic.
   beforeEach(() => { process.env.UE_MCP_ELICIT_MIN_HUMAN_MS = "0"; });
-  afterEach(() => { delete process.env.UE_MCP_ELICIT_MIN_HUMAN_MS; });
+  afterEach(() => {
+    delete process.env.UE_MCP_ELICIT_MIN_HUMAN_MS;
+    delete process.env.UE_MCP_FEEDBACK_ROUTING;
+  });
 
   it("does NOT submit when user declines the prompt", async () => {
     const elicit = vi.fn<ElicitFn>().mockResolvedValue({ action: "decline" } as ElicitResult);
@@ -266,7 +273,7 @@ describe("feedback(submit) elicitation gate", () => {
 
     expect(promptShown).toContain("@tester");
     const [, , , opts] = mockSubmitFeedback.mock.calls[0];
-    expect(opts).toEqual({ useBot: false });
+    expect(opts).toEqual({ useBot: false, repo: { owner: "db-lyon", repo: "ue-mcp" } });
   });
 
   it("author=\"bot\" posts as bot regardless of cached auth", async () => {
@@ -298,7 +305,7 @@ describe("feedback(submit) elicitation gate", () => {
 
     expect(promptShown).toContain("ue-mcp-feedback bot");
     const [, , , opts] = mockSubmitFeedback.mock.calls[0];
-    expect(opts).toEqual({ useBot: true });
+    expect(opts).toEqual({ useBot: true, repo: { owner: "db-lyon", repo: "ue-mcp" } });
   });
 
   it("non-empty revisions returns revisions_requested directive (no submit)", async () => {
