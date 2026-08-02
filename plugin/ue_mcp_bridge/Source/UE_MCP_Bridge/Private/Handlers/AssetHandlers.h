@@ -77,6 +77,8 @@ private:
 	static TSharedPtr<FJsonValue> CompareTextures(const TSharedPtr<FJsonObject>& Params);
 	// #430: one-call batch of texture imports - loops AssetImportTasks inside the editor.
 	static TSharedPtr<FJsonValue> ImportTextureBatch(const TSharedPtr<FJsonObject>& Params);
+	// Create and persist a TextureRenderTarget2D with explicit render settings.
+	static TSharedPtr<FJsonValue> CreateRenderTarget2D(const TSharedPtr<FJsonObject>& Params);
 
 	// StringTable handlers
 	static TSharedPtr<FJsonValue> CreateStringTable(const TSharedPtr<FJsonObject>& Params);
