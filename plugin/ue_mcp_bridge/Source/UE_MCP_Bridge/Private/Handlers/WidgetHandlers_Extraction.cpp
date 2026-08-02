@@ -40,7 +40,10 @@ FString MakeExtractionWidgetBlueprintObjectPath(const FString& InAssetPath)
 UWidgetBlueprint* LoadWidgetBlueprintForExtraction(const FString& AssetPath)
 {
 	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	if (!LoadedAsset)
+	// A missing destination is the normal create path. StaticLoadObject on a
+	// non-existent package can force a blocking package search, so only use the
+	// fallback for explicit object/generated-class paths supplied by callers.
+	if (!LoadedAsset && AssetPath.Contains(TEXT(".")))
 	{
 		const FString ObjectPath = MakeExtractionWidgetBlueprintObjectPath(AssetPath);
 		LoadedAsset = StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath);
@@ -98,7 +101,7 @@ bool ParseDestinationPath(const FString& RequestedPath, FString& OutPackagePath,
 
 void BuildPlan(UWidget* SourceRoot, const FString& DestinationRootName, TArray<FExtractedWidgetPlanEntry>& OutPlan)
 {
-	UWidgetTree::ForWidgetAndChildren(SourceRoot, [&](UWidget* Widget)
+	auto AddPlanEntry = [&](UWidget* Widget, const bool bIsRoot)
 	{
 		if (!Widget)
 		{
@@ -108,11 +111,23 @@ void BuildPlan(UWidget* SourceRoot, const FString& DestinationRootName, TArray<F
 		FExtractedWidgetPlanEntry& Entry = OutPlan.AddDefaulted_GetRef();
 		Entry.SourceWidget = Widget;
 		Entry.SourceName = Widget->GetName();
-		Entry.DestinationName = Widget == SourceRoot ? DestinationRootName : Entry.SourceName;
-		if (UPanelWidget* Parent = Widget->GetParent())
+		Entry.DestinationName = bIsRoot ? DestinationRootName : Entry.SourceName;
+		if (!bIsRoot)
 		{
-			Entry.ParentDestinationName = Parent == SourceRoot ? DestinationRootName : Parent->GetName();
-			Entry.ChildIndex = Parent->GetChildIndex(Widget);
+			if (UPanelWidget* Parent = Widget->GetParent())
+			{
+				Entry.ParentDestinationName = Parent == SourceRoot ? DestinationRootName : Parent->GetName();
+				Entry.ChildIndex = Parent->GetChildIndex(Widget);
+			}
+		}
+	};
+
+	AddPlanEntry(SourceRoot, true);
+	UWidgetTree::ForWidgetAndChildren(SourceRoot, [&](UWidget* Widget)
+	{
+		if (Widget != SourceRoot)
+		{
+			AddPlanEntry(Widget, false);
 		}
 	});
 }
@@ -371,6 +386,26 @@ TSharedPtr<FJsonValue> FWidgetHandlers::ExtractWidgetSubtree(const TSharedPtr<FJ
 	}
 	if (!ImportedRoot)
 	{
+		for (UWidget* Imported : ImportedWidgets)
+		{
+			if (!Imported)
+			{
+				continue;
+			}
+			UWidget* ImportedParent = Imported->GetParent();
+			if (!ImportedParent || !ImportedWidgets.Contains(ImportedParent))
+			{
+				if (ImportedRoot)
+				{
+					ImportedRoot = nullptr;
+					break;
+				}
+				ImportedRoot = Imported;
+			}
+		}
+	}
+	if (!ImportedRoot)
+	{
 		if (bCreatedDestination)
 		{
 			UEditorAssetLibrary::DeleteAsset(DestinationAssetPath);
@@ -378,7 +413,7 @@ TSharedPtr<FJsonValue> FWidgetHandlers::ExtractWidgetSubtree(const TSharedPtr<FJ
 		return MCPError(TEXT("Imported subtree root could not be identified"));
 	}
 
-	if (DestinationRootName != SourceRoot->GetName())
+	if (ImportedRoot->GetName() != DestinationRootName)
 	{
 		ImportedRoot->Rename(*DestinationRootName, Destination->WidgetTree, REN_DontCreateRedirectors | REN_NonTransactional);
 		if (ImportedRoot->GetDisplayLabel().Equals(SourceRoot->GetName()))
