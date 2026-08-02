@@ -10,12 +10,55 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/PackageName.h"
+#include "UObject/UObjectGlobals.h"
 #include "WidgetBlueprint.h"
 #include "WidgetBlueprintEditorUtils.h"
 #include "WidgetBlueprintFactory.h"
 
 namespace
 {
+FString MakeExtractionWidgetBlueprintObjectPath(const FString& InAssetPath)
+{
+	FString ObjectPath = InAssetPath;
+	ObjectPath.TrimStartAndEndInline();
+	ObjectPath.RemoveFromStart(TEXT("WidgetBlueprint'"));
+	ObjectPath.RemoveFromEnd(TEXT("'"));
+
+	const int32 LastSlashIndex = ObjectPath.Find(TEXT("/"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+	const int32 DotIndex = ObjectPath.Find(TEXT("."), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+	if (DotIndex <= LastSlashIndex)
+	{
+		const FString AssetName = FPackageName::GetLongPackageAssetName(ObjectPath);
+		if (!AssetName.IsEmpty())
+		{
+			ObjectPath += TEXT(".") + AssetName;
+		}
+	}
+	return ObjectPath;
+}
+
+UWidgetBlueprint* LoadWidgetBlueprintForExtraction(const FString& AssetPath)
+{
+	UObject* LoadedAsset = UEditorAssetLibrary::LoadAsset(AssetPath);
+	if (!LoadedAsset)
+	{
+		const FString ObjectPath = MakeExtractionWidgetBlueprintObjectPath(AssetPath);
+		LoadedAsset = StaticLoadObject(UObject::StaticClass(), nullptr, *ObjectPath);
+	}
+
+	if (UWidgetBlueprint* WidgetBlueprint = Cast<UWidgetBlueprint>(LoadedAsset))
+	{
+		return WidgetBlueprint;
+	}
+
+	if (UClass* LoadedClass = Cast<UClass>(LoadedAsset))
+	{
+		return Cast<UWidgetBlueprint>(LoadedClass->ClassGeneratedBy);
+	}
+
+	return nullptr;
+}
+
 struct FExtractedWidgetPlanEntry
 {
 	UWidget* SourceWidget = nullptr;
@@ -158,7 +201,7 @@ TSharedPtr<FJsonValue> FWidgetHandlers::ExtractWidgetSubtree(const TSharedPtr<FJ
 	const bool bDryRun = OptionalBool(Params, TEXT("dryRun"), true);
 	const FString RequestedParentClass = OptionalString(Params, TEXT("destinationParentClass"), TEXT("UserWidget"));
 
-	UWidgetBlueprint* Source = Cast<UWidgetBlueprint>(UEditorAssetLibrary::LoadAsset(SourceAssetPath));
+	UWidgetBlueprint* Source = LoadWidgetBlueprintForExtraction(SourceAssetPath);
 	if (!Source || !Source->WidgetTree)
 	{
 		return MCPError(FString::Printf(TEXT("Failed to load source WidgetBlueprint at '%s'"), *SourceAssetPath));
@@ -213,7 +256,7 @@ TSharedPtr<FJsonValue> FWidgetHandlers::ExtractWidgetSubtree(const TSharedPtr<FJ
 		DestinationNames.Add(Entry.DestinationName);
 	}
 
-	UWidgetBlueprint* ExistingDestination = Cast<UWidgetBlueprint>(UEditorAssetLibrary::LoadAsset(DestinationAssetPath));
+	UWidgetBlueprint* ExistingDestination = LoadWidgetBlueprintForExtraction(DestinationAssetPath);
 	if (ExistingDestination && ExistingDestination->ParentClass != ParentClass)
 	{
 		return MCPError(FString::Printf(TEXT("Destination parent class is '%s', expected '%s'"),
