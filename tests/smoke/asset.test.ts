@@ -78,6 +78,21 @@ describe("asset — write (with cleanup)", () => {
     expect(r.method).toBe("save_asset");
   });
 
+  it("bulk_set_asset_properties rejects an invalid batch before mutation", async () => {
+    const r = await callBridge(bridge, "bulk_set_asset_properties", {
+      items: [
+        { assetPath: "/Game/DoesNotExist_BulkPropertySmoke", properties: { Value: 1 } },
+        { assetPath: "/Game/AlsoDoesNotExist_BulkPropertySmoke", properties: { Value: 2 } },
+      ],
+      dryRun: true,
+    });
+    expect(r.method).toBe("bulk_set_asset_properties");
+    expect(r.ok, r.error).toBe(true);
+    const result = r.result as { success?: boolean; error?: string };
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Preflight failed");
+  });
+
   it("create_folder + delete_folder round-trip", async () => {
     const folder = `${TEST_PREFIX}/FolderRoundTrip_${Date.now()}`;
     const created = await callBridge(bridge, "create_folder", { path: folder });

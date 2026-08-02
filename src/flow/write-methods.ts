@@ -66,6 +66,15 @@ const EXPLICIT: Record<string, Extractor> = {
   },
   // Batch delete.
   delete_asset_batch: (p) => strArray(p.assetPaths),
+  // Bulk property write: each descriptor owns one asset path.
+  bulk_set_asset_properties: (p) => {
+    const out: string[] = [];
+    for (const item of (Array.isArray(p.items) ? p.items : []) as Record<string, unknown>[]) {
+      const assetPath = str(item.assetPath);
+      if (assetPath) out.push(assetPath);
+    }
+    return out;
+  },
 };
 
 /**

@@ -102,6 +102,9 @@ private:
 	// #420: nested-path UPROPERTY setter for any asset (materials, datatables,
 	// data assets, etc.) so callers don't read-modify-write struct copies.
 	static TSharedPtr<FJsonValue> SetAssetProperty(const TSharedPtr<FJsonObject>& Params);
+	// Batch counterpart to SetAssetProperty. Preflights every asset/property
+	// before mutating any package and emits a replayable rollback payload.
+	static TSharedPtr<FJsonValue> BulkSetAssetProperties(const TSharedPtr<FJsonObject>& Params);
 	// #421: batch texture settings by canonical type (Normal/Grayscale/BaseColor/HDR).
 	static TSharedPtr<FJsonValue> SetTextureSettingsByType(const TSharedPtr<FJsonObject>& Params);
 	// #421: one-call factory for an Interchange pipeline asset with the

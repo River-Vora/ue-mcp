@@ -200,6 +200,7 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("add_socket"), &AddSocket);
 	Registry.RegisterHandler(TEXT("set_socket_transform"), &SetSocketTransform);
 	Registry.RegisterHandler(TEXT("set_asset_property"), &SetAssetProperty);
+	Registry.RegisterHandler(TEXT("bulk_set_asset_properties"), &BulkSetAssetProperties);
 	Registry.RegisterHandler(TEXT("set_texture_settings_by_type"), &SetTextureSettingsByType);
 	Registry.RegisterHandler(TEXT("create_interchange_pipeline"), &CreateInterchangePipeline);
 	Registry.RegisterHandler(TEXT("remove_socket"), &RemoveSocket);
