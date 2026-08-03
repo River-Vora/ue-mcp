@@ -553,6 +553,43 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 	// actor happens to be standing.
 	const bool bComponentSpace = OptionalString(Params, TEXT("space"), TEXT("world")).ToLower() == TEXT("component");
 	const FTransform ComponentToWorld = Mesh->GetComponentTransform();
+	// GetSocketTransform(RTS_Component) first composes through world space.
+	// Build the evaluated component transform directly so non-uniform component
+	// scale cannot leak into a bone-to-bone or socket-to-bone measurement.
+	auto ResolveComponentTransform = [Mesh](FName Name, FTransform& OutTransform, bool& bOutIsSocket)
+	{
+		FTransform SocketLocalTransform;
+		int32 SocketBoneIndex = INDEX_NONE;
+		if (Mesh->GetSocketInfoByName(Name, SocketLocalTransform, SocketBoneIndex))
+		{
+			bOutIsSocket = true;
+			OutTransform = SocketBoneIndex == INDEX_NONE
+				? FTransform::Identity
+				: SocketLocalTransform * Mesh->GetBoneTransform(SocketBoneIndex, FTransform::Identity);
+			return true;
+		}
+
+		const int32 BoneIndex = Mesh->GetBoneIndex(Name);
+		if (BoneIndex == INDEX_NONE) return false;
+		bOutIsSocket = false;
+		OutTransform = Mesh->GetBoneTransform(BoneIndex, FTransform::Identity);
+		return true;
+	};
+
+	const FString RelativeTo = OptionalString(Params, TEXT("relativeTo"));
+	const bool bRelative = !RelativeTo.IsEmpty();
+	FTransform RelativeToComponent = FTransform::Identity;
+	if (bRelative)
+	{
+		const FName RelativeToName(*RelativeTo);
+		bool bRelativeToIsSocket = false;
+		if (!ResolveComponentTransform(RelativeToName, RelativeToComponent, bRelativeToIsSocket))
+		{
+			return MCPError(FString::Printf(
+				TEXT("Relative bone or socket not found on SkeletalMeshComponent '%s': %s"),
+				*Mesh->GetName(), *RelativeTo));
+		}
+	}
 
 	TArray<FString> RequestedBones;
 	const TArray<TSharedPtr<FJsonValue>>* BoneValues = nullptr;
@@ -573,11 +610,20 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 		// GetSocketTransform resolves sockets first, then bones, so one call
 		// covers both; bIsSocket only labels which one answered.
 		const FTransform WorldTransform = Mesh->GetSocketTransform(FName(*Name), RTS_World);
+		FTransform OutputTransform = bComponentSpace
+			? WorldTransform.GetRelativeTransform(ComponentToWorld)
+			: WorldTransform;
+		if (bRelative)
+		{
+			FTransform SampleComponent;
+			bool bResolvedAsSocket = false;
+			ResolveComponentTransform(FName(*Name), SampleComponent, bResolvedAsSocket);
+			OutputTransform = SampleComponent.GetRelativeTransform(RelativeToComponent);
+		}
 		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
 		Entry->SetStringField(TEXT("name"), Name);
 		Entry->SetBoolField(TEXT("isSocket"), bIsSocket);
-		Entry->SetObjectField(TEXT("transform"), TransformJson(
-			bComponentSpace ? WorldTransform.GetRelativeTransform(ComponentToWorld) : WorldTransform));
+		Entry->SetObjectField(TEXT("transform"), TransformJson(OutputTransform));
 		Samples.Add(MakeShared<FJsonValueObject>(Entry));
 	};
 
@@ -586,9 +632,9 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 		for (const FString& Name : RequestedBones)
 		{
 			const FName AsName(*Name);
-			const bool bIsSocket = Mesh->DoesSocketExist(AsName);
-			const bool bIsBone = Mesh->GetBoneIndex(AsName) != INDEX_NONE;
-			if (!bIsSocket && !bIsBone)
+			FTransform ComponentTransform;
+			bool bIsSocket = false;
+			if (!ResolveComponentTransform(AsName, ComponentTransform, bIsSocket))
 			{
 				Unknown.Add(MakeShared<FJsonValueString>(Name));
 				continue;
@@ -613,7 +659,8 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
 	Result->SetStringField(TEXT("component"), Mesh->GetName());
-	Result->SetStringField(TEXT("space"), bComponentSpace ? TEXT("component") : TEXT("world"));
+	Result->SetStringField(TEXT("space"), bRelative ? TEXT("relative") : (bComponentSpace ? TEXT("component") : TEXT("world")));
+	if (bRelative) Result->SetStringField(TEXT("relativeTo"), RelativeTo);
 	Result->SetStringField(TEXT("world"), World->GetPathName());
 	Result->SetNumberField(TEXT("boneCount"), Mesh->GetNumBones());
 	Result->SetArrayField(TEXT("samples"), Samples);
