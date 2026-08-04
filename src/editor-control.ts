@@ -216,6 +216,8 @@ async function waitForEditorReady(
   let lastPhase = "";
   let sawSnapshot = false;
   let socketUpSince: number | null = null;
+  /** Highest progress value already sent; the stream must never go backwards. */
+  let lastReportedProgress = -1;
 
   const bar = opts.showProgress === false ? null : startProgress("Starting Unreal Editor");
   const elapsed = (): number => (Date.now() - startTime) / 1000;
@@ -269,15 +271,32 @@ async function waitForEditorReady(
 
     bar?.update({ fraction: snapshot?.slowTask?.fraction ?? null, message: label, detail });
 
-    // The channel the user actually sees. Percentages come from the engine's
-    // own slow task when it has one; otherwise report elapsed seconds against
-    // the timeout so the client still has something monotonic to render.
+    // The channel the user actually sees.
+    //
+    // ONE scale, and it only ever goes up. The spec requires progress to
+    // increase monotonically, and clients that draw a bar from it (or drop
+    // out-of-order updates) are entitled to rely on that. An earlier version
+    // switched between two scales - percent-of-slow-task when the engine had
+    // one, elapsed-seconds-of-timeout when it did not - which alternate
+    // constantly during startup, so the value swung 68 -> 12 -> 33 and any
+    // strict client discarded the stream. The reference SDK client just fires
+    // its callback and hid the bug.
+    //
+    // Elapsed seconds against the timeout is the only quantity that is
+    // monotonic for the whole wait. The engine's own percentage is far more
+    // interesting, so it goes in the message, where it can jump around freely.
     if (opts.onProgress) {
-      const fraction = snapshot?.slowTask?.fraction;
-      if (typeof fraction === "number") {
-        opts.onProgress({ progress: Math.round(fraction * 100), total: 100, message: `${label} (${detail})` });
-      } else {
-        opts.onProgress({ progress: Math.round(elapsed()), total: maxWaitSeconds, message: `${label} (${detail})` });
+      const update = nextProgressUpdate({
+        elapsedSeconds: elapsed(),
+        maxWaitSeconds,
+        lastReportedProgress,
+        label,
+        detail,
+        slowTaskFraction: snapshot?.slowTask?.fraction,
+      });
+      if (update) {
+        lastReportedProgress = update.progress;
+        opts.onProgress(update);
       }
     }
 
@@ -331,6 +350,36 @@ async function waitForEditorReady(
     reason: `still not ready after ${maxWaitSeconds}s`,
     state: await readEngineState(projectPath ?? null, { probeWindows: true }),
   });
+}
+
+/**
+ * Decide the next progress update, or null when there is nothing new to send.
+ *
+ * Pure and exported so the monotonicity rule is testable without an editor.
+ * The rule matters: the MCP spec requires `progress` to increase, and clients
+ * that draw a bar (or drop out-of-order updates) rely on it. Elapsed seconds
+ * against the timeout is the only value that holds for the whole wait; the
+ * engine's own slow-task percentage swings up and down as tasks come and go,
+ * so it belongs in the message where it is free to do that.
+ */
+export function nextProgressUpdate(input: {
+  elapsedSeconds: number;
+  maxWaitSeconds: number;
+  lastReportedProgress: number;
+  label: string;
+  detail: string;
+  slowTaskFraction?: number;
+}): { progress: number; total: number; message: string } | null {
+  const seconds = Math.min(Math.round(input.elapsedSeconds), input.maxWaitSeconds);
+  if (seconds <= input.lastReportedProgress) return null;
+
+  const percent =
+    typeof input.slowTaskFraction === "number" ? ` ${Math.round(input.slowTaskFraction * 100)}%` : "";
+  return {
+    progress: seconds,
+    total: input.maxWaitSeconds,
+    message: `${input.label}${percent} (${input.detail})`,
+  };
 }
 
 /** "config init 1.6s -> engine loop initialized 17.1s -> ready 20.7s" */
