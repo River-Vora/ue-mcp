@@ -21,7 +21,15 @@ describe("progressRenderingNote", () => {
   it("compares versions numerically, not lexically", () => {
     // "2.1.99" < "2.1.116" numerically, the other way round as strings.
     expect(progressRenderingNote({ name: "claude-code", version: "2.1.99" })).toBeNull();
-    expect(progressRenderingNote({ name: "claude-code", version: "2.2.0" })).not.toBeNull();
-    expect(progressRenderingNote({ name: "claude-code", version: "3.0.0" })).not.toBeNull();
+    expect(progressRenderingNote({ name: "claude-code", version: "2.1.152" })).not.toBeNull();
+  });
+
+  it("stays quiet once the client shipped the fix", () => {
+    // 2.1.153 fixed it. Telling a user on a current build that their client
+    // cannot draw progress is a wrong explanation, which is worse than none.
+    expect(progressRenderingNote({ name: "claude-code", version: "2.1.153" })).toBeNull();
+    expect(progressRenderingNote({ name: "claude-code", version: "2.1.221" })).toBeNull();
+    expect(progressRenderingNote({ name: "claude-code", version: "2.2.0" })).toBeNull();
+    expect(progressRenderingNote({ name: "claude-code", version: "3.0.0" })).toBeNull();
   });
 });

@@ -9,7 +9,7 @@ import { SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_LEAN, SERVER_INSTRUCTIONS_MICR
 import { resolveContextStrategy, applyLeanContext, buildMicroGateway } from "./lean-context.js";
 import { isDirectiveResponse, type ToolDef, type ToolContext, type PluginInfo, type ElicitFn, type ProgressFn, type ProgressUpdate } from "./types.js";
 import { McpError, ErrorCode } from "./errors.js";
-import { info, warn } from "./log.js";
+import { info, warn, debug } from "./log.js";
 import { startVersionCheck, consumeUpgradeNotice } from "./version-check.js";
 import { buildFlowRegistry } from "./flow/registry.js";
 import { GuardRegistry } from "./flow/guard.js";
@@ -57,6 +57,14 @@ function makeProgressReporter(extra: {
   const send = extra?.sendNotification as unknown as
     | ((n: { method: string; params: Record<string, unknown> }) => Promise<void>)
     | undefined;
+
+  // Progress is opt-in per request: a client that wants it supplies a token.
+  // When one never arrives, the server is silent by design and that is
+  // indistinguishable from a client that discards what we send, so record
+  // which it was. Debug level, so it costs nothing until someone is
+  // diagnosing a call that looks frozen.
+  debug("progress", token === undefined ? "no progressToken on this request - client did not ask for progress" : `progressToken present (${String(token)})`);
+
   if (token === undefined || typeof send !== "function") return undefined;
 
   return (update: ProgressUpdate): void => {

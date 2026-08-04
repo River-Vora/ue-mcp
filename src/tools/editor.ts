@@ -17,11 +17,23 @@ export const editorTool: ToolDef = categoryTool(
         const timeout = typeof p?.timeout === "number" && p.timeout > 0 ? p.timeout : 300;
         const result = await startEditor(ctx.project, timeout, ctx.onProgress);
 
-        // The call blocks for as long as the editor takes, and some clients do
-        // not draw the progress it streams. Explain that once, here, instead of
-        // leaving the user to conclude the tool hung.
+        // The call blocks for as long as the editor takes, so when its progress
+        // is not visible the user is left to conclude the tool hung. Say which
+        // of the two possible reasons applied, in the result, once.
         const note = progressRenderingNote(ctx.client);
         if (note) return { ...result, progressDisplayNote: note };
+        if (!ctx.onProgress) {
+          // Progress is opt-in per request: no token, no stream. This is the
+          // client declining it, not the server withholding it.
+          return {
+            ...result,
+            progressDisplayNote:
+              `Note: ${ctx.client?.name ?? "this client"}${ctx.client?.version ? ` ${ctx.client.version}` : ""} ` +
+              "did not send a progressToken with this call, so no live progress could be streamed - " +
+              "MCP progress is opt-in per request. The phase timeline above is what the live view would have shown. " +
+              "Clients that request progress (the reference SDK client, MCP Inspector) render it throughout the wait.",
+          };
+        }
         if (result.success) {
           try { await ctx.bridge.connect(5000); } catch { /* reconnect timer handles it */ }
         }
