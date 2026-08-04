@@ -538,10 +538,25 @@ FString FMCPBridgeServer::ProcessMessage(const FString& Message)
 	// long-running compiles) legitimately need minutes. Honor per-handler
 	// timeouts registered via FMCPHandlerRegistry::RegisterHandlerWithTimeout.
 	const float PerHandlerTimeout = HandlerRegistry.GetHandlerTimeout(Method);
+
+	// These read or answer the dialog that is blocking the engine loop, so they
+	// are the handlers that must keep working while one is up. Everything else
+	// waits for the core ticker, which a modal loop suspends.
+	static const TSet<FString> ModalSafeMethods = {
+		TEXT("list_dialogs"),
+		TEXT("respond_to_dialog"),
+		TEXT("get_dialog_policy"),
+		TEXT("set_dialog_policy"),
+		TEXT("clear_dialog_policy"),
+	};
+	const bool bModalSafe = ModalSafeMethods.Contains(Method);
+
 	FMCPEngineStatus::Get().NoteHandlerBegin(Method);
-	TSharedPtr<FJsonValue> Result = (PerHandlerTimeout > 0.0f)
-		? GameThreadExecutor.ExecuteOnGameThread(Handler, Params, PerHandlerTimeout)
-		: GameThreadExecutor.ExecuteOnGameThread(Handler, Params);
+	TSharedPtr<FJsonValue> Result = GameThreadExecutor.ExecuteOnGameThread(
+		Handler,
+		Params,
+		PerHandlerTimeout > 0.0f ? PerHandlerTimeout : 30.0f,
+		bModalSafe);
 	FMCPEngineStatus::Get().NoteHandlerEnd(Method);
 
 	// A bare "Handler execution timed out" tells the caller nothing they can

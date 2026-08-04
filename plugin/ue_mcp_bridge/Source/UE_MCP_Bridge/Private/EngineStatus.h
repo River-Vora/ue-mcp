@@ -96,6 +96,7 @@ private:
 
 	FDelegateHandle PreTickHandle;
 	FDelegateHandle ModalLoopHandle;
+	FDelegateHandle HeartbeatHandle;
 	FTSTicker::FDelegateHandle TickerHandle;
 
 	FRunnableThread* WriterThread = nullptr;

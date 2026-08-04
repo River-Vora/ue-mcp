@@ -1,9 +1,11 @@
 #include "EngineStatus.h"
 #include "UE_MCP_BridgeModule.h"
+#include "GameThreadExecutor.h"
 #include "Handlers/DialogHandlers.h"
 
 #include "CoreGlobals.h"
 #include "Containers/Ticker.h"
+#include "Misc/CoreDelegates.h"
 #include "HAL/PlatformTime.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/RunnableThread.h"
@@ -50,21 +52,31 @@ void FMCPEngineStatus::Install()
 	InstallSeconds = FPlatformTime::Seconds();
 	LastCaptureSeconds = InstallSeconds;
 
-	// Three capture hooks, because no single one survives every kind of block:
+	// Four capture hooks, because no single one survives every kind of block:
 	//
 	//  - the core ticker covers ordinary frames, and is the only one that runs
 	//    before Slate exists;
-	//  - Slate's pre-tick keeps firing while a FSlowTask pumps the UI to draw
-	//    its progress bar, which is exactly the window where the core ticker is
+	//  - Slate's pre-tick keeps firing while the UI is pumped from inside a
+	//    long operation, which is exactly the window where the core ticker is
 	//    suspended and every bridge request times out;
 	//  - the modal loop tick fires while a dialog owns the main loop, so the
-	//    snapshot can name the dialog that is blocking the caller.
+	//    snapshot can name the dialog that is blocking the caller;
+	//  - the application heartbeat is broadcast by
+	//    FFeedbackContext::ProgressReported on every slow-task progress frame,
+	//    so a task that advances its progress bar without ever returning to the
+	//    tick loop still refreshes the percentage. Without this, a 40-minute
+	//    import reports only "stalled for 40 minutes" - true, but useless.
 	TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
 		FTickerDelegate::CreateLambda([this](float) -> bool
 		{
 			CaptureOnGameThread();
 			return true;
 		}), 0.0f);
+
+	HeartbeatHandle = FCoreDelegates::ApplicationHeartbeat.AddLambda([this]()
+	{
+		CaptureOnGameThread();
+	});
 
 	if (FSlateApplication::IsInitialized())
 	{
@@ -75,6 +87,10 @@ void FMCPEngineStatus::Install()
 		ModalLoopHandle = FSlateApplication::Get().GetOnModalLoopTickEvent().AddLambda([this](float)
 		{
 			CaptureOnGameThread();
+			// Seeing the dialog is only half of it: the call that could answer
+			// it is queued behind the same blocked game thread. Modal-safe
+			// handlers run here so a dialog can be cleared from the outside.
+			FMCPGameThreadExecutor::DrainModalSafeQueue();
 		});
 	}
 
@@ -104,6 +120,12 @@ void FMCPEngineStatus::Shutdown()
 	{
 		FTSTicker::GetCoreTicker().RemoveTicker(TickerHandle);
 		TickerHandle.Reset();
+	}
+
+	if (HeartbeatHandle.IsValid())
+	{
+		FCoreDelegates::ApplicationHeartbeat.Remove(HeartbeatHandle);
+		HeartbeatHandle.Reset();
 	}
 
 	if (FSlateApplication::IsInitialized())
@@ -202,7 +224,24 @@ void FMCPEngineStatus::CaptureOnGameThread()
 	FString LocalModalTitle;
 	FString LocalModalMessage;
 	TArray<FString> LocalModalButtons;
-	const bool bLocalModal = FDialogHandlers::DescribeActiveModal(LocalModalTitle, LocalModalMessage, LocalModalButtons);
+	const bool bDescribedModal = FDialogHandlers::DescribeActiveModal(LocalModalTitle, LocalModalMessage, LocalModalButtons);
+	// The editor's own slow-task progress window is an active modal window: it
+	// carries the progress text ("Compiling Shaders (9)") but no title and no
+	// buttons. Reporting it as a dialog would tell callers a human answer is
+	// needed when none is, so require a title or a button - the two things
+	// every prompt has and no progress window does. The progress text is
+	// already reported, accurately, as a slow task.
+	const bool bLocalModal = bDescribedModal
+		&& (!LocalModalTitle.IsEmpty() || LocalModalButtons.Num() > 0);
+
+	// A details-view dialog yields kilobytes of widget text. The snapshot is
+	// rewritten to disk four times a second, so keep it to the part that
+	// identifies the prompt; list_dialogs still returns the whole thing.
+	constexpr int32 MaxModalMessageChars = 1500;
+	if (LocalModalMessage.Len() > MaxModalMessageChars)
+	{
+		LocalModalMessage = LocalModalMessage.Left(MaxModalMessageChars) + TEXT("... (truncated; call list_dialogs for the full text)");
+	}
 
 	int32 LocalShaderJobs = 0;
 	if (GShaderCompilingManager)

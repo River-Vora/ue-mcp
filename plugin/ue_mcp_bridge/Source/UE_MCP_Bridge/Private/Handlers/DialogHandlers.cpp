@@ -418,43 +418,33 @@ TSharedPtr<FJsonValue> FDialogHandlers::RespondToDialog(const TSharedPtr<FJsonOb
 
 	if (TargetIndex >= 0 && TargetIndex < Buttons.Num())
 	{
-		// Simulate the button click
-		FSlateApplication::Get().SetKeyboardFocus(Buttons[TargetIndex]);
-
-		// Use the reply mechanism to simulate a click
-		FReply Reply = FReply::Handled();
 		TSharedRef<SButton> TargetButton = Buttons[TargetIndex];
+		FSlateApplication::Get().SetKeyboardFocus(TargetButton);
 
-		// Simulate mouse down + up on the button to trigger OnClicked
-		FGeometry ButtonGeometry = TargetButton->GetCachedGeometry();
-		FVector2D LocalCenter = ButtonGeometry.GetLocalSize() * 0.5f;
-		FVector2D AbsoluteCenter = ButtonGeometry.LocalToAbsolute(LocalCenter);
-
-		FPointerEvent MouseDownEvent(
-			0, // PointerIndex
-			AbsoluteCenter,
-			AbsoluteCenter,
-			TSet<FKey>(),
-			EKeys::LeftMouseButton,
-			0,
-			FModifierKeysState()
-		);
-
-		TargetButton->OnMouseButtonDown(ButtonGeometry, MouseDownEvent);
-		TargetButton->OnMouseButtonUp(ButtonGeometry, MouseDownEvent);
+		// SButton::SimulateClick, not synthetic mouse events. Feeding
+		// OnMouseButtonDown/Up straight to the widget bypasses the capture
+		// bookkeeping SButton uses to decide a click happened, so the handler
+		// reported a successful click while the dialog stayed on screen -
+		// the worst possible failure for a call whose entire job is unblocking
+		// the editor.
+		TargetButton->SimulateClick();
 
 		Result->SetStringField(TEXT("clickedButton"), ButtonTexts[TargetIndex]);
 		Result->SetNumberField(TEXT("buttonIndex"), TargetIndex);
 	}
 	else
 	{
-		// Fallback: send Escape key to dismiss
+		// Last resort for a dialog with no button we can name: close the window
+		// itself, which ends the modal loop and releases the game thread. A
+		// synthetic Escape keypress alone does not reach a modal window that
+		// never took keyboard focus, so send both.
 		FString Action = OptionalString(Params, TEXT("action"));
-		if (Action == TEXT("escape"))
+		if (Action == TEXT("escape") || Action == TEXT("close"))
 		{
 			FSlateApplication::Get().ProcessKeyDownEvent(FKeyEvent(EKeys::Escape, FModifierKeysState(), 0, false, 0, 0));
 			FSlateApplication::Get().ProcessKeyUpEvent(FKeyEvent(EKeys::Escape, FModifierKeysState(), 0, false, 0, 0));
-			Result->SetStringField(TEXT("action"), TEXT("escape"));
+			ActiveModal->RequestDestroyWindow();
+			Result->SetStringField(TEXT("action"), TEXT("closed window"));
 		}
 		else
 		{
