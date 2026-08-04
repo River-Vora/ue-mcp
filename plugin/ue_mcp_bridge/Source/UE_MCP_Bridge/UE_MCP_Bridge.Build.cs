@@ -91,7 +91,6 @@ public class UE_MCP_Bridge : ModuleRules
 				"StaticMeshDescription",
 				"ClothingSystemRuntimeCommon",
 				"ClothingSystemRuntimeInterface",
-				"StructUtils",
 				"SubobjectDataInterface",
 				"ToolMenus",
 				// The engine-status snapshot, in its own module so it can load

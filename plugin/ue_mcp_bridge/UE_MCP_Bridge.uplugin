@@ -77,8 +77,17 @@
 			"Enabled": true
 		},
 		{
-			"Name": "StructUtils",
+			"Name": "Metasound",
 			"Enabled": true
+		},
+		{
+			"Name": "Synthesis",
+			"Enabled": true
+		},
+		{
+			"Name": "Fab",
+			"Enabled": true,
+			"Optional": true
 		},
 		{
 			"Name": "StateTree",
