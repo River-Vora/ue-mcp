@@ -1,11 +1,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawn, execSync } from "child_process";
+import { spawn } from "child_process";
 import * as net from "net";
 import WebSocket from "ws";
 import type { ProjectContext } from "./project.js";
 import { findEngineInstall } from "./deployer.js";
 import { invalidatePluginFreshness } from "./plugin-freshness.js";
+import { findInteractiveEditors, readEngineState, type EngineState } from "./engine-observer.js";
 
 // Process control is cross-platform: the editor binary path and the running-
 // process probe differ per OS, and stopping goes through the bridge (#790).
@@ -121,23 +122,16 @@ function findEditorExecutable(project?: ProjectContext): string | null {
   return null;
 }
 
-function isEditorRunning(): boolean {
-  try {
-    if (IS_WINDOWS) {
-      // Use /NH (no header) and check output directly — avoids pipe/find issues
-      const output = execSync('tasklist /NH /FI "IMAGENAME eq UnrealEditor.exe"', {
-        stdio: "pipe",
-        encoding: "utf-8",
-      });
-      // tasklist returns "INFO: No tasks..." when not found, or the process line when found
-      return output.toLowerCase().includes("unrealeditor.exe");
-    }
-    // pgrep exits non-zero when nothing matches, which the catch handles.
-    const output = execSync("pgrep -f UnrealEditor", { stdio: "pipe", encoding: "utf-8" });
-    return output.trim().length > 0;
-  } catch {
-    return false;
-  }
+/**
+ * #804: this used to be a `tasklist /FI "IMAGENAME eq UnrealEditor.exe"` string
+ * match, which cannot tell an interactive editor apart from a headless shard
+ * (`-server -game -nullrhi`) or from an editor holding a completely different
+ * project. Two shards on the box made start_editor refuse with "Editor is
+ * already running" while get_status reported nothing connected. The probe now
+ * matches on PID + command line and scopes to the project being asked about.
+ */
+async function isEditorRunning(projectPath?: string | null): Promise<boolean> {
+  return (await findInteractiveEditors(projectPath ?? null)).length > 0;
 }
 
 async function isBridgeAvailable(host = process.env.UE_MCP_HOST ?? "127.0.0.1", port = 9877, timeoutMs = 1000): Promise<boolean> {
@@ -185,29 +179,69 @@ async function waitForBridge(
   projectDir: string | undefined,
   maxWaitSeconds = 120,
   checkIntervalMs = 2000,
-): Promise<boolean> {
+  projectPath?: string | null,
+): Promise<{ available: boolean; state: EngineState | null }> {
   const startTime = Date.now();
   const maxWaitMs = maxWaitSeconds * 1000;
+  let lastState: EngineState | null = null;
 
   while (Date.now() - startTime < maxWaitMs) {
     if (await isBridgeAvailable(undefined, resolveBridgePort(projectDir))) {
-      return true;
+      return { available: true, state: lastState };
     }
+
+    // The wait used to be blind: 120 seconds of sleeping, then a message that
+    // said nothing about why the bridge never appeared. The engine publishes
+    // its real state in its own log and in native windows the whole time, so
+    // read it. A prompt waiting on a human, or a crash, will never resolve by
+    // waiting - stop immediately and say what is on screen.
+    lastState = await readEngineState(projectPath ?? null);
+    if (lastState.log.phase === "crashed") {
+      return { available: false, state: lastState };
+    }
+    if (lastState.log.blocking) {
+      const withWindows = await readEngineState(projectPath ?? null, { probeWindows: true });
+      return { available: false, state: withWindows };
+    }
+    // Nothing in the process table and nothing moving in the log means the
+    // launch died rather than being slow.
+    if (!lastState.running && (lastState.log.secondsSinceWrite ?? 0) > 10 && Date.now() - startTime > 15000) {
+      return { available: false, state: lastState };
+    }
+
     await new Promise((resolve) => setTimeout(resolve, checkIntervalMs));
   }
 
   // One last look before declaring failure: the bridge may have come up during
   // the final sleep, and reporting "not available" for a bridge that is in fact
   // serving sends the caller off debugging a problem that does not exist.
-  return isBridgeAvailable(undefined, resolveBridgePort(projectDir));
+  if (await isBridgeAvailable(undefined, resolveBridgePort(projectDir))) {
+    return { available: true, state: lastState };
+  }
+  return { available: false, state: await readEngineState(projectPath ?? null, { probeWindows: true }) };
 }
 
 export async function startEditor(
   project: ProjectContext,
   timeoutSeconds = 120,
-): Promise<{ success: boolean; message: string }> {
-  if (isEditorRunning()) {
-    return { success: false, message: "Editor is already running" };
+): Promise<{ success: boolean; message: string; state?: EngineState }> {
+  // Fast signal first: a bridge answering on this project's port is proof its
+  // editor is up, costs a millisecond, and needs no process table at all. The
+  // process probe (seconds, on Windows) only runs when that fails, which is
+  // also the only case where its extra detail is worth anything.
+  const projectDirForPort = project.projectPath ? path.dirname(project.projectPath) : undefined;
+  if (await isBridgeAvailable(undefined, resolveBridgePort(projectDirForPort))) {
+    return { success: false, message: "Editor is already running for this project (its bridge is answering)." };
+  }
+
+  const alreadyRunning = await findInteractiveEditors(project.projectPath ?? null);
+  if (alreadyRunning.length > 0) {
+    const state = await readEngineState(project.projectPath ?? null, { probeWindows: true });
+    return {
+      success: false,
+      message: `Editor is already running for this project (pid ${alreadyRunning.map((p) => p.pid).join(", ")}) but its bridge is not answering yet. ${state.summary}`,
+      state,
+    };
   }
 
   const editorExe = findEditorExecutable(project);
@@ -232,11 +266,15 @@ export async function startEditor(
 
     // Wait for bridge to become available (editor fully started)
     const projectDir = path.dirname(project.projectPath);
-    const bridgeAvailable = await waitForBridge(projectDir, timeoutSeconds, 2000);
-    if (!bridgeAvailable) {
+    const { available, state } = await waitForBridge(projectDir, timeoutSeconds, 2000, project.projectPath);
+    if (!available) {
+      const detail = state
+        ? ` ${state.summary}`
+        : "";
       return {
         success: false,
-        message: `Editor launched but bridge did not become available within ${timeoutSeconds} seconds (polled port ${resolveBridgePort(projectDir)}). Editor may still be starting up.`,
+        message: `Editor launched but the bridge did not answer on port ${resolveBridgePort(projectDir)}.${detail}`,
+        ...(state ? { state } : {}),
       };
     }
 
@@ -261,6 +299,21 @@ const EDITOR_SELF_QUIT_PY = [
   "        unreal.log_error('ue-mcp quit_editor failed: ' + str(e))",
   "unreal.register_slate_post_tick_callback(_ue_mcp_quit)",
 ].join("\n");
+
+/**
+ * The .uproject inside a project directory. The stop/restart paths are handed a
+ * directory, but the process probe matches editors by the project file they
+ * have open, so resolve one from the other.
+ */
+function uprojectInDir(projectDir?: string): string | null {
+  if (!projectDir) return null;
+  try {
+    const match = fs.readdirSync(projectDir).find((f) => f.toLowerCase().endsWith(".uproject"));
+    return match ? path.join(projectDir, match) : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Read the project's live bridge port from its lockfile, else env, else 9877. */
 function resolveBridgePort(projectDir?: string): number {
@@ -304,18 +357,24 @@ function requestEditorSelfQuit(port: number): Promise<boolean> {
  * Success is confirmed by the project's own bridge port going quiet, so it is
  * specific to this editor even when others are open.
  */
-export async function stopEditor(force = false, projectDir?: string): Promise<{ success: boolean; message: string }> {
+export async function stopEditor(force = false, projectDir?: string): Promise<{ success: boolean; message: string; state?: EngineState }> {
   void force;
 
+  const projectPath = uprojectInDir(projectDir);
   const port = resolveBridgePort(projectDir);
   const bridgeUp = await isBridgeAvailable("127.0.0.1", port);
-  if (!bridgeUp && !isEditorRunning()) {
+  if (!bridgeUp && !(await isEditorRunning(projectPath))) {
     return { success: false, message: "Editor is not running" };
   }
   if (!bridgeUp) {
+    // "Unreachable" is where the user is left guessing, so say what the engine
+    // is actually doing: a modal dialog waiting on an answer, a slow task at
+    // 60%, or a game thread that stopped ticking are all visible from outside.
+    const state = await readEngineState(projectPath, { probeWindows: true });
     return {
       success: false,
-      message: "Editor appears to be running but its bridge is unreachable, so it cannot be asked to quit cleanly. Close it manually - ue-mcp never force-kills processes.",
+      message: `Editor is running but its bridge is unreachable, so it cannot be asked to quit cleanly. ${state.summary} Close it manually - ue-mcp never force-kills processes.`,
+      state,
     };
   }
 
@@ -342,7 +401,7 @@ export async function stopEditor(force = false, projectDir?: string): Promise<{ 
 
 export async function restartEditor(project: ProjectContext, bridge?: { connect: (timeoutMs?: number) => Promise<void> }): Promise<{ success: boolean; message: string }> {
   const stopResult = await stopEditor(false, project.projectDir ?? undefined);
-  if (!stopResult.success && isEditorRunning()) {
+  if (!stopResult.success && (await isEditorRunning(project.projectPath ?? null))) {
     return { success: false, message: `Failed to stop editor: ${stopResult.message}` };
   }
 
