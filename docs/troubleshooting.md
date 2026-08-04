@@ -26,6 +26,32 @@
         lsof -i :9877
         ```
 
+### Handlers time out, or the editor never finishes starting
+
+**Symptoms:** every call returns `Handler execution timed out`, `start_editor` waits out its timeout, or `get_status` says `disconnected` while an editor is plainly open.
+
+All of these mean the game thread is not returning to its tick loop, and the usual cause is something the editor is showing on screen: a modal dialog waiting for an answer, a long slow task (shader compile, asset registry scan, map load), or a startup phase that runs before the bridge plugin loads.
+
+**Ask what the engine is actually doing:**
+
+```
+editor(action="get_engine_state")
+```
+
+This one call is answered without the game thread. It reports:
+
+- **`snapshot.slowTask`** - the name and percentage of the task the editor's own progress bar is showing.
+- **`snapshot.modal`** - the title, message, and buttons of the dialog blocking the game thread. Answer it with `editor(action="respond_to_dialog")`, or stop it happening again with `editor(action="set_dialog_policy")`.
+- **`snapshot.gameThreadStalledSeconds`** - how long the game thread has gone without ticking. Everything else in the snapshot is as old as this number says.
+- **`snapshot.compiling`** - remaining shader jobs and asset compiles.
+- **`log.phase` / `log.tail`** - the startup phase parsed from the editor's own log, which is written from the first millisecond and so covers the window before the plugin exists. This is where "the following modules are missing or built with a different engine version" shows up.
+- **`processes`** - PID, command line, and whether the OS considers the process responsive.
+- **`dialogs`** - native (pre-Slate) message boxes, including the rebuild prompt above.
+
+A timed-out handler carries the same snapshot in its `engineState` field, so a timeout says what the engine was doing while the request waited.
+
+The snapshot is also written to `<Project>/Saved/UE_MCP_Bridge/status.json` four times a second by a thread that keeps running while the game thread is blocked. Read that file directly when the bridge socket itself is unreachable.
+
 ### Connection drops / reconnecting
 
 The MCP server auto-reconnects every 15 seconds. If the editor is restarted, the connection will restore automatically.

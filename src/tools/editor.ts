@@ -25,7 +25,21 @@ export const editorTool: ToolDef = categoryTool(
       description: "What the engine is REALLY doing, read from outside the game thread: startup phase from the editor's own log, process table (PID, command line, responding), the plugin's status snapshot (slow-task name and percent, active modal dialog, game-thread stall), and native dialog windows. Works while the bridge is timing out, while the editor is still starting, and while a dialog is blocking the game thread. Params: probeWindows? (default true; scans native windows, costs ~2s)",
       handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
         const probeWindows = p?.probeWindows !== false;
-        return readEngineState(ctx.project.projectPath ?? null, { probeWindows });
+        const state = await readEngineState(ctx.project.projectPath ?? null, { probeWindows });
+
+        // The bridge answers this one on its socket thread without scheduling
+        // any game-thread work, so it stays reachable while every other handler
+        // is timing out. Prefer it over the on-disk snapshot when it replies,
+        // and never let it block the rest of the report.
+        let live: unknown = null;
+        if (ctx.bridge.isConnected) {
+          try {
+            live = await ctx.bridge.call("get_engine_state", {});
+          } catch {
+            live = null;
+          }
+        }
+        return live ? { ...state, snapshot: live, snapshotSource: "bridge" } : { ...state, snapshotSource: "status.json" };
       },
     },
     stop_editor: {
