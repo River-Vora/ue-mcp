@@ -195,6 +195,14 @@ export interface ReadyResult {
  * waits for the snapshot to say `ready` and reports the whole startup as a
  * progress bar rather than handing control back early.
  */
+export async function waitForEditorReadyExternal(
+  projectPath: string,
+  projectDir: string,
+  maxWaitSeconds = 300,
+): Promise<ReadyResult> {
+  return waitForEditorReady(projectPath, projectDir, maxWaitSeconds);
+}
+
 async function waitForEditorReady(
   projectPath: string | null | undefined,
   projectDir: string | undefined,
