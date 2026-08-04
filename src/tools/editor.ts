@@ -14,7 +14,7 @@ export const editorTool: ToolDef = categoryTool(
       description: "Launch Unreal Editor and BLOCK until it is fully ready (not merely until the socket answers), rendering a startup progress bar in the terminal. Returns the phase timeline it waited through. Do NOT poll get_engine_state or get_status afterwards: this call already waited, and a ready editor is the only way it returns success. Params: timeout? (seconds, default 300)",
       handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
         const timeout = typeof p?.timeout === "number" && p.timeout > 0 ? p.timeout : 300;
-        const result = await startEditor(ctx.project, timeout);
+        const result = await startEditor(ctx.project, timeout, ctx.onProgress);
         if (result.success) {
           try { await ctx.bridge.connect(5000); } catch { /* reconnect timer handles it */ }
         }

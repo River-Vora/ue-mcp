@@ -7,7 +7,7 @@ import { ProjectContext } from "./project.js";
 import { attach, attachSummary } from "./deployer.js";
 import { SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_LEAN, SERVER_INSTRUCTIONS_MICRO } from "./instructions.js";
 import { resolveContextStrategy, applyLeanContext, buildMicroGateway } from "./lean-context.js";
-import { isDirectiveResponse, type ToolDef, type ToolContext, type PluginInfo, type ElicitFn } from "./types.js";
+import { isDirectiveResponse, type ToolDef, type ToolContext, type PluginInfo, type ElicitFn, type ProgressFn, type ProgressUpdate } from "./types.js";
 import { McpError, ErrorCode } from "./errors.js";
 import { info, warn } from "./log.js";
 import { startVersionCheck, consumeUpgradeNotice } from "./version-check.js";
@@ -36,6 +36,43 @@ type TextBlock = { type: "text"; text: string };
 function withUpgradeNotice(content: TextBlock[]): TextBlock[] {
   const notice = consumeUpgradeNotice();
   return notice ? [{ type: "text" as const, text: notice }, ...content] : content;
+}
+
+/**
+ * Turn an MCP request's progress token into a reporter the tools can call.
+ *
+ * Without this a long tool is a frozen line in the client UI: stderr from an
+ * MCP server goes to a log file the user never opens, so the startup progress
+ * bar printed there was invisible. `notifications/progress` is the one channel
+ * clients render live, and it only exists when the caller supplied a token.
+ */
+function makeProgressReporter(extra: {
+  sendNotification?: (n: never) => Promise<void>;
+  _meta?: { progressToken?: string | number };
+}): ProgressFn | undefined {
+  const token = extra?._meta?.progressToken;
+  // The SDK types sendNotification against its own ServerNotification union.
+  // notifications/progress is a member of that union, but the params carry a
+  // token whose type the compiler cannot narrow from here.
+  const send = extra?.sendNotification as unknown as
+    | ((n: { method: string; params: Record<string, unknown> }) => Promise<void>)
+    | undefined;
+  if (token === undefined || typeof send !== "function") return undefined;
+
+  return (update: ProgressUpdate): void => {
+    // Fire and forget: a progress update must never fail the call it describes.
+    void Promise.resolve(
+      send({
+        method: "notifications/progress",
+        params: {
+          progressToken: token,
+          progress: update.progress,
+          ...(update.total !== undefined ? { total: update.total } : {}),
+          message: update.message,
+        },
+      }),
+    ).catch(() => undefined);
+  };
 }
 
 async function main() {
@@ -289,11 +326,18 @@ async function main() {
       shape[key] = schema;
     }
 
-    server.tool(tool.name, tool.description, shape, async (params) => {
+    server.tool(tool.name, tool.description, shape, async (params, extra) => {
       const action = params.action as string;
       const taskName = `${tool.name}.${action}`;
       const { action: _, ...taskParams } = params;
-      const flowCtx: FlowContext = { bridge: guardedBridge, project, getFlows, getPlugins, elicit: ctx.elicit };
+      const flowCtx: FlowContext = {
+        bridge: guardedBridge,
+        project,
+        getFlows,
+        getPlugins,
+        elicit: ctx.elicit,
+        onProgress: makeProgressReporter(extra),
+      };
 
       try {
         const task = await registry.create(taskName, flowCtx, taskParams);

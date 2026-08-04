@@ -8,6 +8,7 @@ import { findEngineInstall } from "./deployer.js";
 import { invalidatePluginFreshness } from "./plugin-freshness.js";
 import { findInteractiveEditors, readEngineState, readEngineSnapshot, readLogState, type EngineState } from "./engine-observer.js";
 import { startProgress } from "./ui/progress.js";
+import type { ProgressFn } from "./types.js";
 
 // Process control is cross-platform: the editor binary path and the running-
 // process probe differ per OS, and stopping goes through the bridge (#790).
@@ -207,7 +208,7 @@ async function waitForEditorReady(
   projectPath: string | null | undefined,
   projectDir: string | undefined,
   maxWaitSeconds: number,
-  opts: { showProgress?: boolean } = {},
+  opts: { showProgress?: boolean; onProgress?: ProgressFn } = {},
 ): Promise<ReadyResult> {
   const startTime = Date.now();
   const maxWaitMs = maxWaitSeconds * 1000;
@@ -260,14 +261,25 @@ async function waitForEditorReady(
       });
     }
 
-    bar?.update({
-      fraction: snapshot?.slowTask?.fraction ?? null,
-      message: snapshot?.slowTask?.name ?? phase ?? "launching",
-      detail:
-        typeof snapshot?.modulesLoaded === "number" && snapshot.modulesLoaded > 0
-          ? `${snapshot.modulesLoaded} modules · ${elapsed().toFixed(0)}s`
-          : `${elapsed().toFixed(0)}s`,
-    });
+    const label = snapshot?.slowTask?.name ?? phase ?? "launching";
+    const detail =
+      typeof snapshot?.modulesLoaded === "number" && snapshot.modulesLoaded > 0
+        ? `${snapshot.modulesLoaded} modules · ${elapsed().toFixed(0)}s`
+        : `${elapsed().toFixed(0)}s`;
+
+    bar?.update({ fraction: snapshot?.slowTask?.fraction ?? null, message: label, detail });
+
+    // The channel the user actually sees. Percentages come from the engine's
+    // own slow task when it has one; otherwise report elapsed seconds against
+    // the timeout so the client still has something monotonic to render.
+    if (opts.onProgress) {
+      const fraction = snapshot?.slowTask?.fraction;
+      if (typeof fraction === "number") {
+        opts.onProgress({ progress: Math.round(fraction * 100), total: 100, message: `${label} (${detail})` });
+      } else {
+        opts.onProgress({ progress: Math.round(elapsed()), total: maxWaitSeconds, message: `${label} (${detail})` });
+      }
+    }
 
     // Waiting cannot fix a prompt that needs a human, or a crash. Both verdicts
     // come from the log, so they only count once the log is this session's.
@@ -330,6 +342,7 @@ function describeTimeline(timeline: ReadyPhase[]): string {
 export async function startEditor(
   project: ProjectContext,
   timeoutSeconds = 300,
+  onProgress?: ProgressFn,
 ): Promise<{ success: boolean; message: string; state?: EngineState; timeline?: ReadyPhase[]; elapsedSeconds?: number }> {
   // Fast signal first: a bridge answering on this project's port is proof its
   // editor is up, costs a millisecond, and needs no process table at all. The
@@ -374,7 +387,7 @@ export async function startEditor(
     // progress bar. Returning as soon as the socket answered is what left
     // callers polling get_engine_state in a loop while shaders compiled.
     const projectDir = path.dirname(project.projectPath);
-    const result = await waitForEditorReady(project.projectPath, projectDir, timeoutSeconds);
+    const result = await waitForEditorReady(project.projectPath, projectDir, timeoutSeconds, { onProgress });
 
     if (!result.ready) {
       return {
