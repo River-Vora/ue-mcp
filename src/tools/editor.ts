@@ -2,6 +2,7 @@ import { z } from "zod";
 import { categoryTool, bp, directive, type ToolDef, type ToolContext } from "../types.js";
 import { startEditor, stopEditor, restartEditor, buildProject } from "../editor-control.js";
 import { readEngineState } from "../engine-observer.js";
+import { progressRenderingNote } from "../client-quirks.js";
 import { pushWorkaround, workaroundCount } from "../workaround-tracker.js";
 import { searchTools } from "../tool-search.js";
 import { Vec3, Rotator } from "../schemas.js";
@@ -15,6 +16,12 @@ export const editorTool: ToolDef = categoryTool(
       handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
         const timeout = typeof p?.timeout === "number" && p.timeout > 0 ? p.timeout : 300;
         const result = await startEditor(ctx.project, timeout, ctx.onProgress);
+
+        // The call blocks for as long as the editor takes, and some clients do
+        // not draw the progress it streams. Explain that once, here, instead of
+        // leaving the user to conclude the tool hung.
+        const note = progressRenderingNote(ctx.client);
+        if (note) return { ...result, progressDisplayNote: note };
         if (result.success) {
           try { await ctx.bridge.connect(5000); } catch { /* reconnect timer handles it */ }
         }

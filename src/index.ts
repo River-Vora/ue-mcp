@@ -337,6 +337,7 @@ async function main() {
         getPlugins,
         elicit: ctx.elicit,
         onProgress: makeProgressReporter(extra),
+        client: server.server.getClientVersion(),
       };
 
       try {

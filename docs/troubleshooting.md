@@ -74,6 +74,14 @@ launching 0s -> loading modules and plugins 0.8s -> config init 1.8s
 
 There is no reason to poll after it returns, and no reason to poll while it runs.
 
+### The tool call sits there showing nothing while the editor starts
+
+**Symptom:** `start_editor` displays as a motionless line - `ue-mcp - editor (MCP)(action: "start_editor", timeout: 600)` - for the whole launch, with no progress.
+
+The call is not stuck; it returns as soon as the editor is ready, and the number you see is the `timeout` argument, not elapsed time. The missing progress is a client-side regression: Claude Code collapses MCP tool calls unconditionally from 2.1.116 on, so the `notifications/progress` messages the server emits throughout the wait are received and never drawn ([anthropics/claude-code#51713](https://github.com/anthropics/claude-code/issues/51713); 2.1.101 was the last version that displayed them). An MCP server's stderr does not reach the transcript either - the client writes it to a log file.
+
+Nothing is wrong on the ue-mcp side and there is nothing to fix in your setup: other MCP clients render the same stream normally. When ue-mcp detects an affected Claude Code version, `start_editor` says so in its result rather than leaving the call looking hung, and the phase timeline it returns is exactly what you would have watched live.
+
 ### Connection drops / reconnecting
 
 The MCP server auto-reconnects every 15 seconds. If the editor is restarted, the connection will restore automatically.

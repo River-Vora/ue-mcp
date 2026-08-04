@@ -59,6 +59,12 @@ export interface ToolContext {
    * passed a progress token with the request.
    */
   onProgress?: ProgressFn;
+  /**
+   * Who is on the other end of the transport, from the MCP `initialize`
+   * handshake. Used to explain client-specific rendering limits in a result
+   * rather than leaving the user staring at a call that looks frozen.
+   */
+  client?: { name: string; version?: string };
 }
 
 export interface ProgressUpdate {
