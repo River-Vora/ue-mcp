@@ -64,6 +64,16 @@ The snapshot is also written to `<Project>/Saved/UE_MCP_Bridge/status.json` four
 
 That is the window where "the editor is stuck on the splash screen" reports come from, so read `status.json` (or `editor(get_engine_state)`, which merges it with the log) before assuming a launch failed.
 
+`editor(start_editor)` already waits through all of it. It blocks until the snapshot reports `ready`, draws that same trace as a progress bar in the terminal, and returns the phase timeline:
+
+```
+Editor ready in 24.7s
+launching 0s -> loading modules and plugins 0.8s -> config init 1.8s
+  -> bridge starting 21.1s -> engine loop initialized 21.5s -> ready 24.7s
+```
+
+There is no reason to poll after it returns, and no reason to poll while it runs.
+
 ### Connection drops / reconnecting
 
 The MCP server auto-reconnects every 15 seconds. If the editor is restarted, the connection will restore automatically.
