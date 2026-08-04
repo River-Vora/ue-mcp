@@ -652,6 +652,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 |--------|-------------|
 | `start_editor` | Launch Unreal Editor with the current project and reconnect bridge. Waits for the bridge on the project's actual published port, not a fixed default. Params: `timeout? (seconds, default 120) (#758)` |
 | `get_engine_state` | What the engine is REALLY doing, read from outside the game thread: startup phase from the editor's own log, process table (PID, command line, responding), the plugin's status snapshot (slow-task name and percent, active modal dialog, game-thread stall), and native dialog windows. Works while the bridge is timing out, while the editor is still starting, and while a dialog is blocking the game thread. Params: `probeWindows? (default true; scans native windows, costs ~2s)` |
+| `get_engine_state` | What the engine is REALLY doing, read from outside the game thread: startup phase from the editor's own log, process table (PID, command line, responding), the plugin's status snapshot (slow-task name and percent, active modal dialog, game-thread stall), and native dialog windows. Works while the bridge is timing out, while the editor is still starting, and while a dialog is blocking the game thread. Params: `probeWindows? (default true; scans native windows, costs ~2s)` |
 | `stop_editor` | Close Unreal Editor gracefully (asks the editor to quit itself via the bridge; never an OS kill) |
 | `restart_editor` | Stop then start the editor |
 | `build_project` | Build the project's C++ code using Unreal Build Tool. Editor should be stopped first |
@@ -715,8 +716,8 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `set_dialog_policy` | Auto-respond to dialogs matching a pattern. Params: `pattern, response` |
 | `clear_dialog_policy` | Clear dialog policies. Params: `pattern?` |
 | `get_dialog_policy` | Get current dialog policies |
-| `list_dialogs` | List active modal dialogs |
-| `respond_to_dialog` | Click a button on the active modal dialog. Params: `buttonIndex?, buttonLabel?` |
+| `list_dialogs` | List active modal dialogs, with title, message text and button labels. Runs even while a dialog is blocking the editor, when every other handler times out |
+| `respond_to_dialog` | Click a button on the active modal dialog, releasing the game thread. Runs even while the dialog is blocking the editor. Pass action='close' to destroy the dialog window when no button label fits. Params: `buttonIndex?, buttonLabel?, action? (escape or close)` |
 | `open_asset` | Open asset in its editor. Params: `assetPath` |
 | `reload_bridge` | Hot-reload Python bridge handlers from disk |
 | `save_dirty` | Flush every dirty package and return a per-package saved/failed map. Use after multi-step CDO/component edits when set_class_default leaves the asset dirty without persisting (#378). Params: `includeMaps? (default true), includeContent? (default true)` |

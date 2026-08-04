@@ -196,6 +196,13 @@ interface Marker {
   re: RegExp;
   phase: string;
   blocking?: boolean;
+  /**
+   * A terminal state: once it appears, later chatter does not change it.
+   * Asset registry and shader lines keep scrolling long after the editor is
+   * up, so plain newest-wins would report a ready editor as "scanning asset
+   * registry" forever.
+   */
+  sticky?: boolean;
 }
 
 /**
@@ -203,9 +210,10 @@ interface Marker {
  * the raw evidence line, not a complete taxonomy of engine startup.
  */
 const MARKERS: Marker[] = [
-  { re: /following modules are missing or built with a different engine version/i, phase: "waiting on rebuild prompt (modules out of date)", blocking: true },
-  { re: /=== Critical error|LogWindows: Error:|Fatal error/i, phase: "crashed", blocking: true },
-  { re: /\[UE-MCP\] Editor ready/i, phase: "ready" },
+  { re: /=== Critical error|LogWindows: Error:|Fatal error/i, phase: "crashed", blocking: true, sticky: true },
+  { re: /following modules are missing or built with a different engine version/i, phase: "waiting on rebuild prompt (modules out of date)", blocking: true, sticky: true },
+  { re: /Log file closed/i, phase: "editor exited", sticky: true },
+  { re: /\[UE-MCP\] Editor ready/i, phase: "ready", sticky: true },
   { re: /\[UE-MCP\] Bridge server starting/i, phase: "bridge starting" },
   { re: /LogLoad: Took .* to LoadMap/i, phase: "map loaded" },
   { re: /LogLoad: LoadMap: /i, phase: "loading map" },
@@ -235,12 +243,17 @@ function projectLogPath(projectPath: string): string {
   return path.join(dir, "Saved", "Logs", `${name}.log`);
 }
 
-/** Read the last `bytes` of a file without loading the whole thing. */
-function readTailBytes(file: string, bytes: number): string {
+/**
+ * Read the last `bytes` of a file without loading the whole thing. `partial`
+ * says whether the read started mid-file, which is the only case where the
+ * first line is a fragment worth discarding - dropping it unconditionally
+ * throws away the first real line of any log shorter than the window.
+ */
+function readTailBytes(file: string, bytes: number): { text: string; partial: boolean } {
   const size = fs.statSync(file).size;
   const start = Math.max(0, size - bytes);
   const length = size - start;
-  if (length <= 0) return "";
+  if (length <= 0) return { text: "", partial: false };
   const buf = Buffer.alloc(length);
   const fd = fs.openSync(file, "r");
   try {
@@ -248,7 +261,7 @@ function readTailBytes(file: string, bytes: number): string {
   } finally {
     fs.closeSync(fd);
   }
-  return buf.toString("utf-8");
+  return { text: buf.toString("utf-8"), partial: start > 0 };
 }
 
 /**
@@ -277,32 +290,38 @@ export function readLogState(projectPath: string | null | undefined, tailLines =
     return { ...empty, logPath };
   }
 
-  let text = "";
+  let tail: { text: string; partial: boolean };
   try {
-    text = readTailBytes(logPath, 128 * 1024);
+    tail = readTailBytes(logPath, 128 * 1024);
   } catch (err) {
     log.debug("engine-observer", `could not read ${logPath}`, err);
     return { ...empty, logPath };
   }
 
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  // The first line of a byte-offset read is usually a fragment.
-  if (lines.length > 1) lines.shift();
+  const lines = tail.text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (tail.partial && lines.length > 1) lines.shift();
 
   let phase = "unknown";
   let blocking = false;
-  let evidence: string | null = null;
-  outer: for (let i = lines.length - 1; i >= 0; i--) {
-    for (const marker of MARKERS) {
-      if (marker.re.test(lines[i])) {
-        phase = marker.phase;
-        blocking = marker.blocking === true;
-        evidence = lines[i];
-        break outer;
+
+  // Sticky markers win wherever they appear, in declaration order: a crash or a
+  // prompt waiting on a human does not stop being true because a background
+  // system logged something afterwards.
+  const sticky = MARKERS.filter((m) => m.sticky).find((m) => lines.some((l) => m.re.test(l)));
+  if (sticky) {
+    phase = sticky.phase;
+    blocking = sticky.blocking === true;
+  } else {
+    outer: for (let i = lines.length - 1; i >= 0; i--) {
+      for (const marker of MARKERS) {
+        if (marker.re.test(lines[i])) {
+          phase = marker.phase;
+          blocking = marker.blocking === true;
+          break outer;
+        }
       }
     }
   }
-  void evidence;
 
   const errors = lines.filter((l) => /: Error: |=== Critical error/i.test(l)).slice(-10);
   const warnings = lines.filter((l) => /: Warning: /i.test(l)).slice(-10);
