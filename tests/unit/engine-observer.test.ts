@@ -91,6 +91,22 @@ describe("readEngineSnapshot", () => {
     expect(snapshot?.ageSeconds).toBeGreaterThanOrEqual(0);
   });
 
+  it("carries the startup fields the early module publishes", () => {
+    // Before the engine loop exists there is no tick to stall, so the stall
+    // figure is absent by design and module count is the progress signal.
+    const project = makeProject(["LogInit: Display: Base directory: C:/UE/"], {
+      phase: "config init",
+      gameThreadTicking: false,
+      gameThreadStalledSeconds: null,
+      modulesLoaded: 253,
+      slowTask: { name: "Loading Default Modules for Plugin: ChaosVD", fraction: 0.73 },
+    });
+    const snapshot = readEngineSnapshot(project);
+    expect(snapshot?.gameThreadTicking).toBe(false);
+    expect(snapshot?.gameThreadStalledSeconds).toBeNull();
+    expect(snapshot?.modulesLoaded).toBe(253);
+  });
+
   it("returns null when the plugin has not written one", () => {
     const project = makeProject(["LogInit: Display: Base directory: C:/UE/"]);
     expect(readEngineSnapshot(project)).toBeNull();

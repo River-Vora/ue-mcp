@@ -42,7 +42,7 @@ This one call is answered without the game thread. It reports:
 
 - **`snapshot.slowTask`** - the name and percentage of the task the editor's own progress bar is showing.
 - **`snapshot.modal`** - the title, message, and buttons of the dialog blocking the game thread. Answer it with `editor(action="respond_to_dialog")`, or stop it happening again with `editor(action="set_dialog_policy")`.
-- **`snapshot.gameThreadStalledSeconds`** - how long the game thread has gone without ticking. Everything else in the snapshot is as old as this number says.
+- **`snapshot.gameThreadStalledSeconds`** - how long the game thread has gone without ticking. Everything else in the snapshot is as old as this number says. It is `null` while `gameThreadTicking` is false, which means the editor is still starting and has no engine loop yet; `modulesLoaded` is the progress signal during that window.
 - **`snapshot.compiling`** - remaining shader jobs and asset compiles.
 - **`log.phase` / `log.tail`** - the startup phase parsed from the editor's own log, which is written from the first millisecond and so covers the window before the plugin exists. This is where "the following modules are missing or built with a different engine version" shows up.
 - **`processes`** - PID, command line, and whether the OS considers the process responsive.
@@ -51,6 +51,18 @@ This one call is answered without the game thread. It reports:
 A timed-out handler carries the same snapshot in its `engineState` field, so a timeout says what the engine was doing while the request waited.
 
 The snapshot is also written to `<Project>/Saved/UE_MCP_Bridge/status.json` four times a second by a thread that keeps running while the game thread is blocked. Read that file directly when the bridge socket itself is unreachable.
+
+**During startup**, the snapshot comes from a second plugin module that loads at `PostConfigInit`, well before the bridge itself (`PostEngineInit`) and before any socket exists. A cold launch publishes its first state after about a second and then tracks what the splash screen shows:
+
+```
++1.6s  config init              | modules=0   | Initializing... 0%
++3.3s  config init              | modules=16  | Initializing Render Hardware Interface... 5%
++13.0s config init              | modules=253 | Loading Default Modules for Plugin: ChaosVD 73%
++17.5s engine loop initialized  | modules=725 | New Map 92%
++20.7s ready                    | modules=733 | Running Python start-up scripts... 95%
+```
+
+That is the window where "the editor is stuck on the splash screen" reports come from, so read `status.json` (or `editor(get_engine_state)`, which merges it with the log) before assuming a launch failed.
 
 ### Connection drops / reconnecting
 
