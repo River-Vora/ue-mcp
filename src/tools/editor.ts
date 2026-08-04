@@ -11,9 +11,9 @@ export const editorTool: ToolDef = categoryTool(
   "Editor commands, Python execution, PIE, undo/redo, hot reload, viewport, performance, sequencer, build pipeline, logs, editor control.",
   {
     start_editor: {
-      description: "Launch Unreal Editor with the current project and reconnect bridge. Waits for the bridge on the project's actual published port, not a fixed default. Params: timeout? (seconds, default 120) (#758)",
+      description: "Launch Unreal Editor and BLOCK until it is fully ready (not merely until the socket answers), rendering a startup progress bar in the terminal. Returns the phase timeline it waited through. Do NOT poll get_engine_state or get_status afterwards: this call already waited, and a ready editor is the only way it returns success. Params: timeout? (seconds, default 300)",
       handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
-        const timeout = typeof p?.timeout === "number" && p.timeout > 0 ? p.timeout : 120;
+        const timeout = typeof p?.timeout === "number" && p.timeout > 0 ? p.timeout : 300;
         const result = await startEditor(ctx.project, timeout);
         if (result.success) {
           try { await ctx.bridge.connect(5000); } catch { /* reconnect timer handles it */ }
@@ -22,7 +22,7 @@ export const editorTool: ToolDef = categoryTool(
       },
     },
     get_engine_state: {
-      description: "What the engine is REALLY doing, read from outside the game thread: startup phase from the editor's own log, process table (PID, command line, responding), the plugin's status snapshot (slow-task name and percent, active modal dialog, game-thread stall), and native dialog windows. Works while the bridge is timing out, while the editor is still starting, and while a dialog is blocking the game thread. Params: probeWindows? (default true; scans native windows, costs ~2s)",
+      description: "What the engine is REALLY doing, read from outside the game thread: startup phase from the editor's own log, process table (PID, command line, responding), the plugin's status snapshot (slow-task name and percent, active modal dialog, game-thread stall), and native dialog windows. Call this ONCE when something is already wrong (handlers timing out, an editor that will not come up). Never call it in a wait loop: start_editor blocks until ready on its own, and polling this during startup burns tokens re-reading state that is already tracked. Params: probeWindows? (default true; scans native windows, costs ~2s)",
       handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
         const probeWindows = p?.probeWindows !== false;
         const state = await readEngineState(ctx.project.projectPath ?? null, { probeWindows });

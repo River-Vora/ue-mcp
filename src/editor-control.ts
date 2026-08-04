@@ -6,7 +6,8 @@ import WebSocket from "ws";
 import type { ProjectContext } from "./project.js";
 import { findEngineInstall } from "./deployer.js";
 import { invalidatePluginFreshness } from "./plugin-freshness.js";
-import { findInteractiveEditors, readEngineState, type EngineState } from "./engine-observer.js";
+import { findInteractiveEditors, readEngineState, readEngineSnapshot, readLogState, type EngineState } from "./engine-observer.js";
+import { startProgress } from "./ui/progress.js";
 
 // Process control is cross-platform: the editor binary path and the running-
 // process probe differ per OS, and stopping goes through the bridge (#790).
@@ -168,63 +169,160 @@ async function isBridgeAvailable(host = process.env.UE_MCP_HOST ?? "127.0.0.1", 
   });
 }
 
-// #758: the readiness probe used to poll a hardcoded 9877 while the bridge
-// binds a per-project port and publishes it to Saved/UE_MCP_Bridge/port.json.
-// On any project not on the default port this waited out the whole timeout and
-// reported failure even though the editor and bridge were up - which the very
-// next tool call would then prove by succeeding immediately. The lockfile does
-// not exist until the bridge starts, so the port must be re-read every poll
-// rather than resolved once up front.
-async function waitForBridge(
+export interface ReadyPhase {
+  phase: string;
+  atSeconds: number;
+  detail?: string;
+}
+
+export interface ReadyResult {
+  ready: boolean;
+  elapsedSeconds: number;
+  /** Phase transitions with the second each happened, oldest first. */
+  timeline: ReadyPhase[];
+  reason?: string;
+  state?: EngineState;
+}
+
+/**
+ * Block until the editor is genuinely usable, rendering progress to the
+ * terminal while it happens.
+ *
+ * "The bridge socket answers" is not the same as "the editor is ready": the
+ * socket comes up mid-startup, while shaders compile and the map loads. A tool
+ * that returned there left the caller polling in a loop, burning tokens to
+ * rediscover state the plugin already publishes four times a second. So this
+ * waits for the snapshot to say `ready` and reports the whole startup as a
+ * progress bar rather than handing control back early.
+ */
+async function waitForEditorReady(
+  projectPath: string | null | undefined,
   projectDir: string | undefined,
-  maxWaitSeconds = 120,
-  checkIntervalMs = 2000,
-  projectPath?: string | null,
-): Promise<{ available: boolean; state: EngineState | null }> {
+  maxWaitSeconds: number,
+  opts: { showProgress?: boolean } = {},
+): Promise<ReadyResult> {
   const startTime = Date.now();
   const maxWaitMs = maxWaitSeconds * 1000;
-  let lastState: EngineState | null = null;
+  const timeline: ReadyPhase[] = [];
+  let lastPhase = "";
+  let sawSnapshot = false;
+  let socketUpSince: number | null = null;
+
+  const bar = opts.showProgress === false ? null : startProgress("Starting Unreal Editor");
+  const elapsed = (): number => (Date.now() - startTime) / 1000;
+
+  const finish = (result: ReadyResult): ReadyResult => {
+    bar?.stop(
+      result.ready
+        ? `Editor ready in ${result.elapsedSeconds.toFixed(1)}s`
+        : `Editor did not become ready: ${result.reason ?? "timed out"}`,
+    );
+    return result;
+  };
 
   while (Date.now() - startTime < maxWaitMs) {
-    if (await isBridgeAvailable(undefined, resolveBridgePort(projectDir))) {
-      return { available: true, state: lastState };
+    const snapshot = readEngineSnapshot(projectPath);
+    const logState = readLogState(projectPath);
+
+    // Until the plugin's snapshot exists, the log is the only sensor - but the
+    // log on disk at launch is the PREVIOUS session's, still ending in "editor
+    // exited" or a crash from last time. Trust it only once it has been written
+    // since this launch, and hand over to the snapshot as soon as there is one,
+    // otherwise the timeline walks backwards through two different sessions.
+    const logIsCurrent = (logState.secondsSinceWrite ?? Infinity) < elapsed() + 1;
+    const snapshotIsCurrent = snapshot !== null && (snapshot.ageSeconds ?? 999) < 10;
+    if (snapshotIsCurrent) sawSnapshot = true;
+
+    // Once the snapshot has spoken, it owns the phase. A momentarily missed
+    // read is not news, and falling back to the log there made the timeline
+    // flip between two vocabularies mid-startup.
+    const phase = snapshotIsCurrent
+      ? snapshot!.phase
+      : sawSnapshot
+        ? lastPhase
+        : logIsCurrent
+          ? logState.phase
+          : "launching";
+    if (phase && phase !== lastPhase) {
+      lastPhase = phase;
+      timeline.push({
+        phase,
+        atSeconds: Number(elapsed().toFixed(1)),
+        detail: typeof snapshot?.modulesLoaded === "number" ? `${snapshot.modulesLoaded} modules` : undefined,
+      });
     }
 
-    // The wait used to be blind: 120 seconds of sleeping, then a message that
-    // said nothing about why the bridge never appeared. The engine publishes
-    // its real state in its own log and in native windows the whole time, so
-    // read it. A prompt waiting on a human, or a crash, will never resolve by
-    // waiting - stop immediately and say what is on screen.
-    lastState = await readEngineState(projectPath ?? null);
-    if (lastState.log.phase === "crashed") {
-      return { available: false, state: lastState };
+    bar?.update({
+      fraction: snapshot?.slowTask?.fraction ?? null,
+      message: snapshot?.slowTask?.name ?? phase ?? "launching",
+      detail:
+        typeof snapshot?.modulesLoaded === "number" && snapshot.modulesLoaded > 0
+          ? `${snapshot.modulesLoaded} modules · ${elapsed().toFixed(0)}s`
+          : `${elapsed().toFixed(0)}s`,
+    });
+
+    // Waiting cannot fix a prompt that needs a human, or a crash. Both verdicts
+    // come from the log, so they only count once the log is this session's.
+    if (logIsCurrent && logState.phase === "crashed") {
+      return finish({ ready: false, elapsedSeconds: elapsed(), timeline, reason: "the editor crashed during startup", state: await readEngineState(projectPath ?? null) });
     }
-    if (lastState.log.blocking) {
-      const withWindows = await readEngineState(projectPath ?? null, { probeWindows: true });
-      return { available: false, state: withWindows };
+    if (snapshot?.modal) {
+      return finish({
+        ready: false,
+        elapsedSeconds: elapsed(),
+        timeline,
+        reason: `blocked on dialog "${snapshot.modal.title}" [${(snapshot.modal.buttons ?? []).join(", ")}] - answer it with editor(respond_to_dialog)`,
+        state: await readEngineState(projectPath ?? null),
+      });
     }
-    // Nothing in the process table and nothing moving in the log means the
-    // launch died rather than being slow.
-    if (!lastState.running && (lastState.log.secondsSinceWrite ?? 0) > 10 && Date.now() - startTime > 15000) {
-      return { available: false, state: lastState };
+    if (logIsCurrent && logState.blocking) {
+      return finish({ ready: false, elapsedSeconds: elapsed(), timeline, reason: logState.phase, state: await readEngineState(projectPath ?? null, { probeWindows: true }) });
     }
 
-    await new Promise((resolve) => setTimeout(resolve, checkIntervalMs));
+    // Ready means both: the plugin says so, and the socket actually answers.
+    // #758: the port is re-read every pass rather than resolved once, because
+    // the bridge binds a per-project port and only publishes it to
+    // Saved/UE_MCP_Bridge/port.json once it starts - a port resolved up front
+    // is the default 9877 and never matches.
+    const socketUp = await isBridgeAvailable(undefined, resolveBridgePort(projectDir));
+    if (socketUp) {
+      if (snapshot?.phase === "ready") {
+        return finish({ ready: true, elapsedSeconds: elapsed(), timeline });
+      }
+      if (!sawSnapshot) {
+        // A project on a plugin build without the status module never publishes
+        // one. Give it a few seconds to appear before falling back to the old,
+        // weaker signal - a single failed read must not be mistaken for that,
+        // which is how a mid-startup editor got declared ready.
+        if (socketUpSince === null) socketUpSince = Date.now();
+        if (Date.now() - socketUpSince > 8000) {
+          return finish({ ready: true, elapsedSeconds: elapsed(), timeline, reason: "bridge answered; this plugin build publishes no status snapshot" });
+        }
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
-  // One last look before declaring failure: the bridge may have come up during
-  // the final sleep, and reporting "not available" for a bridge that is in fact
-  // serving sends the caller off debugging a problem that does not exist.
-  if (await isBridgeAvailable(undefined, resolveBridgePort(projectDir))) {
-    return { available: true, state: lastState };
-  }
-  return { available: false, state: await readEngineState(projectPath ?? null, { probeWindows: true }) };
+  return finish({
+    ready: false,
+    elapsedSeconds: elapsed(),
+    timeline,
+    reason: `still not ready after ${maxWaitSeconds}s`,
+    state: await readEngineState(projectPath ?? null, { probeWindows: true }),
+  });
+}
+
+/** "config init 1.6s -> engine loop initialized 17.1s -> ready 20.7s" */
+function describeTimeline(timeline: ReadyPhase[]): string {
+  if (timeline.length === 0) return "no phases observed";
+  return timeline.map((entry) => `${entry.phase} ${entry.atSeconds}s`).join(" -> ");
 }
 
 export async function startEditor(
   project: ProjectContext,
-  timeoutSeconds = 120,
-): Promise<{ success: boolean; message: string; state?: EngineState }> {
+  timeoutSeconds = 300,
+): Promise<{ success: boolean; message: string; state?: EngineState; timeline?: ReadyPhase[]; elapsedSeconds?: number }> {
   // Fast signal first: a bridge answering on this project's port is proof its
   // editor is up, costs a millisecond, and needs no process table at all. The
   // process probe (seconds, on Windows) only runs when that fails, which is
@@ -264,21 +362,28 @@ export async function startEditor(
 
     editorProcess.unref();
 
-    // Wait for bridge to become available (editor fully started)
+    // Hold here until the editor is actually usable, drawing the startup as a
+    // progress bar. Returning as soon as the socket answered is what left
+    // callers polling get_engine_state in a loop while shaders compiled.
     const projectDir = path.dirname(project.projectPath);
-    const { available, state } = await waitForBridge(projectDir, timeoutSeconds, 2000, project.projectPath);
-    if (!available) {
-      const detail = state
-        ? ` ${state.summary}`
-        : "";
+    const result = await waitForEditorReady(project.projectPath, projectDir, timeoutSeconds);
+
+    if (!result.ready) {
       return {
         success: false,
-        message: `Editor launched but the bridge did not answer on port ${resolveBridgePort(projectDir)}.${detail}`,
-        ...(state ? { state } : {}),
+        message: `Editor launched but did not become ready: ${result.reason}. Startup reached: ${describeTimeline(result.timeline)}.`,
+        timeline: result.timeline,
+        elapsedSeconds: Number(result.elapsedSeconds.toFixed(1)),
+        ...(result.state ? { state: result.state } : {}),
       };
     }
 
-    return { success: true, message: `Editor launched and bridge available: ${editorExe}` };
+    return {
+      success: true,
+      message: `Editor ready in ${result.elapsedSeconds.toFixed(1)}s (waited through startup: ${describeTimeline(result.timeline)}). No further status polling is needed.`,
+      timeline: result.timeline,
+      elapsedSeconds: Number(result.elapsedSeconds.toFixed(1)),
+    };
   } catch (error) {
     return {
       success: false,

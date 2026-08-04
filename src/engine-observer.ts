@@ -473,13 +473,21 @@ export interface EngineSnapshot {
 export function readEngineSnapshot(projectPath: string | null | undefined): EngineSnapshot | null {
   if (!projectPath) return null;
   const file = path.join(path.dirname(projectPath), "Saved", "UE_MCP_Bridge", "status.json");
-  try {
-    const stat = fs.statSync(file);
-    const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as EngineSnapshot;
-    return { ...parsed, ageSeconds: Math.max(0, (Date.now() - stat.mtimeMs) / 1000) };
-  } catch {
-    return null;
+
+  // The writer publishes atomically (temp file + move) four times a second, so
+  // a read can land in the instant between unlink and rename. One retry turns
+  // that transient miss back into a hit; without it, callers see a null and
+  // conclude the plugin has no status module at all.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const stat = fs.statSync(file);
+      const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as EngineSnapshot;
+      return { ...parsed, ageSeconds: Math.max(0, (Date.now() - stat.mtimeMs) / 1000) };
+    } catch {
+      // fall through to the retry
+    }
   }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
