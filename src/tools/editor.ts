@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { categoryTool, bp, directive, type ToolDef, type ToolContext } from "../types.js";
 import { startEditor, stopEditor, restartEditor, buildProject } from "../editor-control.js";
+import { readEngineState } from "../engine-observer.js";
 import { pushWorkaround, workaroundCount } from "../workaround-tracker.js";
 import { searchTools } from "../tool-search.js";
 import { Vec3, Rotator } from "../schemas.js";
@@ -18,6 +19,13 @@ export const editorTool: ToolDef = categoryTool(
           try { await ctx.bridge.connect(5000); } catch { /* reconnect timer handles it */ }
         }
         return result;
+      },
+    },
+    get_engine_state: {
+      description: "What the engine is REALLY doing, read from outside the game thread: startup phase from the editor's own log, process table (PID, command line, responding), the plugin's status snapshot (slow-task name and percent, active modal dialog, game-thread stall), and native dialog windows. Works while the bridge is timing out, while the editor is still starting, and while a dialog is blocking the game thread. Params: probeWindows? (default true; scans native windows, costs ~2s)",
+      handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
+        const probeWindows = p?.probeWindows !== false;
+        return readEngineState(ctx.project.projectPath ?? null, { probeWindows });
       },
     },
     stop_editor: {
@@ -237,6 +245,7 @@ export const editorTool: ToolDef = categoryTool(
     playerIndex: z.number().optional().describe("get_pie_pawn: 0-based player index (default 0)"),
     functionName: z.string().optional(),
     timeout: z.number().optional().describe("start_editor: seconds to wait for the bridge (default 120) (#758)"),
+    probeWindows: z.boolean().optional().describe("get_engine_state: also enumerate native windows to catch pre-Slate dialogs (default true, costs ~2s)"),
     pieInstance: z.number().optional().describe("Select which PIE world to target: 0 = server/primary, 1..N = clients. See list_pie_instances (#778)"),
     subsystemClass: z.string().optional().describe("invoke_object_function/get_object_properties: subsystem class name or /Script path (#739)"),
     bones: z.array(z.string()).optional().describe("read_bone_transforms: bone OR socket names; omit for every bone (#756)"),
