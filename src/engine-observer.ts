@@ -451,7 +451,13 @@ export interface EngineSnapshot {
   writtenAt?: string;
   ageSeconds?: number;
   phase?: string;
-  gameThreadStalledSeconds?: number;
+  /**
+   * Null until the engine loop starts ticking. Startup has no tick loop to
+   * stall, so a number there would be a false alarm on every cold launch.
+   */
+  gameThreadStalledSeconds?: number | null;
+  gameThreadTicking?: boolean;
+  modulesLoaded?: number;
   slowTask?: { name: string; fraction: number; stack?: Array<{ name: string; fraction: number }> } | null;
   modal?: { title: string; message: string; buttons: string[] } | null;
   compiling?: { shaders: number; assets: number };
@@ -512,6 +518,12 @@ function summarise(state: Omit<EngineState, "summary" | "blocked">): { summary: 
     if (snap.slowTask) {
       const pct = Math.round((snap.slowTask.fraction ?? 0) * 100);
       return { summary: `Editor is busy: ${snap.slowTask.name} (${pct}%)`, blocked: false };
+    }
+    if (snap.gameThreadTicking === false) {
+      // Still starting: the engine loop has not begun, so module count and the
+      // log phase are the honest progress signals, not a stall time.
+      const modules = typeof snap.modulesLoaded === "number" ? `, ${snap.modulesLoaded} modules loaded` : "";
+      return { summary: `Editor is still starting (${snap.phase ?? state.log.phase}${modules}); the engine loop has not begun ticking.`, blocked: false };
     }
     if ((snap.gameThreadStalledSeconds ?? 0) > 10) {
       return { summary: `Game thread has not ticked for ${Math.round(snap.gameThreadStalledSeconds!)}s. Phase: ${snap.phase ?? state.log.phase}.`, blocked: false };

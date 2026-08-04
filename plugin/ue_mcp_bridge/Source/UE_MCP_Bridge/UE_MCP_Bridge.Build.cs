@@ -94,6 +94,10 @@ public class UE_MCP_Bridge : ModuleRules
 				"StructUtils",
 				"SubobjectDataInterface",
 				"ToolMenus",
+				// The engine-status snapshot, in its own module so it can load
+				// at PostConfigInit and cover the startup window that exists
+				// before this module does.
+				"UE_MCP_BridgeStatus",
 				"RenderCore",
 				"RHI",
 				"UMG",

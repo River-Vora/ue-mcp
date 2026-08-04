@@ -1,28 +1,23 @@
-#include "EngineStatus.h"
-#include "UE_MCP_BridgeModule.h"
-#include "GameThreadExecutor.h"
-#include "Handlers/DialogHandlers.h"
+#include "MCPEngineStatus.h"
 
 #include "CoreGlobals.h"
 #include "Containers/Ticker.h"
-#include "Misc/CoreDelegates.h"
 #include "HAL/PlatformTime.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/RunnableThread.h"
 #include "HAL/FileManager.h"
+#include "Misc/CoreDelegates.h"
 #include "Misc/DateTime.h"
 #include "Misc/FeedbackContext.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/SlowTask.h"
 #include "Misc/SlowTaskStack.h"
+#include "Modules/ModuleManager.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
-#include "Framework/Application/SlateApplication.h"
-
-#include "AssetCompilingManager.h"
-#include "ShaderCompiler.h"
+DEFINE_LOG_CATEGORY(LogMCPBridgeStatus);
 
 namespace
 {
@@ -52,52 +47,60 @@ void FMCPEngineStatus::Install()
 	InstallSeconds = FPlatformTime::Seconds();
 	LastCaptureSeconds = InstallSeconds;
 
-	// Four capture hooks, because no single one survives every kind of block:
+	// Two Core-only capture hooks, which is all that exists this early:
 	//
-	//  - the core ticker covers ordinary frames, and is the only one that runs
-	//    before Slate exists;
-	//  - Slate's pre-tick keeps firing while the UI is pumped from inside a
-	//    long operation, which is exactly the window where the core ticker is
-	//    suspended and every bridge request times out;
-	//  - the modal loop tick fires while a dialog owns the main loop, so the
-	//    snapshot can name the dialog that is blocking the caller;
+	//  - the core ticker covers ordinary frames;
 	//  - the application heartbeat is broadcast by
 	//    FFeedbackContext::ProgressReported on every slow-task progress frame,
-	//    so a task that advances its progress bar without ever returning to the
-	//    tick loop still refreshes the percentage. Without this, a 40-minute
-	//    import reports only "stalled for 40 minutes" - true, but useless.
+	//    so an operation that advances its progress bar without ever returning
+	//    to the tick loop still refreshes the percentage. Startup is almost
+	//    entirely made of those.
+	//
+	// The bridge module adds Slate's pre-tick and the modal loop tick when it
+	// loads at PostEngineInit.
 	TickerHandle = FTSTicker::GetCoreTicker().AddTicker(
 		FTickerDelegate::CreateLambda([this](float) -> bool
 		{
-			CaptureOnGameThread();
+			// The core ticker only runs once the engine loop is up, which is
+			// exactly the point where a stall figure starts meaning something.
+			{
+				FScopeLock Lock(&Mutex);
+				bGameThreadTicking = true;
+			}
+			CaptureNow();
 			return true;
 		}), 0.0f);
 
 	HeartbeatHandle = FCoreDelegates::ApplicationHeartbeat.AddLambda([this]()
 	{
-		CaptureOnGameThread();
+		CaptureNow();
 	});
 
-	if (FSlateApplication::IsInitialized())
-	{
-		PreTickHandle = FSlateApplication::Get().OnPreTick().AddLambda([this](float)
+	// Neither of the above fires during PreInit: there is no tick loop yet, and
+	// the heartbeat rides on slow-task progress reporting that startup does not
+	// always route through. These two do fire, and they are what makes the
+	// window between PostConfigInit and the first frame legible:
+	//
+	//  - every module that finishes loading (hundreds of them, and the bulk of
+	//    a cold start), which also proves the process is still moving;
+	//  - every slow task scope opening or closing, which is where the names
+	//    come from ("Loading Map", "Compiling Shaders").
+	ModulesChangedHandle = FModuleManager::Get().OnModulesChanged().AddLambda(
+		[this](FName, EModuleChangeReason Reason)
 		{
-			CaptureOnGameThread();
+			if (Reason == EModuleChangeReason::ModuleLoaded)
+			{
+				++ModulesLoaded;
+			}
+			CaptureNow();
 		});
-		ModalLoopHandle = FSlateApplication::Get().GetOnModalLoopTickEvent().AddLambda([this](float)
-		{
-			CaptureOnGameThread();
-			// Seeing the dialog is only half of it: the call that could answer
-			// it is queued behind the same blocked game thread. Modal-safe
-			// handlers run here so a dialog can be cleared from the outside.
-			FMCPGameThreadExecutor::DrainModalSafeQueue();
-		});
-	}
+
+	RebindFeedbackContextIfNeeded();
 
 	bStopWriter = false;
 	WriterThread = FRunnableThread::Create(this, TEXT("MCPEngineStatusWriter"), 0, TPri_BelowNormal);
 
-	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Engine status snapshot installed -> %s"), *StatusFilePath());
+	UE_LOG(LogMCPBridgeStatus, Log, TEXT("[UE-MCP] Engine status snapshot installed -> %s"), *StatusFilePath());
 }
 
 void FMCPEngineStatus::Shutdown()
@@ -128,29 +131,82 @@ void FMCPEngineStatus::Shutdown()
 		HeartbeatHandle.Reset();
 	}
 
-	if (FSlateApplication::IsInitialized())
+	if (ModulesChangedHandle.IsValid())
 	{
-		if (PreTickHandle.IsValid())
-		{
-			FSlateApplication::Get().OnPreTick().Remove(PreTickHandle);
-			PreTickHandle.Reset();
-		}
-		if (ModalLoopHandle.IsValid())
-		{
-			FSlateApplication::Get().GetOnModalLoopTickEvent().Remove(ModalLoopHandle);
-			ModalLoopHandle.Reset();
-		}
+		FModuleManager::Get().OnModulesChanged().Remove(ModulesChangedHandle);
+		ModulesChangedHandle.Reset();
 	}
+
+	if (BoundContext)
+	{
+		if (SlowTaskStartHandle.IsValid())
+		{
+			BoundContext->OnStartSlowTask().Remove(SlowTaskStartHandle);
+			SlowTaskStartHandle.Reset();
+		}
+		if (SlowTaskFinalizeHandle.IsValid())
+		{
+			BoundContext->OnFinalizeSlowTask().Remove(SlowTaskFinalizeHandle);
+			SlowTaskFinalizeHandle.Reset();
+		}
+		BoundContext = nullptr;
+	}
+
+	ModalProvider = nullptr;
+	CompileProvider = nullptr;
 
 	// Leave no stale file behind: a status.json from a dead editor claiming a
 	// 40% slow task is worse than no file at all.
 	IFileManager::Get().Delete(*StatusFilePath(), false, false, true);
 }
 
+void FMCPEngineStatus::RebindFeedbackContextIfNeeded()
+{
+	// GWarn is swapped from the bootstrap context to FFeedbackContextEditor
+	// partway through startup, taking any bindings with it, so check identity
+	// rather than binding once and assuming it holds.
+	if (!GWarn || GWarn == BoundContext)
+	{
+		return;
+	}
+
+	if (BoundContext)
+	{
+		if (SlowTaskStartHandle.IsValid())
+		{
+			BoundContext->OnStartSlowTask().Remove(SlowTaskStartHandle);
+		}
+		if (SlowTaskFinalizeHandle.IsValid())
+		{
+			BoundContext->OnFinalizeSlowTask().Remove(SlowTaskFinalizeHandle);
+		}
+	}
+
+	BoundContext = GWarn;
+	SlowTaskStartHandle = GWarn->OnStartSlowTask().AddLambda([this](const FText&)
+	{
+		CaptureNow();
+	});
+	SlowTaskFinalizeHandle = GWarn->OnFinalizeSlowTask().AddLambda([this](const FText&, double)
+	{
+		CaptureNow();
+	});
+}
+
 void FMCPEngineStatus::SetPhase(const FString& InPhase)
 {
 	FScopeLock Lock(&Mutex);
 	Phase = InPhase;
+}
+
+void FMCPEngineStatus::SetModalProvider(FModalProvider Provider)
+{
+	ModalProvider = MoveTemp(Provider);
+}
+
+void FMCPEngineStatus::SetCompileProvider(FCompileProvider Provider)
+{
+	CompileProvider = MoveTemp(Provider);
 }
 
 void FMCPEngineStatus::NoteHandlerBegin(const FString& Method)
@@ -172,16 +228,18 @@ void FMCPEngineStatus::NoteHandlerEnd(const FString& Method)
 	}
 }
 
-void FMCPEngineStatus::CaptureOnGameThread()
+void FMCPEngineStatus::CaptureNow()
 {
 	if (!IsInGameThread())
 	{
 		return;
 	}
 
-	// Read everything first, then take the lock once. Slate widget traversal
-	// for a modal dialog is the expensive part and must not be done under a
-	// lock the socket thread is waiting on.
+	RebindFeedbackContextIfNeeded();
+
+	// Read everything first, then take the lock once. The modal provider walks
+	// the Slate widget tree, which must not happen under a lock the socket
+	// thread is waiting on.
 	FString LocalSlowName;
 	float LocalSlowFraction = 0.0f;
 	TArray<FSlowTaskEntry> LocalStack;
@@ -224,7 +282,10 @@ void FMCPEngineStatus::CaptureOnGameThread()
 	FString LocalModalTitle;
 	FString LocalModalMessage;
 	TArray<FString> LocalModalButtons;
-	const bool bDescribedModal = FDialogHandlers::DescribeActiveModal(LocalModalTitle, LocalModalMessage, LocalModalButtons);
+	const bool bDescribedModal = ModalProvider
+		? ModalProvider(LocalModalTitle, LocalModalMessage, LocalModalButtons)
+		: false;
+
 	// The editor's own slow-task progress window is an active modal window: it
 	// carries the progress text ("Compiling Shaders (9)") but no title and no
 	// buttons. Reporting it as a dialog would tell callers a human answer is
@@ -244,11 +305,11 @@ void FMCPEngineStatus::CaptureOnGameThread()
 	}
 
 	int32 LocalShaderJobs = 0;
-	if (GShaderCompilingManager)
+	int32 LocalAssetCompiles = 0;
+	if (CompileProvider)
 	{
-		LocalShaderJobs = GShaderCompilingManager->GetNumRemainingJobs();
+		CompileProvider(LocalShaderJobs, LocalAssetCompiles);
 	}
-	const int32 LocalAssetCompiles = FAssetCompilingManager::Get().GetNumRemainingAssets();
 
 	const double Now = FPlatformTime::Seconds();
 
@@ -277,11 +338,24 @@ TSharedPtr<FJsonObject> FMCPEngineStatus::Snapshot() const
 
 	Out->SetStringField(TEXT("phase"), Phase);
 	Out->SetNumberField(TEXT("uptimeSeconds"), Now - InstallSeconds);
+	Out->SetNumberField(TEXT("modulesLoaded"), ModulesLoaded);
 
 	// The single most useful number here: how long the game thread has gone
 	// without reaching any of the capture hooks. Everything below is as old as
 	// this value says it is.
-	Out->SetNumberField(TEXT("gameThreadStalledSeconds"), Now - LastCaptureSeconds);
+	//
+	// It is meaningless before the engine loop exists, though, and reporting
+	// "stalled for 40 seconds" during a normal cold start is a false alarm, so
+	// say plainly that the game thread is not ticking yet instead.
+	Out->SetBoolField(TEXT("gameThreadTicking"), bGameThreadTicking);
+	if (bGameThreadTicking)
+	{
+		Out->SetNumberField(TEXT("gameThreadStalledSeconds"), Now - LastCaptureSeconds);
+	}
+	else
+	{
+		Out->SetField(TEXT("gameThreadStalledSeconds"), MakeShared<FJsonValueNull>());
+	}
 
 	if (bSlowTaskActive)
 	{

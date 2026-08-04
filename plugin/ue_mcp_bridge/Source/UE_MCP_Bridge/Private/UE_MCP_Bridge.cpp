@@ -1,7 +1,8 @@
 #include "UE_MCP_BridgeModule.h"
 #include "Modules/ModuleManager.h"
 #include "BridgeServer.h"
-#include "EngineStatus.h"
+#include "EngineStatusHooks.h"
+#include "MCPEngineStatus.h"
 #include "Handlers/DialogHandlers.h"
 #include "Editor.h"
 #include "Editor/EditorEngine.h"
@@ -24,20 +25,11 @@ void FUE_MCP_BridgeModule::StartupModule()
 	const int32 BasePort = FMCPBridgeServer::ResolveConfiguredPort();
 	G_BridgeServer = MakeShared<FMCPBridgeServer>(BasePort);
 
-	// Start publishing engine state before anything else: from here on, the
-	// slow tasks, dialogs and stalls that make the editor unresponsive are
-	// visible over the socket and in Saved/UE_MCP_Bridge/status.json, instead
-	// of turning every request into a bare timeout.
-	FMCPEngineStatus::Get().Install();
+	// The snapshot has been publishing since PostConfigInit, from the
+	// UE_MCP_BridgeStatus module. Now that Slate, the shader compiler and the
+	// asset compiler exist, hand it the sensors that need them.
+	FMCPEngineStatusHooks::Install();
 	FMCPEngineStatus::Get().SetPhase(TEXT("bridge starting"));
-	FCoreDelegates::OnAllModuleLoadingPhasesComplete.AddLambda([]()
-	{
-		FMCPEngineStatus::Get().SetPhase(TEXT("modules loaded"));
-	});
-	FCoreDelegates::OnFEngineLoopInitComplete.AddLambda([]()
-	{
-		FMCPEngineStatus::Get().SetPhase(TEXT("engine loop initialized"));
-	});
 
 	FDialogHandlers::InstallDialogHook();
 	// Safety net: auto-decline overwrite dialogs to prevent game thread blocking.
@@ -107,7 +99,10 @@ void FUE_MCP_BridgeModule::StartupModule()
 void FUE_MCP_BridgeModule::ShutdownModule()
 {
 	FDialogHandlers::RemoveDialogHook();
-	FMCPEngineStatus::Get().Shutdown();
+	// The snapshot itself outlives this module (its own module owns it and
+	// keeps publishing until PostConfigInit teardown); only the Slate and
+	// Engine sensors go away with us.
+	FMCPEngineStatusHooks::Remove();
 
 	if (G_BridgeServer.IsValid())
 	{

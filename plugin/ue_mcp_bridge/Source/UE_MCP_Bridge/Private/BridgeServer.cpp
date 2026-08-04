@@ -1,6 +1,6 @@
 #include "BridgeServer.h"
 #include "UE_MCP_BridgeModule.h"
-#include "EngineStatus.h"
+#include "MCPEngineStatus.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Serialization/JsonSerializer.h"

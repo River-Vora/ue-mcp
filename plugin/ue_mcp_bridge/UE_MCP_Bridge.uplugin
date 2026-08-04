@@ -17,6 +17,11 @@
 	"Installed": false,
 	"Modules": [
 		{
+			"Name": "UE_MCP_BridgeStatus",
+			"Type": "Editor",
+			"LoadingPhase": "PostConfigInit"
+		},
+		{
 			"Name": "UE_MCP_Bridge",
 			"Type": "Editor",
 			"LoadingPhase": "PostEngineInit"

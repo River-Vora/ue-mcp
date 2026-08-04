@@ -82,7 +82,11 @@ export const projectTool: ToolDef = categoryTool(
             blocked: logState.blocking || Boolean(snapshot?.modal),
             modal: snapshot?.modal ?? undefined,
             slowTask: snapshot?.slowTask ?? undefined,
-            gameThreadStalledSeconds: snapshot?.gameThreadStalledSeconds,
+            gameThreadStalledSeconds: snapshot?.gameThreadStalledSeconds ?? undefined,
+            // False during startup: there is no engine loop to stall yet, so
+            // the stall figure above is deliberately absent rather than zero.
+            gameThreadTicking: snapshot?.gameThreadTicking,
+            modulesLoaded: snapshot?.modulesLoaded,
             snapshotAgeSeconds: snapshot?.ageSeconds,
             secondsSinceLogWrite: logState.secondsSinceWrite ?? undefined,
             lastLogLine: logState.lastLine ?? undefined,
