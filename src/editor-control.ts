@@ -170,6 +170,15 @@ async function isBridgeAvailable(host = process.env.UE_MCP_HOST ?? "127.0.0.1", 
   });
 }
 
+/**
+ * How long startup must show no change before we suspect something is holding
+ * it rather than working. Generous: shader compilation and asset registry scans
+ * legitimately sit on one phase for a long time, and the check that follows
+ * costs a couple of seconds.
+ */
+const STALLED_STARTUP_MS = 45_000;
+const WINDOW_PROBE_INTERVAL_MS = 60_000;
+
 export interface ReadyPhase {
   phase: string;
   atSeconds: number;
@@ -218,6 +227,10 @@ async function waitForEditorReady(
   let socketUpSince: number | null = null;
   /** Highest progress value already sent; the stream must never go backwards. */
   let lastReportedProgress = -1;
+  /** When startup last visibly moved, for detecting a wait that has gone quiet. */
+  let lastChangeAt = Date.now();
+  let lastActivity = "";
+  let lastWindowProbeAt = 0;
 
   const bar = opts.showProgress === false ? null : startProgress("Starting Unreal Editor");
   const elapsed = (): number => (Date.now() - startTime) / 1000;
@@ -316,6 +329,49 @@ async function waitForEditorReady(
     }
     if (logIsCurrent && logState.blocking) {
       return finish({ ready: false, elapsedSeconds: elapsed(), timeline, reason: logState.phase, state: await readEngineState(projectPath ?? null, { probeWindows: true }) });
+    }
+
+    // A prompt raised before the bridge module loads - the "modules are missing
+    // or built with a different engine version" box is the common one - is a
+    // native window, invisible to the snapshot (which has no Slate access that
+    // early) and silent in the log unless the engine happened to write about
+    // it. Waiting out the full timeout to discover that is useless, so once
+    // startup has visibly stopped moving, look at the actual windows. The probe
+    // costs a couple of seconds, hence the stall gate and the rate limit.
+    // Fingerprint what is MOVING, never a clock. An earlier version folded the
+    // log's age into this - a value that ticks every second - so the wait always
+    // looked busy and the stall check never fired once in five minutes.
+    // Absolute write time is stable while the log sits still and changes the
+    // moment the engine writes again.
+    const logWrittenAt =
+      logState.secondsSinceWrite === null ? "" : Math.round(Date.now() / 1000 - logState.secondsSinceWrite);
+    const activity = `${phase}|${snapshot?.slowTask?.name ?? ""}|${snapshot?.slowTask?.fraction ?? ""}|${snapshot?.modulesLoaded ?? ""}|${logWrittenAt}`;
+    if (activity !== lastActivity) {
+      lastActivity = activity;
+      lastChangeAt = Date.now();
+    } else if (Date.now() - lastChangeAt > STALLED_STARTUP_MS && Date.now() - lastWindowProbeAt > WINDOW_PROBE_INTERVAL_MS) {
+      lastWindowProbeAt = Date.now();
+      const stalledState = await readEngineState(projectPath ?? null, { probeWindows: true });
+      if (stalledState.dialogs.length > 0) {
+        const dialog = stalledState.dialogs[0];
+        const text = (dialog.text ?? []).slice(0, 4).join(" | ");
+        return finish({
+          ready: false,
+          elapsedSeconds: elapsed(),
+          timeline,
+          reason: `blocked on a native dialog before the bridge loaded: "${dialog.title || dialog.className}" ${text}`.trim(),
+          state: stalledState,
+        });
+      }
+      if (!stalledState.running) {
+        return finish({
+          ready: false,
+          elapsedSeconds: elapsed(),
+          timeline,
+          reason: "the editor process is gone - it exited during startup",
+          state: stalledState,
+        });
+      }
     }
 
     // Ready means both: the plugin says so, and the socket actually answers.
