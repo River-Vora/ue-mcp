@@ -20,11 +20,22 @@ import {
   type Snapshot,
 } from "./git-snapshot.js";
 import {
+
   emitFlowEvent,
   nextRunId,
   trimStepResult,
   trimError,
 } from "./events.js";
+
+/**
+ * Name a failed rollback by the bridge method it tried to call. Every record
+ * routes through the generic "ue-mcp.bridge" task now, so taskName alone
+ * renders three different failed inverses as three identical lines.
+ */
+function rollbackLabel(e: { taskName: string; payload?: Record<string, unknown> }): string {
+  const method = e.payload?.method;
+  return typeof method === "string" && method.length > 0 ? method : e.taskName;
+}
 
 export function createFlowTool(
   registry: TaskRegistry,
@@ -283,7 +294,7 @@ function formatFlowResult(result: FlowRunResult): Record<string, unknown> {
         (result.rollback.errors.length ? ` — ${result.rollback.errors.length} failed` : ""),
     );
     for (const e of result.rollback.errors) {
-      lines.push(`      ✗ ${e.taskName}: ${e.error.message}`);
+      lines.push(`      ✗ ${rollbackLabel(e)}: ${e.error.message}`);
     }
   }
 

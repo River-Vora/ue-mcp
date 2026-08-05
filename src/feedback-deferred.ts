@@ -41,6 +41,12 @@ export interface DeferredFeedback {
   /** Authorship intent at defer time. Honored when the deferred entry is
    *  later approved via the CLI. */
   author: "user" | "bot";
+  /** Target tracker as `owner/name`. Absent on entries written before
+   *  plugin routing existed; those approve against ue-mcp core. */
+  repo?: string;
+  /** One line on why the entry is aimed at that tracker, shown by
+   *  `feedback show`/`review` so a human can sanity-check the routing. */
+  routing?: string;
 }
 
 function ensureDir(): void {
@@ -61,7 +67,7 @@ function generateId(now: Date): string {
 }
 
 export function deferSubmission(
-  payload: { title: string; body: string; labels: string[] },
+  payload: { title: string; body: string; labels: string[]; repo?: string; routing?: string },
   project: string | null,
   author: "user" | "bot",
 ): DeferredFeedback {
@@ -76,6 +82,8 @@ export function deferSubmission(
     body: payload.body,
     labels: payload.labels,
     author,
+    ...(payload.repo ? { repo: payload.repo } : {}),
+    ...(payload.routing ? { routing: payload.routing } : {}),
   };
   const filePath = path.join(pendingDir(), `${id}.json`);
   fs.writeFileSync(filePath, JSON.stringify(entry, null, 2), { mode: 0o600 });

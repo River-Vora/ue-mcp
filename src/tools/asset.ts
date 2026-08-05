@@ -8,9 +8,9 @@ export const assetTool: ToolDef = categoryTool(
   "Asset management: list, search, read, CRUD, import meshes/textures, datatables, stringtables.",
   {
     list: bp(
-      "List assets via the AssetRegistry (sees /Game and every mounted plugin root). Params: directory? (default /Game), classFilter?, recursive? (default true), maxResults? (default 2000)",
+      "List assets via the AssetRegistry (sees /Game and every mounted plugin root). Paginated: returns totalMatched, offset, hasMore and nextOffset so a large folder can be walked deterministically instead of dropping the bridge on one oversized response (#790). Params: directory? (default /Game), classFilter?, recursive? (default true), maxResults? (default 500, max 5000), offset? (default 0)",
       "list_assets",
-      (p) => ({ directory: p.directory, classFilter: p.classFilter ?? p.typeFilter, recursive: p.recursive, maxResults: p.maxResults }),
+      (p) => ({ directory: p.directory, classFilter: p.classFilter ?? p.typeFilter, recursive: p.recursive, maxResults: p.maxResults, offset: p.offset }),
     ),
     search: {
       description: "Search by name/class/path. Params: query, directory?, maxResults?, searchAll?",
@@ -40,7 +40,7 @@ export const assetTool: ToolDef = categoryTool(
       },
     },
     read:           bp("Read asset via reflection. Params: assetPath", "read_asset", (p) => ({ path: p.assetPath })),
-    read_properties: bp("Read asset properties with values. Blueprint paths resolve to the generated-class CDO (#568). propertyName accepts dotted/indexed paths into nested structs, array elements, and instanced subobjects (e.g. `Config.Traits[1].Params.Field`); landing on an array of subobjects also lists each element's index+class (#527). Params: assetPath, propertyName?, includeValues?, valueFormat?", "read_asset_properties"),
+    read_properties: bp("Read asset properties with values. Blueprint paths resolve to the generated-class CDO (#568). propertyName accepts dotted/indexed paths into nested structs, array elements, and instanced subobjects (e.g. `Config.Traits[1].Params.Field`); landing on an array of subobjects also lists each element's index+class (#527). expandDepth inlines the properties of subobjects OWNED by this asset, so a data asset's nested payload comes back in ONE call instead of a reference you have to chase (#755); references to OTHER assets are marked expandable rather than followed, unless expandExternal=true. Capped by maxExpandedObjects with expansionTruncated reported. Params: assetPath, propertyName?, includeValues?, valueFormat?, expandDepth? (0-5, default 0), expandExternal?, maxExpandedObjects? (default 64)", "read_asset_properties", (p) => ({ assetPath: p.assetPath, propertyName: p.propertyName, includeValues: p.includeValues, valueFormat: p.valueFormat, expandDepth: p.expandDepth, expandExternal: p.expandExternal, maxExpandedObjects: p.maxExpandedObjects })),
     list_properties: bp("List reflected properties on any asset. Params: assetPath, includeValues?, valueFormat? ('text'|'json')", "read_asset_properties", (p) => ({ assetPath: p.assetPath ?? p.path, includeValues: p.includeValues, valueFormat: p.valueFormat })),
     get_properties: bp("Read property values on any asset. propertyName accepts dotted/indexed paths into nested structs, array elements, and instanced subobjects. valueFormat='json' returns structured values. Params: assetPath, propertyName?, includeValues?, valueFormat?", "read_asset_properties", (p) => ({ assetPath: p.assetPath ?? p.path, propertyName: p.propertyName, includeValues: p.includeValues ?? true, valueFormat: p.valueFormat })),
     duplicate:      bp("Duplicate asset. Params: sourcePath, destinationPath", "duplicate_asset"),
@@ -51,8 +51,8 @@ export const assetTool: ToolDef = categoryTool(
     delete_batch:   bp("Batch-delete assets. Per-path status (deleted/absent/failed) plus reason+referencers on failed entries (#278). Params: assetPaths[], force?", "delete_asset_batch"),
     create_data_asset: bp("Create UDataAsset instance of custom class. Params: name, className (/Script/Module.ClassName or loaded name), packagePath?, properties? (key/value map)", "create_data_asset"),
     create_asset_by_class: bp("Create an asset of ANY concrete UObject class (not just UDataAsset) - physical-material subclasses, curves, settings objects. Params: name, className (/Script/Module.ClassName or loaded name), packagePath?, properties? (key/value map), onConflict? (skip|replace|rename). Actors/components and specialized assets (Blueprint/Material) have dedicated actions (#726)", "create_asset_by_class", (p) => ({ name: p.name, className: p.className, packagePath: p.packagePath, properties: p.properties, onConflict: p.onConflict })),
-    save:           bp("Save asset(s). Params: assetPath?", "save_asset"),
-    save_all_dirty: bp("Flush every dirty package to disk in one call. End-of-workflow shortcut after bulk import/edit. Params: saveMapPackages? (default true), saveContentPackages? (default true). Returns savedAll boolean (#429)", "save_all_dirty", (p) => ({ saveMapPackages: p.saveMapPackages, saveContentPackages: p.saveContentPackages })),
+    save:           bp("Save one asset, or every dirty asset under /Game when assetPath is omitted. force=true saves regardless of the dirty flag - several edits (OFPA level actors, some subsystem property writes) never mark their package dirty, so a dirty-only save skipped them and still reported success. Returns the package name plus on-disk file path, size and mtime so the write can be verified rather than trusted (#768). Params: assetPath?, force?", "save_asset", (p) => ({ assetPath: p.assetPath ?? p.path, force: p.force })),
+    save_all_dirty: bp("Flush every dirty package to disk in one call. Reports the packages it attempted, which ones reached disk (with file path, size and mtime) and which are still dirty afterwards, because a bare savedAll boolean has come back true while packages were never written (#768). Params: saveMapPackages? (default true), saveContentPackages? (default true)", "save_all_dirty", (p) => ({ saveMapPackages: p.saveMapPackages, saveContentPackages: p.saveContentPackages })),
     set_mesh_material:    bp("Assign material to static mesh slot. Params: assetPath, materialPath, slotIndex?", "set_mesh_material"),
     recenter_pivot:       { description: "Move static mesh pivot to geometry center. Params: assetPath OR assetPaths", bridge: "recenter_pivot", mapParams: (p) => {
       const paths = p.assetPaths as string[] | undefined;
@@ -134,6 +134,7 @@ export const assetTool: ToolDef = categoryTool(
     get_mesh_info:        bp("One-call mesh QA: bounds + material slots + skeleton + LOD/vertex counts. Works for both UStaticMesh and USkeletalMesh. Params: assetPath. Returns meshKind, boundsOrigin, boundsExtent, heightM, lodCount, vertexCount, skeletonPath (skeletal only), materialSlots:[{index, slotName, materialPath, isDefaultFallback}], materialCount (#431)", "get_mesh_info"),
     read_import_sources:  bp("Read AssetImportData source filenames on an imported asset (StaticMesh, SkeletalMesh, Texture, Animation, etc.). Returns sources[] of {relativeFilename, absolutePath, timestamp, fileHash, displayLabelName}. Params: assetPath (#270)", "read_import_sources", (p) => ({ assetPath: p.assetPath ?? p.path })),
     get_mesh_collision:   bp("Inspect StaticMesh collision setup. Params: assetPath. Returns collisionTraceFlag, hasSimple/ComplexCollision, element counts (#177)", "get_mesh_collision"),
+    migrate: bp("Copy assets and their dependencies into ANOTHER project's Content directory - the scripted form of the content browser's Migrate (#760). destinationContentDir is the TARGET project's Content folder. The bridge attaches to one editor, so it pushes assets out of the project it is attached to; combined with project(set_project) and editor(restart_editor) that makes the cross-project round trip reachable (attach to the reference project, retarget there, migrate the results into the game project). Unsaved or never-saved assets are refused, because migrate copies files and would otherwise silently omit your edits. Every asset is resolved before anything is copied, and the destination is checked for the packages afterwards rather than reporting success on the call returning. Params: assetPaths (string[]) or assetPath, destinationContentDir, includeDependencies? (default true), onConflict? (skip|overwrite, default skip), allowDirty?, dryRun?", "migrate", (p) => ({ assetPaths: p.assetPaths, assetPath: p.assetPath, destinationContentDir: p.destinationContentDir, includeDependencies: p.includeDependencies, onConflict: p.onConflict, allowDirty: p.allowDirty, dryRun: p.dryRun })),
     move_folder:          bp("Move/rename entire content folder with redirector fixup in one transaction. Params: sourcePath, destinationPath (#192)", "move_folder"),
     create_folder:        bp("Create empty content browser folder(s). Params: path OR paths[] (e.g. /Game/Foo, /Game/Bar/Baz). Returns per-path created/existed/failed (#212)", "create_folder", (p) => ({ path: p.path, paths: p.paths })),
     delete_folder:        bp("Delete content browser folder(s) - counterpart to delete_asset, which leaves the parent directory entry behind as an orphan. Empty folders only by default; pass force=true to also delete any assets still inside (Content Browser 'Delete folder' equivalent). Per-path status (deleted/absent/failed) with reason (invalid_path/protected_path/not_empty/delete_failed) and a sample of contained assets on not_empty entries. Params: path OR paths[], force?", "delete_folder", (p) => ({ path: p.path, paths: p.paths, force: p.force })),
@@ -152,6 +153,8 @@ export const assetTool: ToolDef = categoryTool(
     lock:                 bp("Acquire an exclusive lock on an asset for this session. Returns acquired=true, or acquired=false with holder{sessionId,ttlSecondsRemaining} when another session holds it. Params: assetPath, ttlSeconds? (default 300), sessionId?", "acquire_lock", (p) => ({ path: p.assetPath ?? p.path, sessionId: p.sessionId ?? SESSION_ID, ttlSeconds: p.ttlSeconds })),
     unlock:               bp("Release an asset lock held by this session (or force=true to break any holder's lock). Params: assetPath, force?, sessionId?", "release_lock", (p) => ({ path: p.assetPath ?? p.path, sessionId: p.sessionId ?? SESSION_ID, force: p.force })),
     list_locks:           bp("List all currently-held asset locks with holder session id, acquiredAt, and ttlSecondsRemaining.", "list_locks"),
+    unlock_all:           bp("Release every lock held by one session in a single call, returning the number released. Defaults to this server process's session; pass sessionId to clear a different one (for example after a crashed session left assets wedged). Params: sessionId?", "release_session_locks", (p) => ({ sessionId: p.sessionId ?? SESSION_ID })),
+    diff:                 bp("Semantic structural diff between two assets of any type, dispatching on the asset's class. Blueprints are diffed structurally (parent class, variables, functions, components, per-graph node and connection deltas); other asset types report that diffing is not supported yet rather than failing opaquely. Params: assetPath, otherPath", "diff_asset", (p) => ({ assetPath: p.assetPath ?? p.path, otherPath: p.otherPath })),
   },
   undefined,
   {
@@ -221,6 +224,13 @@ export const assetTool: ToolDef = categoryTool(
     exportName: z.string().optional(), propertyName: z.string().optional(),
     value: z.unknown().optional().describe("Property value for set_property — scalar, object/array, or asset-path string. Goes through MCPJsonProperty (#420/#531)"),
     includeValues: z.boolean().optional().describe("Include property values in read_properties/list_properties/get_properties"),
+    dryRun: z.boolean().optional().describe("migrate: resolve and report without copying (#760)"),
+    allowDirty: z.boolean().optional().describe("migrate: migrate the on-disk version of an asset with unsaved edits (#760)"),
+    destinationContentDir: z.string().optional().describe("migrate: the TARGET project's Content folder (#760)"),
+    includeDependencies: z.boolean().optional().describe("migrate: also copy referenced assets (default true) (#760)"),
+    expandDepth: z.number().int().min(0).max(5).optional().describe("read_properties: inline owned subobjects to this depth (default 0) (#755)"),
+    expandExternal: z.boolean().optional().describe("read_properties: also follow references to other assets (default false) (#755)"),
+    maxExpandedObjects: z.number().int().positive().optional().describe("read_properties: cap on expanded objects (default 64) (#755)"),
     valueFormat: z.enum(["text", "json"]).optional().describe("Property value format for read_properties/list_properties/get_properties. Default text preserves the existing Unreal ExportText output; json returns structured JSON where supported."),
     settings: z.record(z.unknown()).optional(),
     compressionSettings: z.string().optional().describe("Texture compression: Default, Normalmap, Grayscale, Displacementmap, VectorDisplacementmap, HDR, EditorIcon, Alpha, DistanceFieldFont, HDR_Compressed, BC7"),
@@ -236,7 +246,7 @@ export const assetTool: ToolDef = categoryTool(
     importMorphTargets: z.boolean().optional().describe("import_skeletal_mesh: import morph targets (default true) (#678)"),
     createPhysicsAsset: z.boolean().optional().describe("import_skeletal_mesh: auto-create a PhysicsAsset (default false) (#678)"),
     replaceExisting: z.boolean().optional().describe("import_skeletal_mesh: replace an existing asset at the destination (default true) (#678)"),
-    assetPaths: z.array(z.string()).optional().describe("Array of asset paths (for recenter_pivot batch — first mesh sets reference pivot)"),
+    assetPaths: z.array(z.string()).optional().describe("Array of asset paths (recenter_pivot batch - first mesh sets reference pivot; also migrate)"),
     renames: z.array(z.record(z.unknown())).optional().describe("Array of rename descriptors for bulk_rename — each {sourcePath, destinationPath} or {assetPath, newName}"),
     socketName: z.string().optional().describe("Socket name"),
     boneName: z.string().optional().describe("Bone name (for skeletal mesh sockets)"),
@@ -273,6 +283,12 @@ export const assetTool: ToolDef = categoryTool(
     reconcile: z.boolean().optional().describe("diagnose_registry: force synchronous rescan (evicts pending-kill ghosts)"),
     bHasNavigationData: z.boolean().optional().describe("Toggle nav data generation for set_mesh_nav"),
     clearNavCollision: z.boolean().optional().describe("Remove NavCollision from mesh for set_mesh_nav"),
-    force: z.boolean().optional().describe("delete / delete_batch: auto-close any open asset editors before deleting (#278). delete_folder: also delete assets contained in the folder."),
+    offset: z.number().optional().describe("list: index of the first match to return, for paging large folders (#790)"),
+    force: z.boolean().optional().describe("delete / delete_batch: auto-close any open asset editors before deleting (#278). delete_folder: also delete assets contained in the folder. save: write even if the package is not marked dirty (#768)."),
+    otherPath: z.string().optional().describe("diff: the asset to compare assetPath against"),
+    // lock / unlock / unlock_all all default this to the server process's own
+    // session id; it is only passed explicitly to coordinate across processes.
+    sessionId: z.string().optional().describe("lock / unlock / unlock_all: owning session id (defaults to this server process)"),
+    ttlSeconds: z.number().optional().describe("lock: seconds before the lock auto-expires (default 300)"),
   },
 );

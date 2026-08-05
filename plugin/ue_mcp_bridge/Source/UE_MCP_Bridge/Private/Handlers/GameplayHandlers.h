@@ -11,6 +11,8 @@ public:
 
 private:
 	static TSharedPtr<FJsonValue> CreateSmartObjectDefinition(const TSharedPtr<FJsonObject>& Params);
+	// #778: per-player Enhanced Input applied mapping contexts, per PIE world.
+	static TSharedPtr<FJsonValue> GetInputMappingContexts(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetNavmeshInfo(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetGameFrameworkInfo(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ListInputAssets(const TSharedPtr<FJsonObject>& Params);
@@ -24,7 +26,6 @@ private:
 	static TSharedPtr<FJsonValue> CreateInputMappingContext(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadImc(const TSharedPtr<FJsonObject>& Params);
 	// #604 read a live PIE player's applied Input Mapping Contexts
-	static TSharedPtr<FJsonValue> GetAppliedImcs(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AddImcMapping(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetMappingModifiers(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> RemoveImcMapping(const TSharedPtr<FJsonObject>& Params);

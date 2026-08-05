@@ -1,6 +1,12 @@
 #include "EditorHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+
+#include "MessageLogModule.h"
+#include "IMessageLogListing.h"
+#include "Logging/TokenizedMessage.h"
+#include "Editor/EditorPerformanceSettings.h"
+#include "Misc/ScopeExit.h"
 #include "Engine/World.h"
 #include "Engine/Engine.h"
 #include "Scalability.h"
@@ -179,9 +185,17 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("undo"), &Undo);
 	Registry.RegisterHandler(TEXT("redo"), &Redo);
 	Registry.RegisterHandler(TEXT("reload_handlers"), &ReloadHandlers);
-	Registry.RegisterHandler(TEXT("save_asset"), &SaveAsset);
+	// save_asset is owned by FAssetHandlers (#768: adds force, file size, mtime).
+	// Registering it here too meant the winner was decided by registration
+	// order in BridgeServer.cpp, which is not a contract.
 	Registry.RegisterHandler(TEXT("save_dirty"), &SaveDirty);
 	Registry.RegisterHandler(TEXT("list_dirty_packages"), &ListDirtyPackages);
+	Registry.RegisterHandler(TEXT("list_pie_instances"), &ListPIEInstances);
+	Registry.RegisterHandler(TEXT("invoke_object_function"), &InvokeObjectFunction);
+	Registry.RegisterHandler(TEXT("get_object_properties"), &GetObjectProperties);
+	Registry.RegisterHandler(TEXT("read_bone_transforms"), &ReadBoneTransforms);
+	Registry.RegisterHandler(TEXT("teleport_runtime_actor"), &TeleportRuntimeActor);
+	Registry.RegisterHandler(TEXT("set_movement_mode"), &SetMovementMode);
 	Registry.RegisterHandler(TEXT("build_lighting"), &BuildLighting);
 	Registry.RegisterHandler(TEXT("build_all"), &BuildAll);
 	Registry.RegisterHandler(TEXT("validate_assets"), &ValidateAssets);
@@ -218,7 +232,6 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("get_pie_config"), &GetPieConfig);
 	Registry.RegisterHandler(TEXT("pie_set_player_view"), &PieSetPlayerView);
 	Registry.RegisterHandler(TEXT("stage_game_input"), &StageGameInput);
-	Registry.RegisterHandler(TEXT("invoke_function_repeating"), &InvokeFunctionRepeating);
 	// #455: discover UBlueprintFunctionLibrary classes (GeometryScript,
 	// Kismet, anything user-defined). Pair with editor.invoke_function to
 	// drive GeometryScript ops from MCP without hand-writing each handler.
@@ -1205,13 +1218,119 @@ TSharedPtr<FJsonValue> FEditorHandlers::SearchLog(const TSharedPtr<FJsonObject>&
 	return MCPResult(Result);
 }
 
+// Read a Message Log listing (map check, asset check, PIE, load errors...).
+//
+// This returned an empty array unconditionally and ignored logName, so "no
+// messages" was indistinguishable from "not implemented" - callers used it to
+// confirm a clean compile and got a clean answer either way.
+//
+// Blueprint compile results are deliberately NOT the default. They do not go to
+// a fixed listing: FCompilerResultsLog names one per Blueprint
+// ("<Guid>_<Name>_CompilerResultsLog"), so defaulting to a single name would
+// reintroduce the same false-clean answer in a subtler form. With no logName we
+// report which listings actually exist instead of guessing.
 TSharedPtr<FJsonValue> FEditorHandlers::GetMessageLog(const TSharedPtr<FJsonObject>& Params)
 {
-	// FMessageLog does not expose a simple API to read back entries in C++.
-	// Return success with an empty messages array as a baseline implementation.
-	auto Result = MCPSuccess();
+	FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>(TEXT("MessageLog"));
+
+	// The module exposes no enumeration, so probe the well-known listings.
+	static const TCHAR* KnownListings[] = {
+		TEXT("MapCheck"), TEXT("AssetCheck"), TEXT("PIE"), TEXT("LoadErrors"),
+		TEXT("LightingResults"), TEXT("BlueprintLog"), TEXT("AssetTools"),
+		TEXT("EditorErrors"), TEXT("AutomationTestingLog"), TEXT("Blueprint Log"),
+		TEXT("PackagingResults"), TEXT("SourceControl"), TEXT("HLODResults"),
+		TEXT("AnimBlueprintLog"), TEXT("WorldPartition"), TEXT("BlueprintCompiler"),
+	};
+
+	const FString LogName = OptionalString(Params, TEXT("logName"));
+	if (LogName.IsEmpty())
+	{
+		TArray<TSharedPtr<FJsonValue>> Available;
+		for (const TCHAR* Candidate : KnownListings)
+		{
+			if (!MessageLogModule.IsRegisteredLogListing(FName(Candidate))) continue;
+			TSharedRef<IMessageLogListing> L = MessageLogModule.GetLogListing(FName(Candidate));
+			TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+			Row->SetStringField(TEXT("logName"), Candidate);
+			Row->SetNumberField(TEXT("errors"), L->NumMessages(EMessageSeverity::Error));
+			Row->SetNumberField(TEXT("warnings"), L->NumMessages(EMessageSeverity::Warning));
+			Available.Add(MakeShared<FJsonValueObject>(Row));
+		}
+		auto Listing = MCPSuccess();
+		Listing->SetArrayField(TEXT("listings"), Available);
+		Listing->SetStringField(TEXT("note"),
+			TEXT("Pass logName to read one of these. Blueprint COMPILE results are not here - the compiler creates a listing per Blueprint; use blueprint(compile) or blueprint(compile_all), which return the compiler log directly."));
+		return MCPResult(Listing);
+	}
+
+	if (!MessageLogModule.IsRegisteredLogListing(FName(*LogName)))
+	{
+		// Naming a listing that does not exist would otherwise create an empty
+		// one and report a clean log, which is the same false negative.
+		return MCPError(FString::Printf(
+			TEXT("No message log listing named '%s'. Call with no logName to list the registered ones."),
+			*LogName));
+	}
+
+	TSharedRef<IMessageLogListing> Listing = MessageLogModule.GetLogListing(FName(*LogName));
+	const int32 Limit = FMath::Max(1, OptionalInt(Params, TEXT("maxLines"), 200));
+	// Named `severity`, not `filter`: the editor tool's `filter` is a substring
+	// match on message text, and sharing the key made this look like one while
+	// silently matching only severity names.
+	const FString SeverityFilter = OptionalString(Params, TEXT("severity")).ToLower();
+
+	auto SeverityName = [](EMessageSeverity::Type S) -> FString
+	{
+		switch (S)
+		{
+			case EMessageSeverity::Error:              return TEXT("Error");
+			case EMessageSeverity::PerformanceWarning: return TEXT("PerformanceWarning");
+			case EMessageSeverity::Warning:            return TEXT("Warning");
+			case EMessageSeverity::Info:               return TEXT("Info");
+			default:                                   return TEXT("Unknown");
+		}
+	};
+
+	// Counts come from NumMessages, which reads the listing itself. The message
+	// bodies can only be reached through GetFilteredMessages, which is scoped to
+	// the current PAGE and honours the severity checkboxes in the Message Log
+	// tab - so the two can legitimately disagree, and that difference is
+	// reported rather than left to look like a clean log.
+	const int32 TotalErrors   = Listing->NumMessages(EMessageSeverity::Error);
+	const int32 TotalWarnings = Listing->NumMessages(EMessageSeverity::Warning);
+	const int32 TotalInfo     = Listing->NumMessages(EMessageSeverity::Info);
+
 	TArray<TSharedPtr<FJsonValue>> MessagesArray;
+	int32 Visible = 0;
+	bool bTruncated = false;
+	for (const TSharedRef<FTokenizedMessage>& Message : Listing->GetFilteredMessages())
+	{
+		++Visible;
+		const FString Severity = SeverityName(Message->GetSeverity());
+		if (!SeverityFilter.IsEmpty() && !Severity.ToLower().Contains(SeverityFilter)) continue;
+		if (MessagesArray.Num() >= Limit) { bTruncated = true; continue; }
+
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("severity"), Severity);
+		Obj->SetStringField(TEXT("text"), Message->ToText().ToString());
+		MessagesArray.Add(MakeShared<FJsonValueObject>(Obj));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("logName"), LogName);
 	Result->SetArrayField(TEXT("messages"), MessagesArray);
+	Result->SetNumberField(TEXT("errors"), TotalErrors);
+	Result->SetNumberField(TEXT("warnings"), TotalWarnings);
+	Result->SetNumberField(TEXT("total"), TotalErrors + TotalWarnings + TotalInfo);
+	Result->SetBoolField(TEXT("truncated"), bTruncated);
+	const int32 Reachable = Visible;
+	if (Reachable < TotalErrors + TotalWarnings + TotalInfo)
+	{
+		Result->SetStringField(TEXT("note"), FString::Printf(
+			TEXT("The listing holds %d messages but only %d %s readable: the message bodies come from the current page and honour the Message Log tab's severity checkboxes. The counts above are the real totals."),
+			TotalErrors + TotalWarnings + TotalInfo, Reachable,
+			Reachable == 1 ? TEXT("is") : TEXT("are")));
+	}
 	return MCPResult(Result);
 }
 
@@ -1543,24 +1662,6 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReloadHandlers(const TSharedPtr<FJsonObj
 {
 	// No-op in C++ bridge - this was used in the Python bridge to reload Python handler modules.
 	auto Result = MCPSuccess();
-	return MCPResult(Result);
-}
-
-TSharedPtr<FJsonValue> FEditorHandlers::SaveAsset(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
-
-	bool bSuccess = UEditorAssetLibrary::SaveAsset(AssetPath);
-
-	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-	Result->SetStringField(TEXT("path"), AssetPath);
-	Result->SetBoolField(TEXT("success"), bSuccess);
-	if (!bSuccess)
-	{
-		Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Failed to save asset: %s"), *AssetPath));
-	}
-
 	return MCPResult(Result);
 }
 
@@ -2159,7 +2260,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScenePng(const TSharedPtr<FJsonOb
 	// #599: allow capturing the PIE world (not just the editor world) so a
 	// framed shot reflects the running game.
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
 	FString OutputPath;
@@ -2343,6 +2444,29 @@ TSharedPtr<FJsonValue> FEditorHandlers::RunAutomationTests(const TSharedPtr<FJso
 {
 	const FString NameFilter = OptionalString(Params, TEXT("filter"));
 	const int32 MaxTests = OptionalInt(Params, TEXT("maxTests"), 50);
+
+	// #765: this handler runs tests SYNCHRONOUSLY via StartTestByName inside a
+	// single tick, so it never depended on the interactive-frame-rate gate that
+	// blocks the console "Automation RunTests" queue - that is the actual fix
+	// for the reported hang. The throttle is still suspended here because the
+	// latent-command flush below can span frames if the editor does tick, and
+	// an agent-driven editor is unfocused by definition. It is a belt-and-braces
+	// measure, not the mechanism.
+	UEditorPerformanceSettings* PerfSettings = GetMutableDefault<UEditorPerformanceSettings>();
+	const bool bPrevThrottle = PerfSettings && PerfSettings->bThrottleCPUWhenNotForeground;
+	if (PerfSettings && bPrevThrottle)
+	{
+		PerfSettings->bThrottleCPUWhenNotForeground = false;
+		PerfSettings->PostEditChange();
+	}
+	ON_SCOPE_EXIT
+	{
+		if (PerfSettings && bPrevThrottle)
+		{
+			PerfSettings->bThrottleCPUWhenNotForeground = true;
+			PerfSettings->PostEditChange();
+		}
+	};
 
 	FAutomationTestFramework& Framework = FAutomationTestFramework::Get();
 	Framework.SetRequestedTestFilter(EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter |

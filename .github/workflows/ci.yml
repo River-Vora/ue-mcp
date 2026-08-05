@@ -263,26 +263,10 @@ jobs:
             -f target_url="https://github.com/$REPO/blob/$SHA/scripts/surface-counts.mts"
           echo "Posted surface/counts: $DESC"
 
-  docs:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      contents: write   # gh-deploy pushes to gh-pages
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: Install mkdocs-material
-        run: pip install mkdocs-material
-
-      - name: Configure git identity
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Deploy to GitHub Pages
-        run: mkdocs gh-deploy --force
+  # The MkDocs -> gh-pages deploy used to live here. The published docs are
+  # built by the landing site from docs/**, synced by push-docs.yml, so this
+  # job was maintaining a second, always-slightly-stale copy of the same
+  # pages at db-lyon.github.io/ue-mcp. gh-pages now serves only a redirect.
+  #
+  # mkdocs.yml is still required: the landing converter parses its nav block
+  # to build the sidebar. Do not delete it.

@@ -42,6 +42,8 @@ void FLandscapeHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// #733: World Partition landscape streaming-proxy enumeration + spatial lookup.
 	Registry.RegisterHandler(TEXT("list_landscape_proxies"), &ListLandscapeProxies);
 	Registry.RegisterHandler(TEXT("find_landscape_proxy_at"), &FindLandscapeProxyAt);
+	Registry.RegisterHandlerWithTimeout(TEXT("sculpt_landscape"), &Sculpt, 120.0f);
+	Registry.RegisterHandlerWithTimeout(TEXT("paint_landscape_layer"), &PaintLayer, 120.0f);
 }
 
 TSharedPtr<FJsonValue> FLandscapeHandlers::GetLandscapeInfo(const TSharedPtr<FJsonObject>& Params)
@@ -453,9 +455,11 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		LayerInfoObj->LayerName = FName(*LayerName);
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
-		// Set optional properties
-		bool bIsWeightBlended = OptionalBool(Params, TEXT("weightBlended"), true);
-		// bNoWeightBlend removed in UE 5.7 — weight blending is now controlled per-layer via landscape settings
+		// There is no weight-blend toggle to set here any more: bNoWeightBlend
+		// was removed in 5.7 and blending is controlled per-layer through
+		// landscape settings. The old 'weightBlended' param read into a unused
+		// local and the response hardcoded true, so both are gone rather than
+		// left implying a setting that is not being applied.
 
 		// Notify asset registry and save
 		FAssetRegistryModule::AssetCreated(LayerInfoObj);
@@ -476,7 +480,6 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	Result->SetStringField(TEXT("path"), LayerInfoObj->GetPathName());
 	Result->SetStringField(TEXT("landscapeName"), TargetLandscape->GetName());
 	Result->SetNumberField(TEXT("layerIndex"), LayerIndex);
-	Result->SetBoolField(TEXT("weightBlended"), true);
 
 	return MCPResult(Result);
 }
@@ -651,12 +654,39 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	LayerInfo->LayerName = FName(*LayerName);
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
-	// Optional hardness; physics material is settable via set_actor_property
-	// against the asset path (PhysicsCore is not a hard dep of this module).
+	// physMaterial was documented here and never applied - the caller had to
+	// discover for themselves that it needed a second call. PhysicsCore is not
+	// a hard dependency of this module, so the class is reached by path and the
+	// property set through reflection rather than a link-time include.
+	const FString PhysMaterialPath = OptionalString(Params, TEXT("physMaterial"));
+	if (!PhysMaterialPath.IsEmpty())
+	{
+		UObject* PhysMat = LoadAssetByPath<UObject>(PhysMaterialPath);
+		if (!PhysMat)
+		{
+			// Both failure paths here run after the package and object exist, so
+			// bail out without leaving a half-made asset in memory.
+			LayerInfo->MarkAsGarbage();
+			return MCPError(FString::Printf(TEXT("physMaterial not found: %s"), *PhysMaterialPath));
+		}
+		FObjectProperty* Prop = CastField<FObjectProperty>(
+			ULandscapeLayerInfoObject::StaticClass()->FindPropertyByName(TEXT("PhysMaterial")));
+		if (!Prop || !Prop->PropertyClass || !PhysMat->IsA(Prop->PropertyClass))
+		{
+			LayerInfo->MarkAsGarbage();
+			return MCPError(FString::Printf(
+				TEXT("'%s' is a %s, not a PhysicalMaterial."),
+				*PhysMaterialPath, *PhysMat->GetClass()->GetName()));
+		}
+		Prop->SetObjectPropertyValue_InContainer(LayerInfo, PhysMat);
+	}
+
 	double Hardness = 0.0;
 	if (Params->TryGetNumberField(TEXT("hardness"), Hardness))
 	{
-		LayerInfo->Hardness = static_cast<float>(Hardness);
+		// Hardness is becoming private; the setter also handles Modify() and the
+		// property-change notification the direct write skipped.
+		LayerInfo->SetHardness(static_cast<float>(Hardness), /*bInModify=*/true, EPropertyChangeType::ValueSet);
 	}
 
 	FAssetRegistryModule::AssetCreated(LayerInfo);
@@ -668,6 +698,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	Result->SetStringField(TEXT("path"), LayerInfo->GetPathName());
 	Result->SetStringField(TEXT("layerName"), LayerName);
 	Result->SetStringField(TEXT("packagePath"), PackagePath);
+	if (!PhysMaterialPath.IsEmpty()) Result->SetStringField(TEXT("physMaterial"), PhysMaterialPath);
 	MCPSetDeleteAssetRollback(Result, LayerInfo->GetPathName());
 
 	return MCPResult(Result);

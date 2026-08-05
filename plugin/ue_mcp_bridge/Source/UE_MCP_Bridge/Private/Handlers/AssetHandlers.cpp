@@ -278,6 +278,7 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("move_folder"), &MoveFolder);
 	Registry.RegisterHandler(TEXT("create_folder"), &CreateFolder);
 	Registry.RegisterHandler(TEXT("delete_folder"), &DeleteFolder);
+	Registry.RegisterHandler(TEXT("migrate"), &MigrateAssets);
 
 	// #686 — UserDefinedEnum authoring
 	Registry.RegisterHandler(TEXT("create_user_defined_enum"), &CreateUserDefinedEnum);
@@ -428,22 +429,45 @@ TSharedPtr<FJsonValue> FAssetHandlers::ListAssets(const TSharedPtr<FJsonObject>&
 {
 	const FString Directory = OptionalString(Params, TEXT("directory"), TEXT("/Game"));
 	const bool bRecursive = OptionalBool(Params, TEXT("recursive"), true);
-	const int32 MaxResults = OptionalInt(Params, TEXT("maxResults"), 2000);
+	// #766/#790: the old default of 2000 built a single response large enough
+	// to drop the bridge on a big folder ("Bridge connection lost" at roughly
+	// 700 assets). Page instead: a smaller default, a real offset, and enough
+	// counters that a caller can walk the whole set deterministically rather
+	// than guessing whether it got everything.
+	const int32 MaxResults = FMath::Clamp(OptionalInt(Params, TEXT("maxResults"), 500), 1, 5000);
+	const int32 Offset = FMath::Max(0, OptionalInt(Params, TEXT("offset"), 0));
 	const FString ClassFilter = OptionalString(Params, TEXT("classFilter"));
 
 	IAssetRegistry& Registry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
 	TArray<FAssetData> Found;
 	Registry.GetAssetsByPath(FName(*Directory), Found, bRecursive);
 
+	// AssetRegistry order is not a stable contract, so paging over it could
+	// overlap or skip entries between calls. Sort so offset/limit paging is
+	// genuinely deterministic, which is what the action advertises.
+	// TArray::Sort is not stable, so tie on AssetName too: multi-asset packages
+	// would otherwise order arbitrarily and paging could still overlap or skip.
+	Found.Sort([](const FAssetData& A, const FAssetData& B)
+	{
+		if (A.PackageName != B.PackageName) return A.PackageName.LexicalLess(B.PackageName);
+		return A.AssetName.LexicalLess(B.AssetName);
+	});
+
 	TArray<TSharedPtr<FJsonValue>> Out;
+	int32 TotalMatched = 0;
 	for (const FAssetData& Data : Found)
 	{
-		if (Out.Num() >= MaxResults) break;
 		const FString ClassName = Data.AssetClassPath.GetAssetName().ToString();
 		if (!ClassFilter.IsEmpty() && !ClassName.Equals(ClassFilter, ESearchCase::IgnoreCase) && !ClassName.Contains(ClassFilter))
 		{
 			continue;
 		}
+		// Count every match before slicing, so totalMatched is the real size of
+		// the result set and not just what fitted in this page.
+		const int32 MatchIndex = TotalMatched++;
+		if (MatchIndex < Offset) continue;
+		if (Out.Num() >= MaxResults) continue;
+
 		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 		Item->SetStringField(TEXT("path"), Data.PackageName.ToString());
 		Item->SetStringField(TEXT("name"), Data.AssetName.ToString());
@@ -451,10 +475,23 @@ TSharedPtr<FJsonValue> FAssetHandlers::ListAssets(const TSharedPtr<FJsonObject>&
 		Out.Add(MakeShared<FJsonValueObject>(Item));
 	}
 
+	const int32 NextOffset = Offset + Out.Num();
+	const bool bHasMore = NextOffset < TotalMatched;
+
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("directory"), Directory);
 	Result->SetBoolField(TEXT("recursive"), bRecursive);
 	Result->SetNumberField(TEXT("assetCount"), Out.Num());
+	Result->SetNumberField(TEXT("totalMatched"), TotalMatched);
+	Result->SetNumberField(TEXT("offset"), Offset);
+	Result->SetBoolField(TEXT("hasMore"), bHasMore);
+	if (bHasMore)
+	{
+		Result->SetNumberField(TEXT("nextOffset"), NextOffset);
+		Result->SetStringField(TEXT("note"), FString::Printf(
+			TEXT("Showing %d of %d matches. Re-run with offset=%d for the next page."),
+			Out.Num(), TotalMatched, NextOffset));
+	}
 	Result->SetArrayField(TEXT("assets"), Out);
 	return MCPResult(Result);
 }
@@ -760,32 +797,161 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReadAssetProperties(const TSharedPtr<FJso
 	// Return all properties with their values
 	bool bIncludeValues = OptionalBool(Params, TEXT("includeValues"));
 
-	TArray<TSharedPtr<FJsonValue>> PropsArray;
-	for (TFieldIterator<FProperty> It(Asset->GetClass()); It; ++It)
+	// #755: an object property returned only a reference path, so reading a
+	// data asset's nested payload (a LearningNeuralNetworkData subobject, an
+	// instanced config) meant a second call - or Python. expandDepth walks
+	// into subobjects OWNED by this asset and inlines their properties.
+	//
+	// Owned-only by default: following an arbitrary asset reference would drag
+	// half the content browser into one response. expandExternal lifts that
+	// for callers who really do want to follow a reference to another asset.
+	const int32 ExpandDepth = FMath::Clamp(OptionalInt(Params, TEXT("expandDepth"), 0), 0, 5);
+	const bool bExpandExternal = OptionalBool(Params, TEXT("expandExternal"), false);
+	// Hard cap so a deep or cyclic graph cannot produce a response big enough
+	// to drop the bridge connection.
+	const int32 MaxExpanded = FMath::Clamp(OptionalInt(Params, TEXT("maxExpandedObjects"), 64), 1, 512);
+
+	int32 ExpandedCount = 0;
+	bool bExpansionTruncated = false;
+	TSet<const UObject*> Visited;
+	Visited.Add(Asset);
+
+	// Declared before use so the lambdas can recurse into each other.
+	TFunction<void(UObject*, TSharedPtr<FJsonObject>&, int32)> ExpandObject;
+	// Walks any container (a UObject or a struct instance) emitting its
+	// properties, descending into struct members so subobject collections held
+	// inside a struct - material expressions, for one - are still reachable.
+	TFunction<void(UStruct*, const void*, TArray<TSharedPtr<FJsonValue>>&, int32)> WalkContainer;
+
+	WalkContainer = [&](UStruct* Struct, const void* Container, TArray<TSharedPtr<FJsonValue>>& Props, int32 Depth)
 	{
-		TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
-		P->SetStringField(TEXT("name"), (*It)->GetName());
-		P->SetStringField(TEXT("type"), (*It)->GetCPPType());
-		if (bIncludeValues)
+		for (TFieldIterator<FProperty> It(Struct); It; ++It)
 		{
-			if (bJsonValues)
+			FProperty* Prop = *It;
+			TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
+			P->SetStringField(TEXT("name"), Prop->GetName());
+			P->SetStringField(TEXT("type"), Prop->GetCPPType());
+			const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Container);
+			if (bIncludeValues)
 			{
-				const void* ValuePtr = (*It)->ContainerPtrToValuePtr<void>(Asset);
-				P->SetField(TEXT("value"), FMCPJsonSerializer::SerializeValue(ValuePtr, *It));
+				if (bJsonValues)
+				{
+					P->SetField(TEXT("value"), FMCPJsonSerializer::SerializeValue(ValuePtr, Prop));
+				}
+				else
+				{
+					FString ValueStr;
+					Prop->ExportText_Direct(ValueStr, ValuePtr, ValuePtr, Asset, PPF_None);
+					P->SetStringField(TEXT("value"), ValueStr);
+				}
 			}
-			else
+
+			if (Depth > 0)
 			{
-				P->SetStringField(TEXT("value"), ExportPropertyValue(*It, Asset, Asset));
+				// Arrays of owned subobjects are as common as single ones
+				// (material expressions, instanced configs, node graphs), and
+				// leaving them out would make expandDepth work for one shape
+				// of asset and silently not for the next.
+				if (FArrayProperty* ArrProp = CastField<FArrayProperty>(Prop))
+				{
+					if (FObjectPropertyBase* InnerObj = CastField<FObjectPropertyBase>(ArrProp->Inner))
+					{
+						FScriptArrayHelper Helper(ArrProp, ValuePtr);
+						TArray<TSharedPtr<FJsonValue>> Elems;
+						for (int32 ElemIdx = 0; ElemIdx < Helper.Num(); ++ElemIdx)
+						{
+							UObject* Sub = InnerObj->GetObjectPropertyValue(Helper.GetRawPtr(ElemIdx));
+							if (!Sub || !IsValid(Sub)) continue;
+							const bool bOwnedElem = Sub->IsIn(Asset);
+							if ((!bOwnedElem && !bExpandExternal) || Visited.Contains(Sub)) continue;
+							if (ExpandedCount >= MaxExpanded) { bExpansionTruncated = true; break; }
+							Visited.Add(Sub);
+							++ExpandedCount;
+							TSharedPtr<FJsonObject> E = MakeShared<FJsonObject>();
+							E->SetNumberField(TEXT("index"), ElemIdx);
+							E->SetStringField(TEXT("objectPath"), Sub->GetPathName());
+							E->SetStringField(TEXT("className"), Sub->GetClass()->GetName());
+							E->SetBoolField(TEXT("owned"), bOwnedElem);
+							ExpandObject(Sub, E, Depth - 1);
+							Elems.Add(MakeShared<FJsonValueObject>(E));
+						}
+						if (Elems.Num() > 0) P->SetArrayField(TEXT("objects"), Elems);
+					}
+				}
+				else if (FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(Prop))
+				{
+					UObject* Sub = ObjProp->GetObjectPropertyValue(ValuePtr);
+					// IsIn(Asset) is what makes this a SUBOBJECT rather than a
+					// reference to a separate asset.
+					const bool bOwned = Sub && Sub->IsIn(Asset);
+					if (Sub && IsValid(Sub) && (bOwned || bExpandExternal) && !Visited.Contains(Sub))
+					{
+						if (ExpandedCount >= MaxExpanded)
+						{
+							bExpansionTruncated = true;
+						}
+						else
+						{
+							Visited.Add(Sub);
+							++ExpandedCount;
+							TSharedPtr<FJsonObject> Nested = MakeShared<FJsonObject>();
+							Nested->SetStringField(TEXT("objectPath"), Sub->GetPathName());
+							Nested->SetStringField(TEXT("className"), Sub->GetClass()->GetName());
+							Nested->SetBoolField(TEXT("owned"), bOwned);
+							ExpandObject(Sub, Nested, Depth - 1);
+							P->SetObjectField(TEXT("object"), Nested);
+						}
+					}
+					else if (Sub && !Visited.Contains(Sub) && !bOwned && !bExpandExternal)
+					{
+						// Say why it was not followed rather than leaving a bare
+						// path that looks the same as an unexpandable value.
+						P->SetBoolField(TEXT("expandable"), true);
+					}
+				}
+				else if (FStructProperty* StructProp = CastField<FStructProperty>(Prop))
+				{
+					// Not counted against MaxExpanded: a struct is part of this
+					// object, not a separate one, so descending costs no extra
+					// object budget - only the objects it leads to do.
+					TArray<TSharedPtr<FJsonValue>> Inner;
+					WalkContainer(StructProp->Struct, ValuePtr, Inner, Depth);
+					if (Inner.Num() > 0)
+					{
+						TSharedPtr<FJsonObject> SObj = MakeShared<FJsonObject>();
+						SObj->SetStringField(TEXT("structType"), StructProp->Struct->GetName());
+						SObj->SetArrayField(TEXT("properties"), Inner);
+						P->SetObjectField(TEXT("struct"), SObj);
+					}
+				}
 			}
+			Props.Add(MakeShared<FJsonValueObject>(P));
 		}
-		PropsArray.Add(MakeShared<FJsonValueObject>(P));
-	}
+	};
+
+	ExpandObject = [&](UObject* Owner, TSharedPtr<FJsonObject>& Into, int32 Depth)
+	{
+		TArray<TSharedPtr<FJsonValue>> Props;
+		WalkContainer(Owner->GetClass(), Owner, Props, Depth);
+		Into->SetNumberField(TEXT("propertyCount"), Props.Num());
+		Into->SetArrayField(TEXT("properties"), Props);
+	};
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
 	Result->SetStringField(TEXT("className"), Asset->GetClass()->GetName());
-	Result->SetNumberField(TEXT("propertyCount"), PropsArray.Num());
-	Result->SetArrayField(TEXT("properties"), PropsArray);
+	ExpandObject(Asset, Result, ExpandDepth);
+	if (ExpandDepth > 0)
+	{
+		Result->SetNumberField(TEXT("expandedObjects"), ExpandedCount);
+		if (bExpansionTruncated)
+		{
+			Result->SetBoolField(TEXT("expansionTruncated"), true);
+			Result->SetStringField(TEXT("note"), FString::Printf(
+				TEXT("Stopped after %d expanded objects. Raise maxExpandedObjects, lower expandDepth, or read a specific subobject with editor(get_object_properties)."),
+				MaxExpanded));
+		}
+	}
 
 	return MCPResult(Result);
 }
@@ -1982,23 +2148,96 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateAssetByClass(const TSharedPtr<FJson
 	return MCPResult(Result);
 }
 
+namespace
+{
+	// #768: on-disk evidence for a save. A boolean return is not enough - the
+	// reported failure was save actions returning success while the .uasset was
+	// never touched, only surfacing after an editor restart. Reporting the file
+	// path, size and mtime lets a caller verify instead of trusting the flag.
+	void DescribeOnDisk(const TSharedPtr<FJsonObject>& Out, const FString& PackageName)
+	{
+		FString Filename;
+		if (!FPackageName::TryConvertLongPackageNameToFilename(PackageName, Filename))
+		{
+			return;
+		}
+		// A package is either an asset or a map; try both extensions.
+		const FString AssetFile = Filename + FPackageName::GetAssetPackageExtension();
+		const FString MapFile = Filename + FPackageName::GetMapPackageExtension();
+		IFileManager& FM = IFileManager::Get();
+		const FString Resolved = FM.FileExists(*AssetFile) ? AssetFile
+			: (FM.FileExists(*MapFile) ? MapFile : FString());
+		Out->SetBoolField(TEXT("existsOnDisk"), !Resolved.IsEmpty());
+		if (!Resolved.IsEmpty())
+		{
+			Out->SetStringField(TEXT("file"), Resolved);
+			Out->SetNumberField(TEXT("fileSize"), (double)FM.FileSize(*Resolved));
+			Out->SetStringField(TEXT("modifiedUtc"), FM.GetTimeStamp(*Resolved).ToIso8601());
+		}
+	}
+}
+
 TSharedPtr<FJsonValue> FAssetHandlers::SaveAsset(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
 	if ((Params->TryGetStringField(TEXT("path"), AssetPath) || Params->TryGetStringField(TEXT("assetPath"), AssetPath)) && !AssetPath.IsEmpty() && AssetPath != TEXT("all"))
 	{
-		bool bSuccess = UEditorAssetLibrary::SaveAsset(AssetPath);
+		// #768: force=true saves regardless of the dirty flag. Several reports
+		// hit edits that never marked their package dirty (OFPA level actors,
+		// property writes through some subsystems), so a dirty-only save
+		// skipped them and still returned success.
+		const bool bForce = OptionalBool(Params, TEXT("force"), false);
 		auto Result = MCPSuccess();
 		Result->SetStringField(TEXT("path"), AssetPath);
+		Result->SetBoolField(TEXT("force"), bForce);
+
+		bool bSuccess = false;
+		if (bForce)
+		{
+			UObject* Asset = LoadAssetByPath<UObject>(AssetPath);
+			if (!Asset)
+			{
+				return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
+			}
+			UPackage* Package = Asset->GetOutermost();
+			if (!Package)
+			{
+				return MCPError(FString::Printf(TEXT("Asset has no package: %s"), *AssetPath));
+			}
+			TArray<UPackage*> Packages{ Package };
+			bSuccess = UEditorLoadingAndSavingUtils::SavePackages(Packages, /*bOnlyDirty=*/false);
+			Result->SetStringField(TEXT("package"), Package->GetName());
+			DescribeOnDisk(Result, Package->GetName());
+		}
+		else
+		{
+			bSuccess = UEditorAssetLibrary::SaveAsset(AssetPath);
+			if (UObject* Asset = FindObject<UObject>(nullptr, *AssetPath))
+			{
+				if (UPackage* Package = Asset->GetOutermost())
+				{
+					Result->SetStringField(TEXT("package"), Package->GetName());
+					Result->SetBoolField(TEXT("stillDirty"), Package->IsDirty());
+					DescribeOnDisk(Result, Package->GetName());
+				}
+			}
+		}
 		Result->SetBoolField(TEXT("success"), bSuccess);
 		return MCPResult(Result);
 	}
 	else
 	{
-		// Save all dirty assets
+		// No assetPath: this is the save-everything branch. 'force' has no
+		// meaning here (SaveDirectory is dirty-only), so say so rather than
+		// accepting a flag that silently does nothing.
+		if (OptionalBool(Params, TEXT("force"), false))
+		{
+			return MCPError(TEXT("'force' requires an assetPath - it forces one package to disk. To flush everything, use asset(save_all_dirty), which reports exactly which packages were written."));
+		}
 		UEditorAssetLibrary::SaveDirectory(TEXT("/Game"));
 		auto Result = MCPSuccess();
-		Result->SetStringField(TEXT("message"), TEXT("All modified assets saved"));
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("message"), TEXT("All modified assets under /Game saved (dirty only). Use save_all_dirty for a per-package report."));
 		return MCPResult(Result);
 	}
 }
@@ -2008,12 +2247,46 @@ TSharedPtr<FJsonValue> FAssetHandlers::SaveAllDirty(const TSharedPtr<FJsonObject
 	const bool bSaveMapPackages = OptionalBool(Params, TEXT("saveMapPackages"), true);
 	const bool bSaveContentPackages = OptionalBool(Params, TEXT("saveContentPackages"), true);
 
+	// #768: capture what was dirty BEFORE saving, so the response can name the
+	// packages this call was responsible for and report whether each one
+	// actually reached disk. 'savedAll' on its own was reported as true while
+	// packages were silently never written.
+	TArray<UPackage*> DirtyBefore;
+	if (bSaveContentPackages) FEditorFileUtils::GetDirtyContentPackages(DirtyBefore);
+	if (bSaveMapPackages) FEditorFileUtils::GetDirtyWorldPackages(DirtyBefore);
+	TArray<FString> TargetNames;
+	for (UPackage* Package : DirtyBefore)
+	{
+		if (Package && Package->IsDirty()) TargetNames.AddUnique(Package->GetName());
+	}
+
 	const bool bOk = UEditorLoadingAndSavingUtils::SaveDirtyPackages(bSaveMapPackages, bSaveContentPackages);
+
+	TArray<TSharedPtr<FJsonValue>> Written;
+	TArray<TSharedPtr<FJsonValue>> StillDirty;
+	for (const FString& Name : TargetNames)
+	{
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("package"), Name);
+		UPackage* Package = FindPackage(nullptr, *Name);
+		const bool bDirty = Package && Package->IsDirty();
+		Entry->SetBoolField(TEXT("stillDirty"), bDirty);
+		DescribeOnDisk(Entry, Name);
+		if (bDirty) StillDirty.Add(MakeShared<FJsonValueObject>(Entry));
+		else        Written.Add(MakeShared<FJsonValueObject>(Entry));
+	}
 
 	auto Result = MCPSuccess();
 	Result->SetBoolField(TEXT("saveMapPackages"), bSaveMapPackages);
 	Result->SetBoolField(TEXT("saveContentPackages"), bSaveContentPackages);
-	Result->SetBoolField(TEXT("savedAll"), bOk);
+	Result->SetBoolField(TEXT("savedAll"), bOk && StillDirty.Num() == 0);
+	Result->SetNumberField(TEXT("attempted"), TargetNames.Num());
+	Result->SetArrayField(TEXT("saved"), Written);
+	Result->SetArrayField(TEXT("stillDirty"), StillDirty);
+	if (StillDirty.Num() > 0)
+	{
+		Result->SetStringField(TEXT("note"), TEXT("Some packages are still dirty after the save. Retry those with asset(save, path=..., force=true)."));
+	}
 	return MCPResult(Result);
 }
 
@@ -2940,5 +3213,162 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateInterchangePipeline(const TSharedPt
 	Result->SetNumberField(TEXT("overridesApplied"), OverridesApplied);
 	if (OverrideFailures.Num() > 0) Result->SetArrayField(TEXT("overrideFailures"), OverrideFailures);
 	MCPSetDeleteAssetRollback(Result, NewAsset->GetPathName());
+	return MCPResult(Result);
+}
+
+
+// #760: copy assets and their dependencies into ANOTHER project's Content
+// directory - the scripted form of the content browser's Migrate.
+//
+// This is the half of cross-project work the bridge can actually do. The
+// bridge attaches to one editor, so it cannot drive two projects at once; what
+// it can do is push assets out of the project it is attached to. Combined with
+// project(set_project) + editor(restart_editor), that makes the full round trip
+// reachable: attach to the reference project, batch_retarget_animations there,
+// migrate the results into the game project, switch back.
+//
+// Params:
+//   assetPaths (string[]) OR assetPath, destinationContentDir (the TARGET
+//   project's Content folder), includeDependencies? (default true),
+//   onConflict? ("skip" default | "overwrite"), dryRun? (default false)
+TSharedPtr<FJsonValue> FAssetHandlers::MigrateAssets(const TSharedPtr<FJsonObject>& Params)
+{
+	TArray<FString> AssetPaths;
+	const TArray<TSharedPtr<FJsonValue>>* PathArray = nullptr;
+	if (Params->TryGetArrayField(TEXT("assetPaths"), PathArray) && PathArray)
+	{
+		for (const TSharedPtr<FJsonValue>& V : *PathArray)
+		{
+			FString P;
+			if (V.IsValid() && V->TryGetString(P) && !P.IsEmpty()) AssetPaths.Add(P);
+		}
+	}
+	FString Single;
+	if (Params->TryGetStringField(TEXT("assetPath"), Single) && !Single.IsEmpty())
+	{
+		AssetPaths.AddUnique(Single);
+	}
+	if (AssetPaths.Num() == 0)
+	{
+		return MCPError(TEXT("Provide assetPaths (string[]) or assetPath."));
+	}
+
+	FString DestContentDir;
+	if (auto Err = RequireString(Params, TEXT("destinationContentDir"), DestContentDir)) return Err;
+	FPaths::NormalizeDirectoryName(DestContentDir);
+	if (!FPaths::DirectoryExists(DestContentDir))
+	{
+		return MCPError(FString::Printf(
+			TEXT("destinationContentDir does not exist: %s. Point it at the TARGET project's Content folder (e.g. D:/Games/MyGame/Content)."),
+			*DestContentDir));
+	}
+	// Migrating into our own Content folder would be a no-op that still reports
+	// success, and is almost always a wrong path rather than an intent.
+	FString OwnContent = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir());
+	FString DestFull = FPaths::ConvertRelativePathToFull(DestContentDir);
+	// Normalise both sides: the caller's path arrives with forward slashes and
+	// no trailing separator, ProjectContentDir has the platform form and a
+	// trailing one, so a raw compare let the no-op case through.
+	FPaths::NormalizeDirectoryName(OwnContent);
+	FPaths::NormalizeDirectoryName(DestFull);
+	if (DestFull.Equals(OwnContent, ESearchCase::IgnoreCase))
+	{
+		return MCPError(TEXT("destinationContentDir is this project's own Content folder; migrate targets a DIFFERENT project."));
+	}
+
+	// Resolve every asset before migrating any: a half-done migration with an
+	// error at the end is worse than a clean refusal.
+	const bool bAllowDirty = OptionalBool(Params, TEXT("allowDirty"), false);
+	TArray<FName> PackageNames;
+	TArray<TSharedPtr<FJsonValue>> Resolved;
+	for (const FString& Path : AssetPaths)
+	{
+		UObject* Asset = UEditorAssetLibrary::LoadAsset(Path);
+		if (!Asset)
+		{
+			return MCPError(FString::Printf(TEXT("Asset not found: %s"), *Path));
+		}
+		UPackage* Package = Asset->GetOutermost();
+		const FName PackageName(*Package->GetName());
+
+		// MigratePackages copies files off disk. A package that has never been
+		// saved, or has unsaved edits, migrates its LAST SAVED state or nothing
+		// at all - and reports neither. Refuse instead.
+		FString PackageFile;
+		const bool bOnDisk = FPackageName::DoesPackageExist(PackageName.ToString(), &PackageFile);
+		if (!bOnDisk)
+		{
+			return MCPError(FString::Printf(
+				TEXT("'%s' has never been saved to disk, so there is no file to migrate. Save it first (asset(save)) - migrate copies files, it does not serialise in-memory state."),
+				*Path));
+		}
+		if (Package->IsDirty() && !bAllowDirty)
+		{
+			return MCPError(FString::Printf(
+				TEXT("'%s' has unsaved changes. Migrating now would copy the last SAVED state and silently omit your edits. Save it first (asset(save)), or pass allowDirty=true to migrate the on-disk version deliberately."),
+				*Path));
+		}
+
+		PackageNames.AddUnique(PackageName);
+		TSharedPtr<FJsonObject> R = MakeShared<FJsonObject>();
+		R->SetStringField(TEXT("assetPath"), Asset->GetPathName());
+		R->SetStringField(TEXT("package"), PackageName.ToString());
+		Resolved.Add(MakeShared<FJsonValueObject>(R));
+	}
+
+	const bool bIncludeDeps = OptionalBool(Params, TEXT("includeDependencies"), true);
+	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
+	if (!OnConflict.Equals(TEXT("skip"), ESearchCase::IgnoreCase) &&
+		!OnConflict.Equals(TEXT("overwrite"), ESearchCase::IgnoreCase))
+	{
+		return MCPError(TEXT("onConflict must be 'skip' or 'overwrite'."));
+	}
+	const bool bDryRun = OptionalBool(Params, TEXT("dryRun"), false);
+
+	auto Result = MCPSuccess();
+	Result->SetArrayField(TEXT("assets"), Resolved);
+	Result->SetNumberField(TEXT("packageCount"), PackageNames.Num());
+	Result->SetStringField(TEXT("destinationContentDir"), DestContentDir);
+	Result->SetBoolField(TEXT("includeDependencies"), bIncludeDeps);
+	Result->SetStringField(TEXT("onConflict"), OnConflict);
+
+	if (bDryRun)
+	{
+		Result->SetBoolField(TEXT("dryRun"), true);
+		Result->SetStringField(TEXT("note"), TEXT("Dry run - nothing was copied. Re-run without dryRun to migrate."));
+		return MCPResult(Result);
+	}
+
+	FMigrationOptions Options;
+	// bPrompt is documented as always false through scripting; setting it would
+	// block the bridge on a modal dialog with nobody to answer it.
+	Options.bPrompt = false;
+	Options.bIgnoreDependencies = !bIncludeDeps;
+	Options.AssetConflict = OnConflict.Equals(TEXT("overwrite"), ESearchCase::IgnoreCase)
+		? EAssetMigrationConflict::Overwrite
+		: EAssetMigrationConflict::Skip;
+
+	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
+	AssetToolsModule.Get().MigratePackages(PackageNames, DestContentDir, Options);
+
+	// MigratePackages returns void and reports through the message log, so the
+	// only honest confirmation is to look for the files afterwards rather than
+	// claim success on the call returning.
+	int32 Present = 0;
+	TArray<TSharedPtr<FJsonValue>> Missing;
+	for (const FName& Pkg : PackageNames)
+	{
+		FString Rel = Pkg.ToString();
+		if (Rel.StartsWith(TEXT("/Game/"))) Rel = Rel.RightChop(6);
+		const FString Candidate = DestContentDir / Rel + TEXT(".uasset");
+		if (FPaths::FileExists(Candidate)) ++Present;
+		else Missing.Add(MakeShared<FJsonValueString>(Pkg.ToString()));
+	}
+	Result->SetNumberField(TEXT("packagesPresentAtDestination"), Present);
+	if (Missing.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("packagesNotFoundAtDestination"), Missing);
+		Result->SetStringField(TEXT("note"), TEXT("Some packages were not found at the destination afterwards. With onConflict=skip that is expected when they already existed; otherwise check the Message Log (editor(get_message_log, logName='AssetTools')) for what the migration reported."));
+	}
 	return MCPResult(Result);
 }

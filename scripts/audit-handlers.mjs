@@ -32,8 +32,11 @@ function tsBridgeMethods() {
       const rel = path.relative(path.join(ROOT, "src"), full).replace(/\\/g, "/");
 
       // bp("desc", "method_name", ...) — the dominant pattern in tools/*.ts.
-      // The 2nd string arg is the C++ bridge method.
-      for (const m of src.matchAll(/\bbp\(\s*"[^"]*"\s*,\s*"([a-z_][a-z0-9_]*)"/g)) {
+      // The 2nd string arg is the C++ bridge method. The description must be
+      // matched with escape awareness: a naive "[^"]*" stops at the first \"
+      // inside the prose, so any action whose description quotes something
+      // (parentPath=\"None\") was reported as an unbridged handler.
+      for (const m of src.matchAll(/\bbp\(\s*"(?:[^"\\]|\\.)*"\s*,\s*"([a-z_][a-z0-9_]*)"/g)) {
         const method = m[1];
         if (!methods.has(method)) methods.set(method, []);
         methods.get(method).push({ file: rel });
@@ -61,34 +64,55 @@ function tsBridgeMethods() {
 
 function cppRegistrations() {
   const methods = new Map(); // method -> [{file}]
+  const byHandlerFn = new Map(); // handler fn -> Set(method)
   function walk(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) { walk(full); continue; }
       if (!entry.name.endsWith(".cpp")) continue;
       const src = fs.readFileSync(full, "utf8");
-      for (const m of src.matchAll(/Registry\.RegisterHandler(?:WithTimeout)?\(\s*TEXT\("([a-z_][a-z0-9_]*)"\)/g)) {
-        const method = m[1];
+      for (const m of src.matchAll(/Registry\.RegisterHandler(?:WithTimeout)?\(\s*TEXT\("([a-z_][a-z0-9_]*)"\)\s*,\s*&([\w:]+)/g)) {
+        const [, method, fn] = m;
         if (!methods.has(method)) methods.set(method, []);
         methods.get(method).push({ file: entry.name });
+        if (!byHandlerFn.has(fn)) byHandlerFn.set(fn, new Set());
+        byHandlerFn.get(fn).add(method);
       }
     }
   }
   walk(CPP_HANDLERS);
-  return methods;
+  // method -> every other method backed by the same handler function.
+  const aliases = new Map();
+  for (const names of byHandlerFn.values()) {
+    for (const n of names) aliases.set(n, names);
+  }
+  return { methods, aliases };
 }
 
 const ts = tsBridgeMethods();
-const cpp = cppRegistrations();
+const { methods: cpp, aliases } = cppRegistrations();
 
 const tsOnly = [];   // bridge methods declared in TS but not registered in C++ -> "Unknown method" at runtime
 const cppOnly = [];  // C++ handlers with no TS exposure -> unreachable handler
+const aliasOnly = []; // reachable under a different name for the same handler fn
 
 for (const [method, sites] of ts) {
   if (!cpp.has(method)) tsOnly.push({ method, sites });
 }
 for (const [method, sites] of cpp) {
-  if (!ts.has(method)) cppOnly.push({ method, sites });
+  if (ts.has(method)) continue;
+  // Several handler functions are deliberately registered under more than one
+  // name (add_hismc_instances / add_ismc_instances / add_instances). Only the
+  // canonical name is bridged, which is fine: the behaviour is reachable.
+  // Reporting the spellings as gaps buries the handlers that really are
+  // unreachable, so separate the two.
+  const siblings = aliases.get(method);
+  const reachable = siblings && [...siblings].some((s) => s !== method && ts.has(s));
+  if (reachable) {
+    aliasOnly.push({ method, canonical: [...siblings].filter((s) => ts.has(s)).join(", ") });
+  } else {
+    cppOnly.push({ method, sites });
+  }
 }
 
 let errored = false;
@@ -110,6 +134,13 @@ if (cppOnly.length) {
   for (const { method, sites } of cppOnly.sort((a, b) => a.method.localeCompare(b.method))) {
     const where = sites.map(s => s.file).join(", ");
     console.error(`  ${method.padEnd(40)} ${where}`);
+  }
+}
+
+if (aliasOnly.length) {
+  console.error(`\n${aliasOnly.length} C++ handler name(s) are alternate spellings, reachable under their canonical name:`);
+  for (const { method, canonical } of aliasOnly.sort((a, b) => a.method.localeCompare(b.method))) {
+    console.error(`  ${method.padEnd(40)} -> ${canonical}`);
   }
 }
 

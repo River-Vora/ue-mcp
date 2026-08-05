@@ -2,6 +2,70 @@ import { z } from "zod";
 import { categoryTool, bp, type ActionSpec, type ToolDef } from "../types.js";
 import { Vec3, Rotator } from "../schemas.js";
 
+/**
+ * set_module_input takes a string on the bridge, so scalars are stringified
+ * here. Objects and arrays are rejected rather than stringified: String({...})
+ * is "[object Object]", which the handler cannot parse, and an unparsable
+ * value used to fall through to a raw pin-default write that reported success.
+ * The shared `value` key stays z.unknown() because set_renderer_property
+ * genuinely takes structs and arrays (#783); the narrowing belongs here.
+ */
+function coerceModuleInputValue(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+
+  const scalar = (v: unknown): string => {
+    if (typeof v === "number" && !Number.isFinite(v)) {
+      // Atof parses "NaN"/"Infinity", so these reach the pin as real values
+      // and report success. Nothing downstream can use them.
+      throw new Error("set_module_input: value must be a finite number");
+    }
+    return String(v);
+  };
+
+  if (Array.isArray(value)) {
+    // A vector given as [x, y, z] is exactly the comma-separated form the
+    // handler's float parser expects, so this one is a real convenience.
+    if (value.length === 0) {
+      // Joins to "", which the handler reports as a MISSING value - an error
+      // about a parameter the caller did pass.
+      throw new Error("set_module_input: value must not be an empty array");
+    }
+    if (!value.every((v) => typeof v === "number" || typeof v === "boolean" || typeof v === "string")) {
+      throw new Error("set_module_input: array values must contain only numbers, booleans or strings");
+    }
+    return value.map(scalar).join(",");
+  }
+
+  if (typeof value === "object") {
+    const o = value as Record<string, unknown>;
+    // {x,y,z[,w]} and {r,g,b[,a]} are the shapes callers reach for.
+    for (const keys of [["x", "y", "z", "w"], ["r", "g", "b", "a"]]) {
+      const numeric = keys.filter((k) => typeof o[k] === "number");
+      if (numeric.length < 2 || numeric.length !== Object.keys(o).length) continue;
+      // The present keys must be a PREFIX of the canonical order. Filtering
+      // alone accepted {x,y,w} and quietly wrote w into z - a success response
+      // with the wrong value in the pin.
+      const expected = keys.slice(0, numeric.length);
+      if (numeric.join() !== expected.join()) {
+        throw new Error(
+          `set_module_input: object value has a gap (${numeric.join(",")}); components must be contiguous from ${keys[0]}`,
+        );
+      }
+      const parts = numeric.map((k) => scalar(o[k]));
+      // Colour and Vec4 inputs need four components, and the handler's arity
+      // error does not say which one is missing. Alpha defaults to opaque
+      // because {r,g,b} is the shape callers actually type.
+      if (keys[0] === "r" && parts.length === 3) parts.push("1");
+      return parts.join(",");
+    }
+    throw new Error(
+      "set_module_input: object values are only accepted as {x,y,z[,w]} or {r,g,b[,a]}; pass other types as a string the input's type can parse",
+    );
+  }
+
+  return scalar(value);
+}
+
 export const niagaraTool: ToolDef = categoryTool(
   "niagara",
   "Niagara VFX: systems, emitters, spawning, parameters, and graph authoring.",
@@ -14,7 +78,7 @@ export const niagaraTool: ToolDef = categoryTool(
     reactivate:     bp("Reset + reactivate the NiagaraComponent on a placed actor (replay a burst before capturing). Params: actorLabel (#537)", "reactivate_niagara", (p) => ({ actorLabel: p.actorLabel })),
     set_parameter:  bp("Set parameter. Params: actorLabel, parameterName, value, parameterType?", "set_niagara_parameter"),
     create:         bp("Create system. Params: name, packagePath?", "create_niagara_system"),
-    create_emitter: bp("Create Niagara emitter. Params: name, packagePath?, templatePath?", "create_niagara_emitter"),
+    create_emitter: bp("Create a Niagara emitter asset. templatePath copies an existing emitter as the starting point (the content browser's create-from-template path); omit it for the default empty emitter with the standard modules and a sprite renderer. inherit=true makes it a child that tracks the template instead, which then refuses local edits to inherited modules. Params: name, packagePath?, templatePath?, inherit? (default false), onConflict?", "create_niagara_emitter"),
     add_emitter:    bp("Add emitter to system. Params: systemPath, emitterPath", "add_emitter_to_system"),
     remove_emitter: bp("Remove an emitter from a system (CRUD delete). Params: systemPath, emitterName? or emitterIndex?", "remove_emitter_from_system", (p) => ({ systemPath: p.systemPath, emitterName: p.emitterName, emitterIndex: p.emitterIndex })),
     list_emitters:  bp("List emitters in system. Params: systemPath", "list_emitters_in_system"),
@@ -24,13 +88,13 @@ export const niagaraTool: ToolDef = categoryTool(
     list_renderers:   bp("List renderers on an emitter. Params: systemPath, emitterName?, emitterIndex?", "list_emitter_renderers"),
     add_renderer:     bp("Add renderer (sprite/mesh/ribbon or full class). Params: systemPath, rendererType, emitterName?, emitterIndex?", "add_emitter_renderer"),
     remove_renderer:  bp("Remove renderer by index. Params: systemPath, rendererIndex, emitterName?, emitterIndex?", "remove_emitter_renderer"),
-    set_renderer_property: bp("Set renderer bool/number/string property. Params: systemPath, rendererIndex, propertyName, value, emitterName?, emitterIndex?", "set_renderer_property"),
+    set_renderer_property: bp("Set any renderer property. Bools, numbers and strings are taken directly; object properties (a sprite/mesh renderer's Material, the mesh on a mesh renderer) take an asset path and are class-checked; structs, enums, names and arrays go through the shared JSON property setter, so there is no longer a type whitelist to fall off (#783). Params: systemPath, rendererIndex, propertyName, value, emitterName?, emitterIndex?", "set_renderer_property", (p) => ({ systemPath: p.systemPath, rendererIndex: p.rendererIndex, propertyName: p.propertyName, value: p.value, emitterName: p.emitterName, emitterIndex: p.emitterIndex })),
     inspect_data_interfaces: bp("List user-scope data interfaces. Params: systemPath", "inspect_data_interface"),
     create_system_from_spec: bp("Declaratively create a system + emitters. Params: name, packagePath?, emitters?:[{path}]", "create_niagara_system_from_spec"),
     get_compiled_hlsl: bp("Read GPU compute script info for an emitter. Params: systemPath, emitterName?, emitterIndex?", "get_niagara_compiled_hlsl"),
     list_system_parameters: bp("List user-exposed system parameters. Params: systemPath", "list_niagara_system_parameters"),
-    list_module_inputs:  bp("List modules + their input pins for an emitter. Params: systemPath, emitterName?, emitterIndex?, stackContext? (ParticleSpawn|ParticleUpdate|EmitterSpawn|EmitterUpdate|all — default all)", "list_niagara_module_inputs"),
-    set_module_input:    bp("Set literal default on a module input pin. Params: systemPath, moduleName, inputName, value, emitterName?, emitterIndex?, stackContext?", "set_niagara_module_input"),
+    list_module_inputs:  bp("List an emitter's modules with the inputs you can actually SET - Spawn Rate, Lifetime, Colour, Sprite Size - each with its name, qualifiedName, type and a settable flag. Current values are NOT returned: the binder's value reader is not exported from NiagaraEditor, so the names and types are readable but the live value is not. Compile-time switches and enums are reported separately under switchPins; note that 'inputs' now means override-map inputs, NOT the function-call node pins it meant before (those are switchPins) (#784). Params: systemPath, emitterName?, emitterIndex?, stackContext? (ParticleSpawn|ParticleUpdate|EmitterSpawn|EmitterUpdate|all - default all), moduleName?", "list_niagara_module_inputs", (p) => ({ systemPath: p.systemPath, emitterName: p.emitterName, emitterIndex: p.emitterIndex, stackContext: p.stackContext, moduleName: p.moduleName })),
+    set_module_input:    bp("Set a module input value. Override-map-bound inputs (the numeric/colour values that matter) are written through the stack override map, the same path the Niagara stack editor uses; others fall back to the pin default. Reports writePath ('overrideMap'|'pinDefault'). On the overrideMap path previousValue cannot be read back (NiagaraEditor does not export the binder's reader), so it reports '(unread: override map)' and NO rollback is offered - re-set the value explicitly instead. The pinDefault path reports a real previousValue and is rollback-safe (#769). value accepts a scalar, [x,y,z], {x,y,z[,w]} or {r,g,b[,a]} (alpha defaults to 1); anything the input's type cannot parse is REJECTED rather than written, including gapped component objects and non-finite numbers. Params: systemPath, moduleName, inputName, value, emitterName?, emitterIndex?, stackContext?", "set_niagara_module_input", (p) => ({ systemPath: p.systemPath, moduleName: p.moduleName, inputName: p.inputName, value: coerceModuleInputValue(p.value), emitterName: p.emitterName, emitterIndex: p.emitterIndex, stackContext: p.stackContext })),
     add_module:          bp("Add a stock /Niagara/Modules script to an emitter stack (the modules that make an emitter actually do anything). Params: systemPath, moduleScript (e.g. /Niagara/Modules/Emitter/SpawnRate), stackContext (ParticleSpawn|ParticleUpdate|EmitterSpawn|EmitterUpdate), emitterName?, emitterIndex?, targetIndex? (-1 appends). Then set_module_input to tune it.", "add_niagara_module", (p) => ({ systemPath: p.systemPath, moduleScript: p.moduleScript, stackContext: p.stackContext, emitterName: p.emitterName, emitterIndex: p.emitterIndex, targetIndex: p.targetIndex })),
     list_static_switches: bp("List static switch inputs on a module. Params: systemPath, moduleName, emitterName?, emitterIndex?, stackContext?", "list_niagara_static_switches"),
     set_static_switch:   bp("Set static switch value on a module's function call node. Params: systemPath, moduleName, switchName, value, emitterName?, emitterIndex?, stackContext?", "set_niagara_static_switch"),
@@ -73,11 +137,16 @@ export const niagaraTool: ToolDef = categoryTool(
     rotation: Rotator.optional(),
     label: z.string().optional(),
     parameterName: z.string().optional(),
+    // Shared across set_renderer_property / set_parameter / set_module_input.
+    // Must stay unknown: the renderer/parameter paths accept structs and arrays
+    // via the JSON property setter (#783). set_module_input stringifies in its
+    // own mapper because its handler takes a string.
     value: z.unknown().optional(),
     parameterType: z.string().optional(),
     name: z.string().optional(),
     packagePath: z.string().optional(),
-    templatePath: z.string().optional(),
+    templatePath: z.string().optional().describe("create_emitter: emitter asset to copy as a starting point"),
+    inherit: z.boolean().optional().describe("create_emitter: inherit from templatePath instead of copying it (default false)"),
     emitterName: z.string().optional(),
     emitterIndex: z.number().optional(),
     rendererType: z.string().optional().describe("sprite|mesh|ribbon or full class name"),

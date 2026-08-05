@@ -2,7 +2,7 @@
 
 This page lists ue-mcp's own category tools and actions. For the official Unreal 5.8 tools that ue-mcp wraps (surfaced inside these same categories), see [Native Tools](native-tools.md).
 
-UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->736+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
+UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->759+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
 
 !!! tip "First call in any session"
     Start with `project(action="get_status")` to check the connection, then `level(action="get_outliner")` or `asset(action="list")` to explore.
@@ -18,7 +18,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 
 | Action | Description |
 |--------|-------------|
-| `get_status` | Check server mode and editor connection |
+| `get_status` | Check server mode and editor connection. Also reports pluginBuildStale when the compiled bridge is older than its source, which is the real cause of 'Unknown method' on handlers that do exist (#785) |
 | `set_project` | Switch project. Params: `projectPath` |
 | `get_info` | Read .uproject file details |
 | `read_config` | Read INI config. Params: `configName (e.g. 'Engine', 'Game')` |
@@ -59,10 +59,10 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 
 | Action | Description |
 |--------|-------------|
-| `list` | List assets via the AssetRegistry (sees /Game and every mounted plugin root). Params: `directory? (default /Game), classFilter?, recursive? (default true), maxResults? (default 2000)` |
+| `list` | List assets via the AssetRegistry (sees /Game and every mounted plugin root). Paginated: returns totalMatched, offset, hasMore and nextOffset so a large folder can be walked deterministically instead of dropping the bridge on one oversized response (#790). Params: `directory? (default /Game), classFilter?, recursive? (default true), maxResults? (default 500, max 5000), offset? (default 0)` |
 | `search` | Search by name/class/path. Params: `query, directory?, maxResults?, searchAll?` |
 | `read` | Read asset via reflection. Params: `assetPath` |
-| `read_properties` | Read asset properties with values. Blueprint paths resolve to the generated-class CDO (#568). propertyName accepts dotted/indexed paths into nested structs, array elements, and instanced subobjects (e.g. `Config.Traits[1].Params.Field`); landing on an array of subobjects also lists each element's index+class (#527). Params: `assetPath, propertyName?, includeValues?, valueFormat?` |
+| `read_properties` | Read asset properties with values. Blueprint paths resolve to the generated-class CDO (#568). propertyName accepts dotted/indexed paths into nested structs, array elements, and instanced subobjects (e.g. `Config.Traits[1].Params.Field`); landing on an array of subobjects also lists each element's index+class (#527). expandDepth inlines the properties of subobjects OWNED by this asset, so a data asset's nested payload comes back in ONE call instead of a reference you have to chase (#755); references to OTHER assets are marked expandable rather than followed, unless expandExternal=true. Capped by maxExpandedObjects with expansionTruncated reported. Params: `assetPath, propertyName?, includeValues?, valueFormat?, expandDepth? (0-5, default 0), expandExternal?, maxExpandedObjects? (default 64)` |
 | `list_properties` | List reflected properties on any asset. Params: `assetPath, includeValues?, valueFormat? ('text'\|'json')` |
 | `get_properties` | Read property values on any asset. propertyName accepts dotted/indexed paths into nested structs, array elements, and instanced subobjects. valueFormat='json' returns structured values. Params: `assetPath, propertyName?, includeValues?, valueFormat?` |
 | `duplicate` | Duplicate asset. Params: `sourcePath, destinationPath` |
@@ -73,8 +73,8 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `delete_batch` | Batch-delete assets. Per-path status (deleted/absent/failed) plus reason+referencers on failed entries (#278). Params: `assetPaths[], force?` |
 | `create_data_asset` | Create UDataAsset instance of custom class. Params: `name, className (/Script/Module.ClassName or loaded name), packagePath?, properties? (key/value map)` |
 | `create_asset_by_class` | Create an asset of ANY concrete UObject class (not just UDataAsset) - physical-material subclasses, curves, settings objects. Params: `name, className (/Script/Module.ClassName or loaded name), packagePath?, properties? (key/value map), onConflict? (skip\|replace\|rename)` |
-| `save` | Save asset(s). Params: `assetPath?` |
-| `save_all_dirty` | Flush every dirty package to disk in one call. End-of-workflow shortcut after bulk import/edit. Params: `saveMapPackages? (default true), saveContentPackages? (default true)` |
+| `save` | Save one asset, or every dirty asset under /Game when assetPath is omitted. force=true saves regardless of the dirty flag - several edits (OFPA level actors, some subsystem property writes) never mark their package dirty, so a dirty-only save skipped them and still reported success. Returns the package name plus on-disk file path, size and mtime so the write can be verified rather than trusted (#768). Params: `assetPath?, force?` |
+| `save_all_dirty` | Flush every dirty package to disk in one call. Reports the packages it attempted, which ones reached disk (with file path, size and mtime) and which are still dirty afterwards, because a bare savedAll boolean has come back true while packages were never written (#768). Params: `saveMapPackages? (default true), saveContentPackages? (default true)` |
 | `set_mesh_material` | Assign material to static mesh slot. Params: `assetPath, materialPath, slotIndex?` |
 | `recenter_pivot` | Move static mesh pivot to geometry center. Params: `assetPath OR assetPaths` |
 | `import_static_mesh` | Import from FBX, OBJ, or GLB/glTF (glTF routes through Interchange) (#549). importUniformScale=100 fixes metre-authored FBX (#687). Params: `filePath, name?, packagePath?, combineMeshes?, importMaterials?, importTextures?, generateLightmapUVs?, importUniformScale?` |
@@ -144,6 +144,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `get_mesh_info` | One-call mesh QA: bounds + material slots + skeleton + LOD/vertex counts. Works for both UStaticMesh and USkeletalMesh. Params: `assetPath` |
 | `read_import_sources` | Read AssetImportData source filenames on an imported asset (StaticMesh, SkeletalMesh, Texture, Animation, etc.). Returns sources[] of {relativeFilename, absolutePath, timestamp, fileHash, displayLabelName}. Params: `assetPath (#270)` |
 | `get_mesh_collision` | Inspect StaticMesh collision setup. Params: `assetPath` |
+| `migrate` | Copy assets and their dependencies into ANOTHER project's Content directory - the scripted form of the content browser's Migrate (#760). destinationContentDir is the TARGET project's Content folder. The bridge attaches to one editor, so it pushes assets out of the project it is attached to; combined with project(set_project) and editor(restart_editor) that makes the cross-project round trip reachable (attach to the reference project, retarget there, migrate the results into the game project). Unsaved or never-saved assets are refused, because migrate copies files and would otherwise silently omit your edits. Every asset is resolved before anything is copied, and the destination is checked for the packages afterwards rather than reporting success on the call returning. Params: `assetPaths (string[]) or assetPath, destinationContentDir, includeDependencies? (default true), onConflict? (skip\|overwrite, default skip), allowDirty?, dryRun?` |
 | `move_folder` | Move/rename entire content folder with redirector fixup in one transaction. Params: `sourcePath, destinationPath (#192)` |
 | `create_folder` | Create empty content browser folder(s). Params: `path OR paths[] (e.g. /Game/Foo, /Game/Bar/Baz)` |
 | `delete_folder` | Delete content browser folder(s) - counterpart to delete_asset, which leaves the parent directory entry behind as an orphan. Empty folders only by default; pass force=true to also delete any assets still inside (Content Browser 'Delete folder' equivalent). Per-path status (deleted/absent/failed) with reason (invalid_path/protected_path/not_empty/delete_failed) and a sample of contained assets on not_empty entries. Params: `path OR paths[], force?` |
@@ -158,6 +159,8 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `lock` | Acquire an exclusive lock on an asset for this session. Returns acquired=true, or acquired=false with holder{sessionId,ttlSecondsRemaining} when another session holds it. Params: `assetPath, ttlSeconds? (default 300), sessionId?` |
 | `unlock` | Release an asset lock held by this session (or force=true to break any holder's lock). Params: `assetPath, force?, sessionId?` |
 | `list_locks` | List all currently-held asset locks with holder session id, acquiredAt, and ttlSecondsRemaining |
+| `unlock_all` | Release every lock held by one session in a single call, returning the number released. Defaults to this server process's session; pass sessionId to clear a different one (for example after a crashed session left assets wedged). Params: `sessionId?` |
+| `diff` | Semantic structural diff between two assets of any type, dispatching on the asset's class. Blueprints are diffed structurally (parent class, variables, functions, components, per-graph node and connection deltas); other asset types report that diffing is not supported yet rather than failing opaquely. Params: `assetPath, otherPath` |
 
 ---
 
@@ -168,16 +171,16 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | Action | Description |
 |--------|-------------|
 | `read` | Read BP structure incl. SCS components AND inherited native components from the CDO (CharacterMesh0, CharMoveComp, etc.). Params: `assetPath, includeComponentProperties? (dump UPROPERTY name/type/value per component template; off by default) (#353/#370)` |
-| `list_variables` | List variables. Params: `assetPath` |
+| `list_variables` | List variables with name, type, guid, category, tooltip, exposeOnSpawn, blueprintReadOnly, private, and editFlag ('EditAnywhere'\|'EditDefaultsOnly'\|'EditInstanceOnly'\|'none'). instanceEditable is true only for EditAnywhere and EditInstanceOnly - EditDefaultsOnly is class-defaults-only and reports false (#744). private is reported separately because it is a Blueprint-graph access flag, not a details-panel one. Params: `assetPath` |
 | `list_functions` | List functions/graphs. Params: `assetPath` |
-| `read_graph` | Read graph nodes. Supports pagination, file dumps, and title/class node filters. Params: `assetPath, graphName, offset?, limit?, includePins?, includeDefaults?, includeComments?, dumpToFile?, outputPath?, titleFilter?, classFilter? (#560)` |
+| `read_graph` | Read graph nodes. Supports pagination, file dumps, and title/class node filters. With includeDefaults, literal FText pin values are returned inline (defaultValue falls back to the pin's text literal, plus an explicit defaultTextValue) and object-ref pins report defaultObject (#743). Params: `assetPath, graphName, offset?, limit?, includePins?, includeDefaults?, includeComments?, dumpToFile?, outputPath?, titleFilter?, classFilter? (#560)` |
 | `read_graph_summary` | Lightweight graph summary (nodes+edges only, ~10KB). Filterable node list. Params: `assetPath, graphName?, titleFilter?, classFilter? (#560)` |
 | `get_execution_flow` | Trace exec pins from an entry point. Params: `assetPath, graphName?, entryPoint?` |
 | `get_dependencies` | Forward (classes/functions/assets) or reverse (referencers) deps. Params: `assetPath, reverse?` |
 | `diff` | Semantic structural diff between two Blueprints (binary uassets are unreviewable in git). Compares parent class, variables (type/default), functions/macros, components, and per-graph node + connection deltas keyed on stable node GUIDs so edits are matched rather than shown as remove+add. Returns a structured delta plus a human summary and changeCount. Params: `assetPath (base/A), otherPath (compare/B)` |
 | `create` | Create Blueprint. Params: `assetPath, parentClass?` |
-| `add_variable` | Add variable. Params: `assetPath, name, varType` |
-| `set_variable_properties` | Edit variable properties. Params: `assetPath, name, instanceEditable?, blueprintReadOnly?, category?, tooltip?, replicationType?, exposeOnSpawn?` |
+| `add_variable` | Add variable. varType accepts bool/int/float/string/name/text/byte/vector/rotator/transform/gameplaytag, object:/Script/Module.Class, struct:/Game/Path/To/Struct, or a full class/struct path. Unrecognized types are rejected rather than silently defaulting. Params: `assetPath, name, varType (alias: type), onConflict? (skip\|error, default skip) (#745)` |
+| `set_variable_properties` | Edit variable properties. Note: replication is set with networking(set_property_replicated), and blueprintReadOnly is not writable here - list_variables reports it. Params: `assetPath, name, editFlag? (EditAnywhere\|EditDefaultsOnly\|EditInstanceOnly\|none - the exact value list_variables reports, and the only form that round-trips every state), instanceEditable? (two-state shorthand; mutually exclusive with editFlag), private?, category?, tooltip?, exposeOnSpawn?` |
 | `create_function` | Create function. Params: `assetPath, functionName` |
 | `delete_function` | Delete function. Params: `assetPath, functionName` |
 | `rename_function` | Rename function. Params: `assetPath, oldName, newName` |
@@ -203,10 +206,11 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `add_interface` | Implement interface. Params: `blueprintPath, interfacePath` |
 | `override_function` | Override an inherited interface implementation (inherited via the parent class) or an overridable parent virtual function, with the matching signature so it actually binds as the override (create_function makes a blank, non-binding graph). Returns kind ('function' with a graphName, or 'event' with a nodeId in EventGraph). Event-shaped functions become override events unless preferFunction=true. Pass interfacePath to also implement the interface first if it is not present. Then wire the body with add_node (use nodeClass='CallParent' to chain to the base implementation). Params: `assetPath, functionName, source? ('auto'\|'interface'\|'parent', advisory), preferFunction?, interfacePath? (#688)` |
 | `list_overridable_functions` | List functions this Blueprint can override: inherited interface implementations and overridable parent virtuals. Each entry has name, source ('interface'\|'parent'), declaringClass, canBeEvent. Params: `assetPath (#688)` |
-| `list_graphs` | List all graphs in a blueprint. Params: `assetPath` |
+| `list_graphs` | List all graphs in a blueprint. Returns selector/objectPath plus duplicateIndex/duplicateCount; pass selector back as graphName for unambiguous nested graph edits. Params: `assetPath` |
+| `resolve_graph` | Resolve a Blueprint graph name to selectors accepted by read_graph/add_node/connect_pins and other graph actions. Duplicate nested AnimBP names such as Locomotion return every match with selectors like Locomotion[3], object paths, and ambiguity metadata. Params: `assetPath, graphName` |
 | `add_event_dispatcher` | Add event dispatcher (multicast delegate variable + signature graph + UFunction). Without parameters, broadcasters fire void(). With parameters, the signature graph gets typed user pins so K2Node_CallDelegate compiles cleanly (#276). Params: `blueprintPath, name, parameters?: [{name, type}] where type is bool/int/float/string/name/text/vector/rotator/transform/object:/Script/Module.Class/struct:/Script/Module.Struct` |
 | `duplicate` | Duplicate blueprint asset. Params: `sourcePath, destinationPath` |
-| `add_local_variable` | Add function-scope local variable. Params: `assetPath, functionName, name, varType?` |
+| `add_local_variable` | Add function-scope local variable. Params: `assetPath, functionName, name, varType? (alias: type, default bool)` |
 | `list_local_variables` | List local variables in a function. Params: `assetPath, functionName` |
 | `validate` | Validate blueprint without saving (compile + collect diagnostics). Params: `assetPath` |
 | `read_component_properties` | Dump ALL UPROPERTYs on a BP component template incl. array contents (#105). Params: `assetPath, componentName` |
@@ -247,7 +251,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `get_selected` | Get selection |
 | `add_component` | Add component to actor. Params: `actorLabel, componentClass, componentName?` |
 | `remove_component` | Remove instance component from a level actor by name. Idempotent: returns alreadyDeleted=true if no matching component exists. Params: `actorLabel, componentName (#426)` |
-| `set_component_property` | Set component prop. Pass value=null to clear a TObjectPtr/SoftObject/WeakObject/UClass/Interface reference (#420). Resolves inherited/SCS components on placed Blueprint instances case-insensitively, and refreshes the scene transform after RelativeLocation/RelativeRotation/RelativeScale3D writes (#539). Params: `actorLabel, componentName, propertyName, value` |
+| `set_component_property` | Set component prop. Pass value=null to clear a TObjectPtr/SoftObject/WeakObject/UClass/Interface reference (#420). Resolves inherited/SCS components on placed Blueprint instances case-insensitively, and refreshes the scene transform after RelativeLocation/RelativeRotation/RelativeScale3D writes (#539). Pass world='pie' (with optional pieInstance) to write to a LIVE PIE component rather than the editor one (#763). Params: `actorLabel, componentName, propertyName, value, world?, pieInstance?` |
 | `get_component_details` | Read a placed actor's component transforms. With componentName returns that component's relative+world location/rotation/scale, class, and attach parent; without it lists every component. With includeValues=true also dumps arbitrary UPROPERTY values (custom fields, CharacterMovement MaxWalkSpeed, etc.); world='pie' reads the live PIE instance (#539/#584). Params: `actorLabel, componentName?, includeValues?, propertyNames? (filter), world? (editor\|pie)` |
 | `get_current` | Get current level name and path |
 | `load` | Load level. Params: `levelPath` |
@@ -276,7 +280,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `get_relative_transform` | Compute target's transform in reference's local space (location/rotation/scale). Common dungeon/calibration workflow. Params: `target (actor label), reference (actor label), world? (#386/#387)` |
 | `resolve_actor` | Resolve internal/runtime actor name to editor label. Params: `internalName (e.g. StaticMeshActor_141)` |
 | `set_actor_property` | Set per-instance UPROPERTY on a level actor. Params: `actorLabel ('WorldSettings' targets the world settings actor), propertyName (dotted paths like 'Foo.Bar' supported), value (string/number/bool/object/array; a label string resolves to an AActor* ref, and a JSON array of labels populates a TArray of actor refs #538), force? (bypass EditDefaultsOnly), world? (editor\|pie) (#202/#230)` |
-| `read_actor_motion` | Snapshot motion telemetry for one or many actors: location, rotation, velocity, scale, angularVelocity (when simulating physics), grounded + distanceToGround (downward 200u trace). Defaults to the PIE world with editor fallback. Loop at your sample interval for long telemetry probes. Params: `actorLabel? OR actorLabels (string[]), world? ('pie'\|'editor') (#453)` |
+| `read_actor_motion` | Snapshot motion telemetry for one or many actors: location, rotation, velocity, scale, angularVelocity (when simulating physics), grounded + distanceToGround (downward 200u trace). Defaults to the PIE world with editor fallback. Loop at your sample interval for long telemetry probes. Params: `actorLabel? OR actorLabels (string[]), world? ('pie'\|'editor'), pieInstance? (#453)` |
 | `add_hismc_instances` | Bulk-add transforms to a HISMC / ISMC component on an actor (Python add_instance crashes on UE 5.7; this is the C++ path). Params: `actorLabel, componentName? (default: first ISMC/HISMC found), transforms ([{location: {x,y,z}, rotation?: {pitch,yaw,roll}, scale?: {x,y,z}}]), worldSpace? (default true) (#434)` |
 | `get_instance_transforms` | Read every instance transform on an actor's ISMC/HISMC. Params: `actorLabel, componentName? (default first), worldSpace? (default true)` |
 | `update_instance_transform` | Update a single ISMC/HISMC instance by index; unspecified location/rotation/scale are preserved. Params: `actorLabel, componentName?, index, location?, rotation?, scale?, worldSpace? (default true) (#697)` |
@@ -285,8 +289,11 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `get_nanite_info` | Read a UStaticMesh's Nanite state (naniteEnabled, positionPrecision, numLODs). Params: `assetPath (#696)` |
 | `add_post_process_blendable` | Add a material blendable (post-process material or MID, e.g. a toon/outline pass) to a PostProcessVolume's WeightedBlendables. Params: `actorLabel (the PPV), materialPath, weight? (default 1) (#666)` |
 | `export_actor_fbx` | Export an actor's skeletal/static mesh to FBX and write a metadata sidecar JSON (actor transform, mesh, materials, skeleton) for a downstream bridge (e.g. MetaTailor). Params: `actorLabel, outputPath (.fbx)` |
-| `spawn_skeletal_mesh_actor` | Spawn a SkeletalMeshActor for visual/deform verification. Optional per-slot materials and single-node animation preview (animSequence + loop). Returns actorLabel + boxExtent. Params: `skeletalMesh, label?, location?, rotation?, scale?, materials? (path[]), animSequence?, loop? (#679/#677)` |
+| `spawn_skeletal_mesh_actor` | Spawn a SkeletalMeshActor for visual/deform verification. Optional per-slot materials and single-node animation preview (animSequence + loop). Returns actorLabel + boxExtent. The animSequence is written to the component's editable AnimationData, so it persists across a level save/reload instead of only driving the runtime preview and coming back in A-pose (#790). Params: `skeletalMesh, label?, location?, rotation?, scale?, materials? (path[]), animSequence?, loop? (#679/#677)` |
 | `delete_actors` | Bulk-delete actors. Params: `at least one of labelPrefix, className, tag; dryRun? to preview` |
+| `list_actor_descs` | World Partition ONLY: list on-disk actor descriptors, including actors whose cell is not loaded and which every other actor query therefore reports as absent. Returns guid/label/class/bounds/runtimeGrid/dataLayers plus a loaded flag, and separate loadedMatches/unloadedMatches counts so 'not streamed in' is distinguishable from 'does not exist'. Params: `filter? (case-insensitive over label/name/class/path), className?, guids?, bounds? ({min:{x,y,z},max:{x,y,z}} intersection test), loadedOnly?, unloadedOnly?, limit? (default 500) (#746)` |
+| `load_actor_descs` | World Partition ONLY: pin matched actors so they become resident and the normal actor actions can reach them, or unpin to release. Pinning is used rather than transient streaming because a transient load is dropped again by the streaming system mid-measurement. Takes the same filters as list_actor_descs and refuses to act on more than maxActors (default 256) so an unfiltered call cannot pin a whole map by accident. Reports residentAfter, read back from the world rather than assumed. Params: `mode? (pin\|unpin, default pin), filter?, className?, guids?, bounds?, maxActors?, dryRun? (#746)` |
+| `set_actor_folder_path` | Assign World Outliner folder paths in bulk. Filter with actorLabels (exact), labelPrefix, className or tag; pass an empty folderPath to move actors back to the root. Runs in one transaction so the whole move is a single undo, reads each write back (verified), and reports missingLabels for names that matched no actor. Editor-only organisation: the level is left dirty and is NOT saved. Params: `folderPath, actorLabels?, labelPrefix?, className?, tag?, dryRun?, transactionLabel? (#767)` |
 | `add_actor_tag` | Append a tag to an actor's Tags array. Params: `actorLabel, tag (#219)` |
 | `remove_actor_tag` | Remove a tag from an actor's Tags array. Params: `actorLabel, tag (#219)` |
 | `set_actor_tags` | Replace an actor's Tags array. Params: `actorLabel, tags[] (#219)` |
@@ -407,6 +414,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `create_ik_rig` | Create IKRigDefinition asset, optionally with retargetRoot + chains[]. Params: `name, skeletalMeshPath, packagePath?, retargetRoot?, chains?: [{name, startBone, endBone, goal?}]` |
 | `read_ik_rig` | Read IK Rig chains, solvers, skeleton. Params: `assetPath` |
 | `list_control_rig_variables` | List ControlRig variables and hierarchy. Params: `assetPath` |
+| `read_control_rig_graph` | Read a Control Rig's RigVM models: every graph with its nodes (name, node path, class), each node's pins (name, pin path, cppType, direction, execute flag, default value, nested sub-pins) and the links between them, plus full member-variable metadata (type, subtype, array-ness, default, public/read-only). list_control_rig_variables only ever reported a node COUNT, which is not enough to verify solver wiring (#774). Params: `assetPath, graphName? (substring filter), includePins? (default true), includeDefaults? (default true), includeLinks? (default true), limit? (nodes per graph, default 200)` |
 | `read_control_rig_hierarchy` | Read a Control Rig's per-element hierarchy metadata: each element's name, type (Bone\|Control\|Null\|Curve...), index, and parent. Params: `assetPath (#619)` |
 | `set_root_motion` | Set root motion settings on AnimSequence. Params: `assetPath, enableRootMotion?, forceRootLock?, useNormalizedRootMotionScale?, rootMotionRootLock?` |
 | `add_virtual_bone` | Add virtual bone. Params: `skeletonPath, sourceBone, targetBone` |
@@ -433,7 +441,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `add_pose_search_schema_pose_channel` | Add a Pose feature channel to a schema (samples named bones for velocity/position/rotation/phase). Params: `schemaPath, bones ([{bone, flags?:['velocity','position','rotation','phase'], weight?}] - a bare bone-name string defaults to position), weight? (motion matching)` |
 | `add_pose_search_schema_trajectory_channel` | Add a Trajectory feature channel to a schema (past/future motion samples). Params: `schemaPath, samples ([{offset (seconds; negative=history, positive=prediction), flags?:['position','velocity','facingDirection','velocityDirection', ...XY variants], weight?}]), weight? (motion matching)` |
 | `read_pose_search_schema` | Inspect a PoseSearchSchema: skeleton(s), mirror table, sample rate, feature channels. Params: `schemaPath (motion matching)` |
-| `create_mirror_data_table` | Create a MirrorDataTable for a skeleton (needed for mirrored poses in motion matching / mirror nodes). Auto-derives bone-pair rows from find/replace expressions (defaults to UE mannequin _l/_r suffix swap). Params: `name, skeletonPath, packagePath?, expressions? ([{find, replace, method?:'suffix'\|'prefix'\|'regex'}]), mirrorAxis? (motion matching)` |
+| `create_mirror_data_table` | Create a MirrorDataTable for a skeleton (needed for mirrored poses in motion matching / mirror nodes). Auto-derives bone-pair rows from find/replace expressions (defaults to UE mannequin _l/_r suffix swap). Params: `name, skeletonPath, packagePath?, expressions? ([{find, replace, method?:'suffix'\|'prefix'\|'regex'}]), mirrorAxis? (X\|Y\|Z, default X), mirrorRootMotion? (default true)` |
 | `read_mirror_data_table` | Inspect a MirrorDataTable: skeleton and bone-pair rows (name -> mirroredName). Params: `assetPath (motion matching)` |
 | `create_pose_search_normalization_set` | Create a PoseSearchNormalizationSet grouping databases so they normalize their cost space together (consistent blending across a locomotion set). Assign it via set_pose_search_database_settings(normalizationSetPath). Params: `name, packagePath?, databases? ([PoseSearchDatabase paths]) (motion matching)` |
 | `add_motion_matching_node` | Add a Motion Matching node to an AnimBP AnimGraph and point it at a PoseSearchDatabase (the runtime node that searches the database each frame). Connects its output to the Output Pose by default. For chooser-driven database selection, bind an anim-node function that calls SetDatabasesToSearch. Params: `assetPath (AnimBP), databasePath, graphName? (default AnimGraph), connectToOutput? (default true), blendTime? (motion matching)` |
@@ -452,17 +460,19 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 
 ## landscape
 
-*Landscape terrain: info, layers, sculpting, painting, materials, heightmap import.*
+*Landscape terrain: info, layers, sculpting, weight painting, materials, splines, proxies.*
 
 | Action | Description |
 |--------|-------------|
 | `get_info` | Get landscape setup |
 | `list_layers` | List paint layers |
 | `sample` | Sample height/layers. Params: `x, y` |
+| `sculpt` | Raise, lower or flatten terrain with a circular brush. mode=raise\|lower\|flatten; amount is world centimetres at full strength (raise/lower), and flatten pulls toward the height under the brush centre. falloff (0..1) is the smoothstepped soft edge. Runs in one transaction and leaves the level dirty and unsaved. Writes into an edit layer (editLayer by name, else editLayerIndex, default 0) - required on UE 5.8, where a write without one is regenerated away by the layer system. Params: `center ({x,y} world space), radius (default 500), mode? (default raise), amount? (default 100), falloff? (default 0.5), actorLabel?, editLayer?, editLayerIndex?, maxVertices? (#742)` |
+| `paint_layer` | Paint a weight layer with a circular brush. The layer must already have a LayerInfo on this landscape (see add_layer_info) - an unregistered name errors and lists the layers that ARE registered instead of silently painting nothing. Weights are written as given - the engine no longer renormalises other layers for you, so set them explicitly if they must sum to 1. Writes into an edit layer (editLayer by name, else editLayerIndex, default 0). Params: `layerName, center ({x,y} world space), radius (default 500), strength? (0..1, default 1), falloff? (default 0.5), actorLabel?, editLayer?, editLayerIndex?, maxVertices? (#742)` |
 | `list_splines` | Read landscape splines |
 | `get_component` | Inspect component. Params: `componentIndex` |
 | `set_material` | Set landscape material. Params: `materialPath` |
-| `add_layer_info` | Register paint layer (creates LayerInfo asset + binds to active landscape). Params: `layerName, packagePath?, weightBlended?` |
+| `add_layer_info` | Register paint layer (creates LayerInfo asset + binds to active landscape). Params: `layerName, packagePath?` |
 | `create_layer_info` | Standalone LayerInfo asset creation - no landscape required. Params: `layerName, name? (default LI_<layerName>), packagePath? (default /Game/Landscape/LayerInfos), physMaterial? (asset path), hardness? (#251)` |
 | `create` | Spawn a new ALandscape with a flat heightmap. Defaults match the Editor's Landscape Mode 'create new' (8x8 components, 63 quads/subsection, 2 subsections/component = 1016x1016 quads). Params: `location? (Vec3), scale? (Vec3, default 100,100,100), componentCountX? (default 8), componentCountY? (default 8), subsectionSizeQuads? (one of 7\|15\|31\|63\|127\|255, default 63), numSubsections? (1\|2, default 2), heightOffset? (uint16, default 32768 = mid-elevation), label? (#303)` |
 | `get_material_usage_summary` | Per-proxy summary: landscape/hole material paths + component/grass/nanite counts (#150) |
@@ -521,13 +531,15 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 |--------|-------------|
 | `list` | List Niagara assets. Params: `directory?, recursive?` |
 | `get_info` | Inspect system. Params: `assetPath` |
+| `validate` | Verify gate: does this system actually emit? Reports per emitter whether it is enabled and has a spawn module + an enabled renderer. valid=false means empty shell. Params: `systemPath` |
 | `spawn` | Spawn VFX as a transient component (GC's before offscreen capture). For a findable preview use spawn_actor. Params: `systemPath, location, rotation?, label?` |
 | `spawn_actor` | Spawn a PERSISTENT, labeled NiagaraActor in the editor world (findable, re-activatable, survives capture - unlike spawn). Assigns the system and activates. Params: `systemPath, location?, rotation?, label?, activate? (default true) (#537)` |
 | `reactivate` | Reset + reactivate the NiagaraComponent on a placed actor (replay a burst before capturing). Params: `actorLabel (#537)` |
 | `set_parameter` | Set parameter. Params: `actorLabel, parameterName, value, parameterType?` |
 | `create` | Create system. Params: `name, packagePath?` |
-| `create_emitter` | Create Niagara emitter. Params: `name, packagePath?, templatePath?` |
+| `create_emitter` | Create a Niagara emitter asset. templatePath copies an existing emitter as the starting point (the content browser's create-from-template path); omit it for the default empty emitter with the standard modules and a sprite renderer. inherit=true makes it a child that tracks the template instead, which then refuses local edits to inherited modules. Params: `name, packagePath?, templatePath?, inherit? (default false), onConflict?` |
 | `add_emitter` | Add emitter to system. Params: `systemPath, emitterPath` |
+| `remove_emitter` | Remove an emitter from a system (CRUD delete). Params: `systemPath, emitterName? or emitterIndex?` |
 | `list_emitters` | List emitters in system. Params: `systemPath` |
 | `set_emitter_property` | Set emitter property. Params: `systemPath, emitterName?, propertyName, value` |
 | `list_modules` | List Niagara modules. Params: `directory?` |
@@ -535,13 +547,14 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `list_renderers` | List renderers on an emitter. Params: `systemPath, emitterName?, emitterIndex?` |
 | `add_renderer` | Add renderer (sprite/mesh/ribbon or full class). Params: `systemPath, rendererType, emitterName?, emitterIndex?` |
 | `remove_renderer` | Remove renderer by index. Params: `systemPath, rendererIndex, emitterName?, emitterIndex?` |
-| `set_renderer_property` | Set renderer bool/number/string property. Params: `systemPath, rendererIndex, propertyName, value, emitterName?, emitterIndex?` |
+| `set_renderer_property` | Set any renderer property. Bools, numbers and strings are taken directly; object properties (a sprite/mesh renderer's Material, the mesh on a mesh renderer) take an asset path and are class-checked; structs, enums, names and arrays go through the shared JSON property setter, so there is no longer a type whitelist to fall off (#783). Params: `systemPath, rendererIndex, propertyName, value, emitterName?, emitterIndex?` |
 | `inspect_data_interfaces` | List user-scope data interfaces. Params: `systemPath` |
 | `create_system_from_spec` | Declaratively create a system + emitters. Params: `name, packagePath?, emitters?:[{path}]` |
 | `get_compiled_hlsl` | Read GPU compute script info for an emitter. Params: `systemPath, emitterName?, emitterIndex?` |
 | `list_system_parameters` | List user-exposed system parameters. Params: `systemPath` |
-| `list_module_inputs` | List modules + their input pins for an emitter. Params: `systemPath, emitterName?, emitterIndex?, stackContext? (ParticleSpawn\|ParticleUpdate\|EmitterSpawn\|EmitterUpdate\|all - default all)` |
-| `set_module_input` | Set literal default on a module input pin. Params: `systemPath, moduleName, inputName, value, emitterName?, emitterIndex?, stackContext?` |
+| `list_module_inputs` | List an emitter's modules with the inputs you can actually SET - Spawn Rate, Lifetime, Colour, Sprite Size - each with its name, qualifiedName, type and a settable flag. Current values are NOT returned: the binder's value reader is not exported from NiagaraEditor, so the names and types are readable but the live value is not. Compile-time switches and enums are reported separately under switchPins; note that 'inputs' now means override-map inputs, NOT the function-call node pins it meant before (those are switchPins) (#784). Params: `systemPath, emitterName?, emitterIndex?, stackContext? (ParticleSpawn\|ParticleUpdate\|EmitterSpawn\|EmitterUpdate\|all - default all), moduleName?` |
+| `set_module_input` | Set a module input value. Override-map-bound inputs (the numeric/colour values that matter) are written through the stack override map, the same path the Niagara stack editor uses; others fall back to the pin default. Reports writePath ('overrideMap'\|'pinDefault'). On the overrideMap path previousValue cannot be read back (NiagaraEditor does not export the binder's reader), so it reports '(unread: override map)' and NO rollback is offered - re-set the value explicitly instead. The pinDefault path reports a real previousValue and is rollback-safe (#769). value accepts a scalar, [x,y,z], {x,y,z[,w]} or {r,g,b[,a]} (alpha defaults to 1); anything the input's type cannot parse is REJECTED rather than written, including gapped component objects and non-finite numbers. Params: `systemPath, moduleName, inputName, value, emitterName?, emitterIndex?, stackContext?` |
+| `add_module` | Add a stock /Niagara/Modules script to an emitter stack (the modules that make an emitter actually do anything). Params: `systemPath, moduleScript (e.g. /Niagara/Modules/Emitter/SpawnRate), stackContext (ParticleSpawn\|ParticleUpdate\|EmitterSpawn\|EmitterUpdate), emitterName?, emitterIndex?, targetIndex? (-1 appends)` |
 | `list_static_switches` | List static switch inputs on a module. Params: `systemPath, moduleName, emitterName?, emitterIndex?, stackContext?` |
 | `set_static_switch` | Set static switch value on a module's function call node. Params: `systemPath, moduleName, switchName, value, emitterName?, emitterIndex?, stackContext?` |
 | `create_module_from_hlsl` | Create a NiagaraScript module backed by a custom HLSL node. Params: `name, hlsl, packagePath?, inputs?:[{name,type}], outputs?:[{name,type}]` |
@@ -637,8 +650,10 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 
 | Action | Description |
 |--------|-------------|
-| `start_editor` | Launch Unreal Editor with the current project and reconnect bridge |
-| `stop_editor` | Close Unreal Editor gracefully |
+| `start_editor` | Launch Unreal Editor and BLOCK until it is fully ready (not merely until the socket answers), rendering a startup progress bar in the terminal. Returns the phase timeline it waited through. Do NOT poll get_engine_state or get_status afterwards: this call already waited, and a ready editor is the only way it returns success. Params: `timeout? (seconds, default 300)` |
+| `get_engine_state` | What the engine is REALLY doing, read from outside the game thread: startup phase from the editor's own log, process table (PID, command line, responding), the plugin's status snapshot (slow-task name and percent, active modal dialog, game-thread stall), and native dialog windows. Call this ONCE when something is already wrong (handlers timing out, an editor that will not come up). Never call it in a wait loop: start_editor blocks until ready on its own, and polling this during startup burns tokens re-reading state that is already tracked. Params: `probeWindows? (default true; scans native windows, costs ~2s)` |
+| `get_engine_state` | What the engine is REALLY doing, read from outside the game thread: startup phase from the editor's own log, process table (PID, command line, responding), the plugin's status snapshot (slow-task name and percent, active modal dialog, game-thread stall), and native dialog windows. Call this ONCE when something is already wrong (handlers timing out, an editor that will not come up). Never call it in a wait loop: start_editor blocks until ready on its own, and polling this during startup burns tokens re-reading state that is already tracked. Params: `probeWindows? (default true; scans native windows, costs ~2s)` |
+| `stop_editor` | Close Unreal Editor gracefully (asks the editor to quit itself via the bridge; never an OS kill) |
 | `restart_editor` | Stop then start the editor |
 | `build_project` | Build the project's C++ code using Unreal Build Tool. Editor should be stopped first |
 | `execute_command` | Run console command. Params: `command` |
@@ -654,6 +669,12 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `play_in_editor` | PIE control. Params: `pieAction (start\|stop\|status), waitForAssetRegistry? (start only; default true - block until the AssetRegistry initial scan completes before requesting PIE, otherwise PIE silently no-ops on cold editor starts), assetRegistryTimeoutSeconds? (default 180) (#406)` |
 | `get_runtime_value` | Read PIE actor property. Params: `actorLabel, propertyName (supports dotted paths: component.field or component.struct.field for nested reads on component subobjects, #344/#381)` |
 | `get_pie_pawn` | Resolve the controlled pawn in the active PIE world. Params: `playerIndex? (default 0)` |
+| `list_pie_instances` | List the running PIE worlds with their instance id, net mode (standalone\|listenServer\|dedicatedServer\|client), player count and whether they own a game viewport. In a multiplayer PIE session every other runtime action resolves the primary world (the server) unless you pass pieInstance, so this is how you discover that a client exists and what id addresses it. Params: `none (#778)` |
+| `invoke_object_function` | Call a UFUNCTION on any UObject, not just a placed actor. Target it with objectPath, or target=gameinstance\|gamemode\|gamestate\|playercontroller\|playerpawn\|subsystem (subsystem also needs subsystemClass; playercontroller/playerpawn accept playerIndex). The GameInstance, GameMode and subsystems have no actor label, so invoke_function could never reach them. Returns output and return params under returnValues; an unknown function name lists the available ones. Params: `functionName, objectPath? \| target?, subsystemClass?, playerIndex?, args?, world? (editor\|pie\|auto), pieInstance? (#739)` |
+| `get_object_properties` | Read reflected properties off any UObject, with the same targeting as invoke_object_function. Pass propertyNames to filter; names that do not exist come back under missingProperties instead of silently returning nothing. Params: `objectPath? \| target?, subsystemClass?, playerIndex?, propertyNames?, world? (editor\|pie\|auto), pieInstance? (#739)` |
+| `read_bone_transforms` | Read live skeletal bone and socket transforms off an actor, once. This is a point-in-time read, NOT a time series - for per-frame capture over a window use the pie category's observe actions. Pass bones (bone OR socket names) or omit for every bone up to limit. space=world (default) or component; component space is independent of where the actor is standing. Also reports the AnimInstance class/path. Params: `actorLabel, componentName?, bones?, space?, limit?, world? (editor\|pie\|auto), pieInstance? (#756/#757/#761/#764)` |
+| `set_movement_mode` | Set a live PIE character's movement mode and/or velocity on its CharacterMovementComponent. Modes are named (none\|walking\|navwalking\|falling\|swimming\|flying\|custom) rather than raw enum numbers, because a wrong number reads as success and then behaves as None. Reports previousMode/previousVelocity and reads the mode back afterwards, since SetMovementMode can refuse a mode the character cannot enter (flying with bCanFly off, swimming outside a volume). Params: `actorLabel, mode?, customMode? (only with mode='custom'), velocity? {x,y,z}, world? (default pie), pieInstance? (#757)` |
+| `teleport_runtime_actor` | Move a live PIE actor and have it STAY moved. A plain SetActorLocation on a Character is undone by CharacterMovement on the next tick, so this stops the movement component, teleports, and stops it again. Reports actualLocation read back from the actor rather than what was requested. Params: `actorLabel, location?, rotation?, stopMovement? (default true), sweep? (default false), world? (default pie), pieInstance? (#770/#777)` |
 | `invoke_function` | Call a BlueprintCallable / Exec UFUNCTION on a target actor or one of its components. Params: `actorLabel, functionName, component? (component subobject name; redirects target from the actor to that component, #382), args? (object), actorArgs? (object mapping UObject* parameter name to actor label, resolved against live actors in the active world; #383), world? (editor\|pie)` |
 | `invoke_static_function` | Call a static UFUNCTION on a UBlueprintFunctionLibrary (no actor instance). invoke_function needs an actor/component target; this targets the library class CDO instead, so it reaches static *_BlueprintOnly libraries (Voxel sculpt/query/stamp), GeometryScript, Kismet math, any function library. Params: `className (short name or /Script/Module.Class path), functionName, args? (name -> JSON value, same marshalling as invoke_function), actorArgs? (name -> actor label for UObject* params that are actors, e.g. the sculpt actor), worldContextParam? (name of a UObject* param to fill with the editor/PIE world; auto-detected for params named WorldContextObject), world? (editor\|pie)` |
 | `list_function_libraries` | Enumerate UBlueprintFunctionLibrary subclasses on this build. Filter by name (case-insensitive substring, e.g. 'GeometryScript' / 'Kismet' / 'Animation'). Returns name, module, and (by default) every static BlueprintCallable function on the library with its tooltip. Use to discover what's available for editor.invoke_function (#455). Params: `pattern?, includeFunctions?` |
@@ -679,7 +700,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `add_sequence_section` | Add a section to a track (creating the track if needed), set its start/end in seconds, and for a CameraCut track bind it to a camera. Returns the section index + channel names to key. Params: `sequencePath, trackType (Transform\|Float\|Fade\|CameraCut\|Audio\|Event\|SkeletalAnimation), actorLabel? (binding scope), startSeconds?, endSeconds?, cameraActorLabel? (#548)` |
 | `set_sequence_keyframes` | Add keyframes to a section channel. Transform channels: Location.X/Y/Z, Rotation.X/Y/Z (or friendly x/y/z, yaw/pitch/roll); Fade/Float: the float channel. Params: `sequencePath, trackType, actorLabel?, sectionIndex? (default 0), channel, keyframes ([{seconds, value}]), interpolation? (cubic\|linear) (#548)` |
 | `set_sequence_playback_range` | Set a Level Sequence's playback range in seconds. Params: `sequencePath, startSeconds, endSeconds (#548)` |
-| `play_sequence` | Play/stop/pause sequence. Params: `assetPath, sequenceAction` |
+| `play_sequence` | Play/stop/pause a Level Sequence in Sequencer. Pass sequencePath (or assetPath) to target a specific sequence - it is opened first, because the underlying Sequencer commands act on whatever is currently open. Omit it and the call applies to the open sequence and says so. Params: `sequencePath? (or assetPath), sequenceAction? (play\|pause\|stop, default play)` |
 | `build_all` | Build all (geometry, lighting, paths, HLOD) |
 | `build_geometry` | Rebuild BSP geometry |
 | `build_hlod` | Build HLODs |
@@ -688,37 +709,36 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `cook_content` | Cook content. Params: `platform?` |
 | `get_log` | Read output log. Params: `maxLines?, filter?, category?` |
 | `search_log` | Search log. Params: `query` |
-| `get_message_log` | Read message log. Params: `logName?` |
+| `get_message_log` | Read a Message Log listing (MapCheck, AssetCheck, PIE, LoadErrors, LightingResults...). Call with NO logName to list the registered listings with their error/warning counts, then read one. Counts come from the listing itself; message bodies come from the current page and honour the Message Log tab's severity checkboxes, so when fewer are readable than exist the response says so instead of reading clean. An unknown logName is an error, not an empty log. Blueprint COMPILE results are not here - the compiler makes a listing per Blueprint; use blueprint(compile). Params: `logName?, maxLines? (default 200), severity? (severity-name substring)` |
 | `list_crashes` | List crash reports |
 | `get_crash_info` | Get crash details. Params: `crashFolder` |
 | `check_for_crashes` | Check for recent crashes |
 | `set_dialog_policy` | Auto-respond to dialogs matching a pattern. Params: `pattern, response` |
 | `clear_dialog_policy` | Clear dialog policies. Params: `pattern?` |
 | `get_dialog_policy` | Get current dialog policies |
-| `list_dialogs` | List active modal dialogs |
-| `respond_to_dialog` | Click a button on the active modal dialog. Params: `buttonIndex?, buttonLabel?` |
+| `list_dialogs` | List active modal dialogs, with title, message text and button labels. Runs even while a dialog is blocking the editor, when every other handler times out |
+| `respond_to_dialog` | Click a button on the active modal dialog, releasing the game thread. Runs even while the dialog is blocking the editor. Pass action='close' to destroy the dialog window when no button label fits. Params: `buttonIndex?, buttonLabel?, action? (escape or close)` |
 | `open_asset` | Open asset in its editor. Params: `assetPath` |
 | `reload_bridge` | Hot-reload Python bridge handlers from disk |
 | `save_dirty` | Flush every dirty package and return a per-package saved/failed map. Use after multi-step CDO/component edits when set_class_default leaves the asset dirty without persisting (#378). Params: `includeMaps? (default true), includeContent? (default true)` |
 | `configure_pie` | Set ULevelEditorPlaySettings - multi-client PIE, net mode, single-process flag, Play-in-New-Window resolution. Params: `numClients?, netMode? (standalone\|listen\|client), runUnderOneProcess?, launchSeparateServer?, newWindowWidth?, newWindowHeight? (#384/#671)` |
 | `get_pie_config` | Read current ULevelEditorPlaySettings (numClients, netMode, single-process, separate-server) (#384) |
 | `pie_set_player_view` | Point the running PIE player's view (control rotation) at a pitch/yaw/roll so a capture frames the intended direction. Requires PIE. Params: `pitch?, yaw?, roll? (#671)` |
-| `stage_game_input` | Stage input for the running game: set input mode (gameOnly\|gameAndUI\|uiOnly) and mouse cursor so injected/simulated input reaches the pawn. Requires PIE. Params: `inputMode? (default gameOnly), showMouseCursor? (#671)` |
-| `run_automation_tests` | Headlessly run registered Automation tests whose name matches a filter and report pass/fail + error messages (non-latent tests run fully; latent commands are flushed best-effort). Params: `filter? (name substring, empty = all), maxTests? (default 50) (#693)` |
-| `invoke_function_repeating` | Fire a parameterless UFUNCTION on an actor repeatedly at an interval for sustained on-demand triggering (human visual verification). Returns immediately; the remaining calls run in the background. Params: `actorLabel, functionName, count? (default 5), intervalSeconds? (default 1.0), world? (editor\|pie\|auto) (#583)` |
+| `stage_game_input` | Stage input for the running game: set input mode (gameOnly\|gameAndUI\|uiOnly) and mouse cursor so injected/simulated input reaches the pawn. This only sets the mode - the injection itself lives in the pie category (pie(inject_input*)), not here. Requires PIE. Params: `inputMode? (default gameOnly), showMouseCursor? (#671)` |
+| `run_automation_tests` | Run registered Automation tests matching a filter and return per-test pass/fail plus error lines. Runs them synchronously through the test framework rather than the console queue, and suspends the editor's unfocused-CPU throttle for the duration - otherwise an unfocused editor drops to a few FPS and the framework's interactive-frame-rate gate never opens, leaving tests queued forever (#765). Params: `filter?, maxTests? (default 50) (#693)` |
 | `list_dirty_packages` | Enumerate currently-dirty content + map packages (#340) |
 
 ---
 
 ## reflection
 
-*UE reflection: classes, structs, enums, gameplay tags.*
+*UE reflection: classes, structs, enums, gameplay tags, and SaveGame instances.*
 
 | Action | Description |
 |--------|-------------|
 | `reflect_class` | Reflect UClass. Params: `className, includeInherited?` |
 | `reflect_struct` | Reflect UScriptStruct. Params: `structName` |
-| `reflect_enum` | Reflect UEnum. Params: `enumName` |
+| `reflect_enum` | Reflect UEnum by full path, short name, or short name without the E prefix. Resolves native enums in any loaded module and loads unloaded Blueprint (UserDefinedEnum) assets via the asset registry. Returns enumPath, userDefined, and per-value name/value/displayName/tooltip; a failed lookup lists close matches (#762). Params: `enumName` |
 | `list_classes` | List classes. Params: `parentFilter?, limit?` |
 | `list_tags` | List gameplay tags. Params: `filter?` |
 | `create_tag` | Create gameplay tag. Params: `tag, comment?` |
@@ -727,6 +747,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `is_class_loaded` | Report whether a UClass is currently loaded in the editor (loaded), whether it exists/is loadable (exists), and its owning module + that module's load state. Distinguishes 'not loaded yet' from 'does not exist'. Params: `className (short name, /Script/<Module>.<Class>, or BP class path) (#689)` |
 | `is_module_loaded` | Report whether a named module is currently loaded. Params: `moduleName (#689)` |
 | `list_loaded_modules` | Enumerate modules with runtime load state. Params: `filter? (case-insensitive substring), loadedOnly? (default false)` |
+| `inspect_save_game` | Load a SaveGame slot read-only and return its reflected UPROPERTY(SaveGame) values. Non-serializable properties are listed in skippedProperties instead of failing the call. Params: `slotName, userIndex? (default 0)` |
 
 ---
 
@@ -747,12 +768,12 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `list_nav_invokers` | Enumerate actors carrying a NavigationInvokerComponent + their tile generation/removal radii. Diagnoses 'no navmesh in this region' caused by missing or mis-sized invokers (#424) |
 | `get_navmesh_info` | Query nav system |
 | `project_to_nav` | Project point to navmesh. Params: `location, extent?` |
-| `spawn_nav_modifier` | Place nav modifier. Params: `location, extent?, areaClass?` |
+| `spawn_nav_modifier` | Place a NavModifierVolume. The brush is built for real (a bare spawn leaves an AVolume with no geometry, which the engine skips entirely - it requires both Brush and AreaClass). extent is a HALF-size in world units, default 100. areaClass defaults to NavArea_Null, which cuts a hole in the navmesh; pass NavArea_Obstacle to make the region costly instead, or any UNavArea subclass. Params: `location, extent?, areaClass?, label?, scale?, onConflict?` |
 | `create_input_action` | Create InputAction. Params: `name, packagePath?, valueType?` |
 | `create_input_mapping` | Create InputMappingContext. Params: `name, packagePath?` |
 | `list_input_assets` | List input assets. Params: `directory?, recursive?` |
 | `read_imc` | Read InputMappingContext mappings. Params: `imcPath` |
-| `get_applied_imcs` | Read a live PIE player's currently-applied Input Mapping Contexts (with priority + registrationCount). Requires PIE running. Params: `playerIndex? (default 0) (#604)` |
+| `get_applied_imcs` | Read applied Input Mapping Contexts (name, path, priority, registrationCount), highest priority first - the order Enhanced Input resolves in. Covers EVERY running PIE world by default, so a multiplayer client can be inspected, not just the primary/server world; narrow with pieInstance and/or playerIndex. Pass mappingContext for a direct hasRequestedContext yes/no. A remote controller with no LocalPlayer says so rather than reporting an empty list. BREAKING in 1.1.36: results are now nested under worlds[].players[] (was a flat appliedContexts[] for one world), the array is mappingContexts (was appliedContexts), each entry uses path (was imc), and a call with PIE stopped returns success with worldCount 0 instead of erroring (#604/#778) |
 | `list_input_mappings` | Alias for read_imc. List key→action bindings with triggers/modifiers. Params: `imcPath` |
 | `add_imc_mapping` | Add key mapping to IMC. Params: `imcPath, inputActionPath, key` |
 | `set_mapping_modifiers` | Set modifiers/triggers on an IMC mapping. Each modifier OR trigger is either {type:'<ShortName>', <prop>:<val>} or {class:'/Script/Module.Class', properties:{...}} - the class form resolves any custom UInputModifier/UInputTrigger subclass (e.g. type:'Hold' \| class:'/Script/EnhancedInput.InputTriggerHold', with HoldTimeThreshold). Unresolvable trigger specs are reported in failedTriggers and never leave a null entry (#649/#725). Params: `imcPath, mappingIndex?, modifiers?, triggers?` |
@@ -763,7 +784,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `get_behavior_tree_info` | Inspect behavior tree (top-level + blackboard). Params: `assetPath` |
 | `read_behavior_tree_graph` | Walk BT tree: composites, tasks, decorators, services with blackboard keys. Params: `assetPath` |
 | `create_blackboard` | Create Blackboard. Params: `name, packagePath?` |
-| `add_blackboard_key` | Add a typed key to a Blackboard asset. Params: `blackboardPath, keyName, keyType (Bool\|Int\|Float\|String\|Name\|Vector\|Rotator\|Object\|Class\|Enum), baseClass? (for Object/Class types; e.g. /Script/Engine.Actor) (#250)` |
+| `add_blackboard_key` | Add a typed key to a Blackboard asset. baseClass types an Object/Class key - Behaviour Tree nodes filter on it, so an untyped key silently will not bind. For keyType=Enum pass the enum via enumType (or baseClass). Params: `blackboardPath, keyName, keyType (Bool\|Int\|Float\|String\|Name\|Vector\|Rotator\|Object\|Class\|Enum), baseClass? (e.g. /Script/Engine.Actor), enumType? (#250)` |
 | `remove_blackboard_key` | Remove a key from a Blackboard asset by name. Idempotent. Params: `blackboardPath, keyName (#469)` |
 | `set_blackboard_parent` | Set Parent on a BlackboardData asset (canonical UE child-of-parent pattern). Pass parentPath="None" or omit to clear. autoPruneDuplicateKeys (default true) removes own-keys that the parent chain already defines so the BT compiler accepts the child (#469) |
 | `read_blackboard` | Read a Blackboard asset: parent path, ownKeys, inheritedKeys (walks the parent chain). Params: `blackboardPath (#469)` |
@@ -772,10 +793,10 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `create_behavior_tree` | Create behavior tree. Params: `name, packagePath?, blackboardPath?` |
 | `create_eqs_query` | Create EQS query. Params: `name, packagePath?` |
 | `list_eqs_queries` | List EQS queries. Params: `directory?` |
-| `add_perception` | Add AIPerceptionComponent. Params: `blueprintPath, senses?` |
+| `add_perception` | Add an AIPerceptionComponent to a Blueprint and configure its senses. senses takes short names (Sight, Hearing, Damage, Touch, Team, Prediction), AISenseConfig_* names, or class paths - a component with no sense configs perceives nothing. Params: `blueprintPath, senses?` |
 | `configure_sense` | Add + configure an AI perception sense config on the blueprint's AIPerceptionComponent. Params: `blueprintPath, senseType (Sight\|Hearing\|Damage\|Touch\|Team\|Prediction\|Blueprint), settings? ({SightRadius: ...}), componentName?` |
 | `get_state_tree_runtime` | Read a running StateTreeComponent's active state names in PIE (the 'brain' state). Params: `actorLabel, world? (default pie), componentName? (#654)` |
-| `create_state_tree` | Create a StateTree with a proper UStateTreeEditorData (schema + root state), so states/tasks are authorable via statetree(*) and persist across save/load (#653). Params: `name, packagePath?, schema? (default /Script/GameplayStateTreeModule.StateTreeComponentSchema)` |
+| `create_state_tree` | Create a StateTree with a proper UStateTreeEditorData (schema + root state), so states/tasks are authorable via statetree(*) and persist across save/load (#653). Params: `name, packagePath?, schema? (default /Script/GameplayStateTreeModule.StateTreeComponentSchema), onConflict?` |
 | `list_state_trees` | List StateTrees. Params: `directory?` |
 | `add_state_tree_component` | Add StateTreeComponent. Params: `blueprintPath` |
 | `create_smart_object_def` | Create SmartObjectDefinition. Params: `name, packagePath?` |
@@ -785,11 +806,11 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `remove_smart_object_slot` | Remove a slot by index. Idempotent: out-of-range returns alreadyDeleted=true. Params: `assetPath, slotIndex (#416)` |
 | `list_smart_object_slots` | List slots on a SmartObjectDefinition with index, offset, rotation, and raw text. Params: `assetPath (#416)` |
 | `add_smart_object_slot_behavior` | Attach a behavior definition (UBehaviorDefinition asset or class) to a slot's BehaviorDefinitions array. Pass instanceProperties to seed UPROPERTYs on a freshly-spawned class-instance. Params: `assetPath, slotIndex, behaviorClass (asset path or class path), instanceProperties? (#416)` |
-| `create_game_mode` | Create GameMode BP. Params: `name, packagePath?, parentClass?, defaults?` |
-| `create_game_state` | Create GameState BP. Params: `name, packagePath?, parentClass?` |
-| `create_player_controller` | Create PlayerController BP. Params: `name, packagePath?, parentClass?` |
-| `create_player_state` | Create PlayerState BP. Params: `name, packagePath?` |
-| `create_hud` | Create HUD BP. Params: `name, packagePath?` |
+| `create_game_mode` | Create GameMode BP. parentClass must derive from GameModeBase (short name, /Script path, or a Blueprint asset path). Params: `name, packagePath?, parentClass?` |
+| `create_game_state` | Create GameState BP. parentClass must derive from GameStateBase. Params: `name, packagePath?, parentClass?` |
+| `create_player_controller` | Create PlayerController BP. parentClass must derive from PlayerController. Params: `name, packagePath?, parentClass?` |
+| `create_player_state` | Create PlayerState BP. parentClass must derive from PlayerState. Params: `name, packagePath?, parentClass?` |
+| `create_hud` | Create HUD BP. parentClass must derive from HUD. Params: `name, packagePath?, parentClass?` |
 | `set_world_game_mode` | Set level GameMode override. Params: `gameModeClass (or legacy gameModePath)` |
 | `get_framework_info` | Get level framework classes |
 | `get_navmesh_details` | Read RecastNavMesh generation params (cellSize, agentHeight, maxStepHeight, etc.) (#163) |
@@ -827,7 +848,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | Action | Description |
 |--------|-------------|
 | `set_replicates` | Enable actor replication. Params: `blueprintPath, replicates?` |
-| `set_property_replicated` | Mark variable as replicated. Params: `blueprintPath, propertyName, replicated?, replicationCondition?, repNotify?` |
+| `set_property_replicated` | Mark a Blueprint variable as replicated. replicationType is 'None' \| 'Replicated' \| 'RepNotify'; repNotify=true is shorthand for RepNotify and replicated=true for Replicated. Params: `blueprintPath, variableName (alias: propertyName), replicationType? \| replicated? \| repNotify? (#768)` |
 | `configure_net_frequency` | Set update frequency. Params: `blueprintPath, netUpdateFrequency?, minNetUpdateFrequency?` |
 | `set_dormancy` | Set net dormancy. Params: `blueprintPath, dormancy` |
 | `set_net_load_on_client` | Control client loading. Params: `blueprintPath, loadOnClient?` |
@@ -847,6 +868,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | Action | Description |
 |--------|-------------|
 | `step` | Execute demo step. Params: `stepIndex?` |
+| `get_steps` | List every demo step up front: index, id and description, plus a count. Use this to see what the 19 steps build before running any of them. Params: `none` |
 | `cleanup` | Remove demo assets and actors. Switches editor to /Game/MCP_Home before deleting so the editor is never left on an Untitled map |
 | `go_home` | Switch the editor to /Game/MCP_Home (creating it on first use). Use this before any operation that would leave the editor on an Untitled map |
 
@@ -854,11 +876,12 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 
 ## feedback
 
-*Submit feedback to improve ue-mcp when a native tool falls short: a missing action, a wrong result, a crash, or a gap you had to work around with execute_python. A python workaround is a common trigger but is not required.*
+*Submit feedback when a native tool falls short: a missing action, a wrong result, a crash, or a gap you had to work around with execute_python. A python workaround is a common trigger but is not required. Reports are routed to the tracker that owns the surface - ue-mcp core, or the plugin that provides it (PIE Studio, Perforce, Meshy, ...) - by consulting the published plugin registry.*
 
 | Action | Description |
 |--------|-------------|
-| `submit` | Submit feedback about a tool gap (missing action, wrong behavior, crash, or a case you had to work around). Provide a specific title and a summary; pythonWorkaround and idealTool are optional enrichment, not prerequisites. Blocks on an MCP elicitation prompt that asks the USER (not the agent) to approve or decline the exact payload before anything is posted to GitHub |
+| `submit` | Submit feedback about a tool gap (missing action, wrong behavior, crash, or a case you had to work around). Provide a specific title and a summary; pythonWorkaround and idealTool are optional enrichment, not prerequisites. Checks the plugin registry first and files against the owning plugin's repo when one matches, then blocks on an MCP elicitation prompt that asks the USER (not the agent) to approve or decline the exact payload - and to override the tracker - before anything is posted to GitHub |
+| `route` | Dry run the tracker routing for a report without posting anything. Returns the repo the issue would be filed against, the matched plugin (if any), and why. Params: `title, summary, idealTool?, repo?` |
 
 ---
 
@@ -920,6 +943,8 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `add_row` | Append a row. Set the output via `output` (asset path) + outputType ('asset' hard ref default \| 'soft_asset' \| 'evaluate' for a nested ChooserTable). Set input-column conditions via `cells` (array aligned to column order) and/or `inputs` (object keyed by column index or name). Cell values are struct text like '(Value=2)' - partial fields are allowed and unspecified ones keep defaults; a bare number/bool works for scalar columns. Params: `table, output?, outputType?, cells?, inputs? (#685)` |
 | `set_row` | Edit an existing row by index: optionally replace the output (output + outputType), toggle disabled, and/or update column cells (cells / inputs, same format as add_row). Params: `table, index, output?, outputType?, disabled?, cells?, inputs? (#685)` |
 | `delete_row` | Delete a row by index (removes its output plus the per-row cell from every column). Params: `table, index (#685)` |
+| `list_object_references` | List every leaf object reference reachable from a chooser, descending through nested chooser tables. list_rows renders those as an opaque resultType:NestedChooser with an empty output, so the actual PoseSearchDatabase/asset paths were invisible. Each entry reports the owning table, the exact location (e.g. ResultsStructs[3].Asset), the struct type and the current object path. Params: `assetPath, classFilter? (match the referenced object's class), pathFilter? (substring on the path) (#754)` |
+| `remap_object_references` | Repoint object references throughout a chooser's nested structure. Either an exact swap (from + to) or a folder rewrite (fromPrefix + toPrefix), which is the 'adopt vendor choosers into our namespace' case. DRY RUN BY DEFAULT - pass dryRun=false to apply. Object-typed targets are class-checked before assignment; the chooser is recompiled and left dirty rather than saved. Params: `assetPath, from?+to? \| fromPrefix?+toPrefix?, dryRun? (default true) (#754)` |
 
 ---
 
@@ -936,7 +961,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 
 ## epic
 
-*Epic's native Unreal 5.8 AI Toolset Registry, wrapped as first-class actions. Every toolset Epic ships (GAS, Niagara, PCG, UMG, StateTree, editor actor/asset/blueprint, sequencer, and more) is discoverable and callable in-process. Requires UE 5.8+ with the ToolsetRegistry plugin enabled - call epic(status) first to check availability.*
+*The Unreal 5.8 AI Toolset Registry itself: discovery (status/list_toolsets/describe_toolset), direct dispatch (call_tool), and the registry's own meta-tooling (agent skills, programmatic tool batching). Toolsets that map to a real editor domain are NOT here - they are injected as epic_* actions on that domain's category (GAS in gas, Sequencer in animation, Dataflow in dataflow, and so on), so reach for the domain tool first and use this one to introspect or call the registry directly. Requires UE 5.8+ with the ToolsetRegistry plugin enabled - call epic(status) first to check availability.*
 
 | Action | Description |
 |--------|-------------|

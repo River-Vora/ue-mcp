@@ -19,6 +19,17 @@
 // UPCGEditorGraphNodeBase, UIKRetargeterController::AssignIKRigToAllOps, etc.
 #define UE_MCP_HAS_5_5_API ((ENGINE_MAJOR_VERSION > 5) || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5))
 
+// True on UE 5.7+. Gates EFindObjectFlags (the bool bExactClass overloads are
+// deprecated there) and UPoseSearchDatabase's non-templated
+// GetDatabaseAnimationAsset.
+#define UE_MCP_HAS_5_7_API ((ENGINE_MAJOR_VERSION > 5) || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7))
+
+// True on UE 5.8+. Gates EGetObjectsFlags and
+// FStringTable::ImportStringsFromCSVFile; the bool / ImportStrings forms they
+// replace are deprecated in 5.8 and warn on every user build, but do not exist
+// before it.
+#define UE_MCP_HAS_5_8_API ((ENGINE_MAJOR_VERSION > 5) || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8))
+
 // ── Quick result builders ────────────────────────────────────────────────────
 
 /** Return an error response: { success: false, error: "..." } */
@@ -517,19 +528,69 @@ inline UWorld* GetPIEWorld()
 	return nullptr;
 }
 
+/**
+ * #778: get a specific PIE world by its instance id. GetPIEWorld() returns the
+ * first PIE context it finds, which in a multi-instance session is the server
+ * - so every runtime read resolved to the server and there was no way to
+ * inspect a client at all. Pass INDEX_NONE for "first available".
+ */
+inline UWorld* GetPIEWorldByInstance(int32 PIEInstance)
+{
+	if (!GEngine) return nullptr;
+	for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+	{
+		if (Ctx.WorldType != EWorldType::PIE && Ctx.WorldType != EWorldType::Game) continue;
+		if (PIEInstance != INDEX_NONE && Ctx.PIEInstance != PIEInstance) continue;
+		if (UWorld* W = Ctx.World()) return W;
+	}
+	return nullptr;
+}
+
+/** Net role of a PIE world, as a short string for reporting. */
+inline FString DescribePIENetMode(UWorld* World)
+{
+	if (!World) return TEXT("none");
+	switch (World->GetNetMode())
+	{
+		case NM_Standalone:      return TEXT("standalone");
+		case NM_DedicatedServer: return TEXT("dedicatedServer");
+		case NM_ListenServer:    return TEXT("listenServer");
+		case NM_Client:          return TEXT("client");
+		default:                 return TEXT("unknown");
+	}
+}
+
 /** Resolve a world scope string ("editor"|"pie"|"game"|"auto") to a UWorld. "auto" prefers PIE if running. */
-inline UWorld* ResolveWorldScope(const FString& Scope)
+inline UWorld* ResolveWorldScope(const FString& Scope, int32 PIEInstance = INDEX_NONE)
 {
 	if (Scope.Equals(TEXT("pie"), ESearchCase::IgnoreCase) || Scope.Equals(TEXT("game"), ESearchCase::IgnoreCase))
 	{
-		return GetPIEWorld();
+		return GetPIEWorldByInstance(PIEInstance);
 	}
 	if (Scope.Equals(TEXT("auto"), ESearchCase::IgnoreCase))
 	{
-		if (UWorld* W = GetPIEWorld()) return W;
+		if (UWorld* W = GetPIEWorldByInstance(PIEInstance)) return W;
 		return GetEditorWorld();
 	}
 	return GetEditorWorld();
+}
+
+/**
+ * Resolve the world a request targets from its own params: `world`
+ * (editor|pie|game|auto) plus an optional `pieInstance` selector. Keeping this
+ * in one place means adding multi-instance support to an action is a one-line
+ * change at the call site rather than a re-implementation.
+ */
+inline UWorld* ResolveWorldFromParams(const TSharedPtr<FJsonObject>& Params, const TCHAR* DefaultScope = TEXT("editor"))
+{
+	const FString Scope = OptionalString(Params, TEXT("world"), DefaultScope);
+	int32 PIEInstance = INDEX_NONE;
+	double Raw = 0.0;
+	if (Params.IsValid() && Params->TryGetNumberField(TEXT("pieInstance"), Raw))
+	{
+		PIEInstance = FMath::RoundToInt(Raw);
+	}
+	return ResolveWorldScope(Scope, PIEInstance);
 }
 
 /** Get the editor world or return an error response. */

@@ -1,6 +1,11 @@
 #include "SequencerHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+
+#include "LevelSequenceEditorBlueprintLibrary.h"
+#include "MovieSceneSequencePlayer.h"
+
+#include "Subsystems/AssetEditorSubsystem.h"
 #include "HandlerAssetCreate.h"
 #include "LevelSequence.h"
 #include "LevelSequenceActor.h"
@@ -482,40 +487,75 @@ TSharedPtr<FJsonValue> FSequencerHandlers::AddTrack(const TSharedPtr<FJsonObject
 	return MCPResult(Result);
 }
 
+// play_sequence - drive the Sequencer editor's transport.
+//
+// This used to issue "Sequencer.Play"/"Sequencer.Pause"/"Sequencer.Stop"
+// through GEditor->Exec. No such console commands exist in the engine: the
+// Sequencer module registers neither an exec handler nor a console command for
+// them, so Exec returned false and the handler reported success for a call that
+// did nothing at all. Every use of this action since it shipped was a no-op.
+//
+// ULevelSequenceEditorBlueprintLibrary is the real scripting surface - the same
+// one the editor's own Python/Blueprint automation uses.
 TSharedPtr<FJsonValue> FSequencerHandlers::SequenceControl(const TSharedPtr<FJsonObject>& Params)
 {
 	FString Action;
 	if (auto Err = RequireString(Params, TEXT("action"), Action)) return Err;
 
-	FString Command;
-	if (Action.Equals(TEXT("play"), ESearchCase::IgnoreCase))
-	{
-		Command = TEXT("Sequencer.Play");
-	}
-	else if (Action.Equals(TEXT("pause"), ESearchCase::IgnoreCase))
-	{
-		Command = TEXT("Sequencer.Pause");
-	}
-	else if (Action.Equals(TEXT("stop"), ESearchCase::IgnoreCase))
-	{
-		Command = TEXT("Sequencer.Stop");
-	}
-	else
+	const bool bPlay  = Action.Equals(TEXT("play"), ESearchCase::IgnoreCase);
+	const bool bPause = Action.Equals(TEXT("pause"), ESearchCase::IgnoreCase);
+	const bool bStop  = Action.Equals(TEXT("stop"), ESearchCase::IgnoreCase);
+	if (!bPlay && !bPause && !bStop)
 	{
 		return MCPError(FString::Printf(TEXT("Unknown action: '%s'. Use play, pause, or stop."), *Action));
 	}
 
-	// Execute via console command
-	UWorld* World = GEditor->GetEditorWorldContext().World();
-	if (World)
+	// Open the requested sequence first: the transport acts on whatever
+	// Sequencer currently has open, so naming one and not opening it would
+	// drive a different sequence.
+	FString RequestedPath = OptionalString(Params, TEXT("sequencePath"), OptionalString(Params, TEXT("assetPath")));
+	if (!RequestedPath.IsEmpty())
 	{
-		GEditor->Exec(World, *Command, *GLog);
+		ULevelSequence* Sequence = LoadAssetByPath<ULevelSequence>(RequestedPath);
+		if (!Sequence)
+		{
+			return MCPError(FString::Printf(TEXT("Level Sequence not found: %s"), *RequestedPath));
+		}
+		if (!ULevelSequenceEditorBlueprintLibrary::OpenLevelSequence(Sequence))
+		{
+			return MCPError(FString::Printf(
+				TEXT("Failed to open '%s' in Sequencer."), *Sequence->GetPathName()));
+		}
+	}
+
+	ULevelSequence* Current = ULevelSequenceEditorBlueprintLibrary::GetCurrentLevelSequence();
+	if (!Current)
+	{
+		return MCPError(TEXT("No Level Sequence is open in Sequencer. Pass sequencePath to open one, or open it in the editor first."));
+	}
+
+	if (bPlay)
+	{
+		ULevelSequenceEditorBlueprintLibrary::Play();
+	}
+	else if (bPause)
+	{
+		ULevelSequenceEditorBlueprintLibrary::Pause();
+	}
+	else
+	{
+		// There is no Stop(): pause, then rewind to the start of the playback
+		// range, which is what stopping means to a caller.
+		ULevelSequenceEditorBlueprintLibrary::Pause();
+		const FMovieSceneSequencePlaybackParams Rewind(FFrameTime(0), EUpdatePositionMethod::Scrub);
+		ULevelSequenceEditorBlueprintLibrary::SetGlobalPosition(Rewind);
 	}
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("action"), Action);
-	Result->SetStringField(TEXT("command"), Command);
-
+	Result->SetStringField(TEXT("sequencePath"), Current->GetPathName());
+	// Read the transport back rather than reporting what was asked for.
+	Result->SetBoolField(TEXT("playing"), ULevelSequenceEditorBlueprintLibrary::IsPlaying());
 	return MCPResult(Result);
 }
 

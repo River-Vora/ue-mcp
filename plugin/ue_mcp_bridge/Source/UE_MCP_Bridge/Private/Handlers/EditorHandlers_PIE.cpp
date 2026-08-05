@@ -6,6 +6,8 @@
 #include "EditorHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+
+#include "UObject/GCObjectScopeGuard.h"
 #include "HandlerJsonProperty.h"
 #include "JsonSerializer.h"
 #include "Containers/Ticker.h"
@@ -218,8 +220,9 @@ TSharedPtr<FJsonValue> FEditorHandlers::PieGetRuntimeValue(const TSharedPtr<FJso
 	FString PropertyName;
 	if (auto Err = RequireString(Params, TEXT("propertyName"), PropertyName)) return Err;
 
-	// Search for the actor in the PIE world (accept label, name, or full path)
-	UWorld* PIEWorld = GEditor->PlayWorld;
+	// Search for the actor in the PIE world (accept label, name, or full path).
+	// #778: honour pieInstance so a client world is reachable.
+	UWorld* PIEWorld = ResolveWorldFromParams(Params, TEXT("pie"));
 	AActor* TargetActor = FindActorByLabelNameOrPath(PIEWorld, ActorPath);
 
 	if (!TargetActor)
@@ -616,16 +619,10 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetRuntimeValues(const TSharedPtr<FJsonO
 	}
 	if (Paths.Num() == 0) return MCPError(TEXT("'paths' must contain at least one non-empty string"));
 
-	const FString WorldHint = OptionalString(Params, TEXT("world"));
-	UWorld* World = nullptr;
-	if (WorldHint == TEXT("editor") || !GEditor->PlayWorld)
-	{
-		World = (UWorld*)GEditor->GetEditorWorldContext().World();
-	}
-	else
-	{
-		World = (UWorld*)GEditor->PlayWorld;
-	}
+	// #778: was GEditor->PlayWorld, which is always the primary/server world.
+	const FString WorldHint = OptionalString(Params, TEXT("world"), TEXT("auto"));
+	UWorld* World = ResolveWorldFromParams(Params, *WorldHint);
+	if (!World) World = (UWorld*)GEditor->GetEditorWorldContext().World();
 	if (!World) return MCPError(TEXT("No world available"));
 
 	TArray<TSharedPtr<FJsonValue>> Rows;
@@ -803,18 +800,16 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 	FString ActorLabel;
 	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
 
+	// #778: this used GEditor->GetPIEWorldContext(), which is always the
+	// primary (server) context, so 'pieInstance' could never reach it and a
+	// client world was unaddressable. Route through the shared resolver.
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor")).ToLower();
-	UWorld* World = nullptr;
-	if (WorldScope == TEXT("pie"))
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
+	if (!World)
 	{
-		FWorldContext* PieCtx = GEditor ? GEditor->GetPIEWorldContext() : nullptr;
-		World = PieCtx ? PieCtx->World() : nullptr;
-		if (!World) return MCPError(TEXT("PIE not running - cannot invoke against PIE world"));
-	}
-	else
-	{
-		World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
-		if (!World) return MCPError(TEXT("No editor world available"));
+		return MCPError(WorldScope == TEXT("pie")
+			? TEXT("PIE not running (or no such pieInstance) - cannot invoke against PIE world. See editor(list_pie_instances).")
+			: TEXT("No editor world available"));
 	}
 
 	// #654: also match internal UObject name and full path so unlabeled actors
@@ -959,6 +954,9 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 		}
 	}
 
+	// ProcessEvent can run arbitrary game code, including code that tears down
+	// the world and collects garbage, and CallTarget is read again below.
+	FGCObjectScopeGuard CallTargetGuard(CallTarget);
 	CallTarget->ProcessEvent(Func, ParamBuf.GetData());
 
 	auto Result = MCPSuccess();
@@ -972,6 +970,19 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 		FProperty* P = *It;
 		if (P->PropertyFlags & (CPF_ReturnParm | CPF_OutParm))
 		{
+			// ParamBuf is raw bytes and invisible to GC, so an object out-param
+			// the call destroyed would be dereferenced by ExportTextItem_Direct.
+			// The scope guard above covers the target, not the results.
+			if (FObjectPropertyBase* OP = CastField<FObjectPropertyBase>(P))
+			{
+				UObject* Out = OP->GetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(ParamBuf.GetData()));
+				if (!Out) { OutVals->SetStringField(P->GetName(), TEXT("None")); continue; }
+				if (!IsValid(Out))
+				{
+					OutVals->SetStringField(P->GetName(), TEXT("(collected during the call)"));
+					continue;
+				}
+			}
 			FString S;
 			P->ExportTextItem_Direct(S, P->ContainerPtrToValuePtr<void>(ParamBuf.GetData()), nullptr, CallTarget, PPF_None);
 			OutVals->SetStringField(P->GetName(), S);
@@ -1009,8 +1020,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeStaticFunction(const TSharedPtr<FJ
 	UWorld* World = nullptr;
 	if (WorldScope == TEXT("pie"))
 	{
-		FWorldContext* PieCtx = GEditor ? GEditor->GetPIEWorldContext() : nullptr;
-		World = PieCtx ? PieCtx->World() : nullptr;
+		World = ResolveWorldFromParams(Params, TEXT("pie"));
 		if (!World) return MCPError(TEXT("PIE not running - cannot invoke against PIE world"));
 	}
 	else
@@ -1142,6 +1152,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeStaticFunction(const TSharedPtr<FJ
 		}
 	}
 
+	FGCObjectScopeGuard CDOGuard(CDO);
 	CDO->ProcessEvent(Func, ParamBuf.GetData());
 
 	auto Result = MCPSuccess();
@@ -1154,6 +1165,19 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeStaticFunction(const TSharedPtr<FJ
 		FProperty* P = *It;
 		if (P->PropertyFlags & (CPF_ReturnParm | CPF_OutParm))
 		{
+			// ParamBuf is raw bytes and invisible to GC, so an object out-param
+			// the call destroyed would be dereferenced by ExportTextItem_Direct.
+			// The scope guard above covers the CDO, not the results.
+			if (FObjectPropertyBase* OP = CastField<FObjectPropertyBase>(P))
+			{
+				UObject* Out = OP->GetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(ParamBuf.GetData()));
+				if (!Out) { OutVals->SetStringField(P->GetName(), TEXT("None")); continue; }
+				if (!IsValid(Out))
+				{
+					OutVals->SetStringField(P->GetName(), TEXT("(collected during the call)"));
+					continue;
+				}
+			}
 			FString S;
 			P->ExportTextItem_Direct(S, P->ContainerPtrToValuePtr<void>(ParamBuf.GetData()), nullptr, CDO, PPF_None);
 			OutVals->SetStringField(P->GetName(), S);
@@ -1303,64 +1327,6 @@ TSharedPtr<FJsonValue> FEditorHandlers::StageGameInput(const TSharedPtr<FJsonObj
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("inputMode"), Mode);
 	Result->SetBoolField(TEXT("showMouseCursor"), bShowCursor);
-	return MCPResult(Result);
-}
-
-// #583: fire a parameterless UFUNCTION on an actor repeatedly at an interval
-// for sustained on-demand triggering (human visual verification). Returns
-// immediately; a game-thread ticker drives the remaining calls in the
-// background and unregisters itself when the count is exhausted or the actor
-// goes away.
-TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunctionRepeating(const TSharedPtr<FJsonObject>& Params)
-{
-	FString FunctionName;
-	if (auto Err = RequireString(Params, TEXT("functionName"), FunctionName)) return Err;
-	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
-
-	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("auto")).ToLower();
-	UWorld* World = ResolveWorldScope(WorldScope);
-	if (!World) return MCPError(TEXT("World not available"));
-
-	AActor* Target = FindActorByLabelNameOrPath(World, ActorLabel);
-	if (!Target) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-
-	UFunction* Func = Target->FindFunction(FName(*FunctionName));
-	if (!Func) return MCPError(FString::Printf(TEXT("Function '%s' not found on '%s'"), *FunctionName, *Target->GetClass()->GetName()));
-	if (Func->NumParms != 0) return MCPError(FString::Printf(TEXT("Function '%s' takes parameters; only parameterless functions are supported for repeating invoke"), *FunctionName));
-
-	const double Interval = FMath::Max(0.05, OptionalNumber(Params, TEXT("intervalSeconds"), 1.0));
-	const int32 Count = FMath::Clamp(OptionalInt(Params, TEXT("count"), 5), 1, 10000);
-
-	// Fire once immediately, then schedule the rest.
-	Target->ProcessEvent(Func, nullptr);
-	int32 Remaining = Count - 1;
-
-	if (Remaining > 0)
-	{
-		TWeakObjectPtr<AActor> WeakActor(Target);
-		const FString FnName = FunctionName;
-		TSharedRef<int32> RemainingRef = MakeShared<int32>(Remaining);
-		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
-			[WeakActor, FnName, RemainingRef](float) -> bool
-			{
-				AActor* A = WeakActor.Get();
-				if (!A) return false; // actor gone -> stop
-				if (UFunction* F = A->FindFunction(FName(*FnName)))
-				{
-					A->ProcessEvent(F, nullptr);
-				}
-				(*RemainingRef)--;
-				return (*RemainingRef) > 0; // continue until exhausted
-			}), (float)Interval);
-	}
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("actorLabel"), Target->GetActorLabel());
-	Result->SetStringField(TEXT("functionName"), FunctionName);
-	Result->SetNumberField(TEXT("count"), Count);
-	Result->SetNumberField(TEXT("intervalSeconds"), Interval);
-	Result->SetStringField(TEXT("note"), TEXT("Fired once now; remaining calls run in the background at the interval."));
 	return MCPResult(Result);
 }
 

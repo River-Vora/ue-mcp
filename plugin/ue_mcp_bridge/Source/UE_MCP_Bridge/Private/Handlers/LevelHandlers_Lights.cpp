@@ -341,7 +341,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetLightProperties(const TSharedPtr<FJson
 TSharedPtr<FJsonValue> FLevelHandlers::SetFogProperties(const TSharedPtr<FJsonObject>& Params)
 {
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	FString ActorLabel = OptionalString(Params, TEXT("actorLabel"));

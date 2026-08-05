@@ -1,7 +1,7 @@
 {
   "name": "ue-mcp",
-  "version": "1.1.33",
-  "description": "Unreal Engine MCP server - 24 tools, 736+ actions for AI-driven editor control",
+  "version": "1.1.44",
+  "description": "Unreal Engine MCP server - 24 tools, 759+ actions for AI-driven editor control",
   "type": "module",
   "main": "dist/index.js",
   "exports": {
@@ -42,7 +42,7 @@
     "type": "git",
     "url": "https://github.com/db-lyon/ue-mcp.git"
   },
-  "homepage": "https://db-lyon.github.io/ue-mcp/",
+  "homepage": "https://ue-mcp.com/docs/",
   "engines": {
     "node": ">=18"
   },

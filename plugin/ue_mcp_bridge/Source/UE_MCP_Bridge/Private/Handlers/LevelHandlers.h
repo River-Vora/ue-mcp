@@ -66,6 +66,12 @@ private:
 	static TSharedPtr<FJsonValue> SetActorProperty(const TSharedPtr<FJsonObject>& Params);
 	// #220: bulk delete actors by label prefix / class / tag
 	static TSharedPtr<FJsonValue> DeleteActors(const TSharedPtr<FJsonObject>& Params);
+	// #767: bulk-assign World Outliner folder paths in one transaction.
+	static TSharedPtr<FJsonValue> SetActorFolderPath(const TSharedPtr<FJsonObject>& Params);
+	// #746: World Partition actor descriptors - see unloaded actors and stream
+	// them in, instead of every actor query silently reporting zero for them.
+	static TSharedPtr<FJsonValue> ListActorDescs(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> LoadActorDescs(const TSharedPtr<FJsonObject>& Params);
 	// #219: actor tag CRUD
 	static TSharedPtr<FJsonValue> AddActorTag(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> RemoveActorTag(const TSharedPtr<FJsonObject>& Params);
