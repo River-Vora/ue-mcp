@@ -8,6 +8,8 @@ import { privacyScrub } from "../privacy-scrub.js";
 import { deferSubmission } from "../feedback-deferred.js";
 import { getFeedbackMode, type FeedbackMode } from "../user-state.js";
 import { warn } from "../log.js";
+import { routeFeedback, type RoutingDecision } from "../feedback-routing.js";
+import { CORE_REPO, newIssueUrl, repoSlug, sameRepo, type GitHubRepo } from "../registry-catalog.js";
 
 /**
  * Resolve the active feedback mode. Precedence (highest wins):
@@ -143,6 +145,38 @@ function inferLabels(title: string, summary: string, idealTool?: string): string
   return [...labels];
 }
 
+/**
+ * Labels that mean something on any tracker. Category labels ("blueprint",
+ * "niagara") describe the ue-mcp core surface and are noise - or worse, newly
+ * created clutter - on a plugin's repo.
+ */
+const PORTABLE_LABELS = new Set(["agent-feedback", "bug", "enhancement"]);
+
+function labelsForRepo(labels: string[], repo: GitHubRepo): string[] {
+  if (sameRepo(repo, CORE_REPO)) return labels;
+  const kept = labels.filter((l) => PORTABLE_LABELS.has(l));
+  return kept.length > 0 ? kept : ["agent-feedback"];
+}
+
+/**
+ * The routing analysis, rendered for the issue body.
+ *
+ * Deliberately destination-independent: it states what the classifier found,
+ * not where the report ended up. That keeps the posted bytes identical whether
+ * the user accepts the suggested tracker or overrides it at the prompt, and it
+ * still tells a core maintainer "this looks like it belongs to pie-studio".
+ */
+function routingSection(routing: RoutingDecision | null): string[] {
+  if (!routing) return [];
+  const winner = routing.candidate ?? routing.suggestions[0];
+  if (!winner) return [];
+  const where = winner.repo ? ` (${repoSlug(winner.repo)})` : "";
+  const lines = ["", "## Routing", `Matched plugin: **${winner.name}**${where} - confidence ${winner.confidence}.`];
+  for (const r of winner.reasons.slice(0, 5)) lines.push(`- ${r}`);
+  if (routing.note) lines.push(`- ${routing.note}`);
+  return lines;
+}
+
 interface AssembledPayload {
   title: string;
   body: string;
@@ -161,6 +195,7 @@ function assemblePayload(
   pythonWorkaround: string | undefined,
   idealTool: string | undefined,
   privacy: PrivacyInputs,
+  routing: RoutingDecision | null = null,
 ): AssembledPayload {
   const sections: string[] = ["## Summary", summary];
 
@@ -192,6 +227,8 @@ function assemblePayload(
       );
     }
   }
+
+  sections.push(...routingSection(routing));
 
   sections.push("", "---", "*Submitted via ue-mcp agent feedback*");
 
@@ -249,17 +286,41 @@ export type AuthorIntent = "user" | "bot";
 function buildApprovalMessage(
   p: AssembledPayload,
   authorPromptLine: string,
+  repo: GitHubRepo,
+  routing: RoutingDecision | null,
 ): string {
   const lines: string[] = [
     "REVIEW BEFORE SUBMITTING — nothing has been posted yet.",
     "",
-    "Approving this prompt posts a new issue to the PUBLIC ue-mcp GitHub",
+    `Approving this prompt posts a new issue to the PUBLIC ${repoSlug(repo)} GitHub`,
     "tracker with the exact content shown below. Decline to discard.",
     "",
-    `Title : ${p.title}`,
-    `Labels: ${p.labels.join(", ")}`,
-    `Author: ${authorPromptLine}`,
+    `Title  : ${p.title}`,
+    `Tracker: ${repoSlug(repo)}`,
+    `Labels : ${p.labels.join(", ")}`,
+    `Author : ${authorPromptLine}`,
   ];
+
+  const winner = routing?.candidate ?? routing?.suggestions[0];
+  if (winner) {
+    lines.push("", "── ROUTING ──────────────────────────────────");
+    if (routing?.target === "plugin") {
+      lines.push(
+        `This looks like a ${winner.name} issue, not a ue-mcp core issue`,
+        `(confidence: ${winner.confidence}), so it is aimed at that plugin's`,
+        `own tracker. Switch the Tracker field below to send it to core instead.`,
+      );
+    } else {
+      lines.push(
+        `${winner.name} also matched this report (confidence: ${winner.confidence}).`,
+        `It is aimed at ue-mcp core anyway${routing?.note ? ` - ${routing.note}` : "."}`,
+      );
+      if (winner.repo) {
+        lines.push(`Switch the Tracker field below to file it against ${repoSlug(winner.repo)}.`);
+      }
+    }
+    for (const r of winner.reasons.slice(0, 4)) lines.push(`  - ${r}`);
+  }
   if (p.scrubHits > 0) {
     lines.push(
       "",
@@ -270,13 +331,47 @@ function buildApprovalMessage(
   return lines.join("\n");
 }
 
+/**
+ * Kill switch. `UE_MCP_FEEDBACK_ROUTING=off` (or 0/false/no) pins every
+ * submission to the core tracker and skips the registry lookup entirely, for
+ * air-gapped runs or anyone who wants the old single-tracker behaviour.
+ */
+function routingDisabled(): boolean {
+  return /^(0|off|false|no)$/i.test((process.env.UE_MCP_FEEDBACK_ROUTING ?? "").trim());
+}
+
+async function resolveRouting(
+  ctx: ToolContext,
+  input: { title: string; summary: string; idealTool?: string; repo?: string },
+): Promise<RoutingDecision | null> {
+  if (routingDisabled()) return null;
+  return routeFeedback({
+    title: input.title,
+    summary: input.summary,
+    idealTool: input.idealTool,
+    explicitRepo: input.repo,
+    installed: ctx.getPlugins?.() ?? [],
+  });
+}
+
+/** One line describing where a report is headed and why. */
+function routingLine(routing: RoutingDecision | null, repo: GitHubRepo): string {
+  if (!routing) return `${repoSlug(repo)} (routing disabled)`;
+  const winner = routing.candidate ?? routing.suggestions[0];
+  if (routing.target === "plugin" && routing.candidate) {
+    return `${repoSlug(repo)} - matched ${routing.candidate.name} (${routing.candidate.confidence})`;
+  }
+  if (winner) return `${repoSlug(repo)} - ${routing.note ?? `${winner.name} matched but core owns this`}`;
+  return repoSlug(repo);
+}
+
 export const feedbackTool: ToolDef = categoryTool(
   "feedback",
-  "Submit feedback to improve ue-mcp when a native tool falls short: a missing action, a wrong result, a crash, or a gap you had to work around with execute_python. A python workaround is a common trigger but is not required.",
+  "Submit feedback when a native tool falls short: a missing action, a wrong result, a crash, or a gap you had to work around with execute_python. A python workaround is a common trigger but is not required. Reports are routed to the tracker that owns the surface - ue-mcp core, or the plugin that provides it (PIE Studio, Perforce, Meshy, ...) - by consulting the published plugin registry.",
   {
     submit: {
       description:
-        "Submit feedback about a tool gap (missing action, wrong behavior, crash, or a case you had to work around). Provide a specific title and a summary; pythonWorkaround and idealTool are optional enrichment, not prerequisites. Blocks on an MCP elicitation prompt that asks the USER (not the agent) to approve or decline the exact payload before anything is posted to GitHub.",
+        "Submit feedback about a tool gap (missing action, wrong behavior, crash, or a case you had to work around). Provide a specific title and a summary; pythonWorkaround and idealTool are optional enrichment, not prerequisites. Checks the plugin registry first and files against the owning plugin's repo when one matches, then blocks on an MCP elicitation prompt that asks the USER (not the agent) to approve or decline the exact payload - and to override the tracker - before anything is posted to GitHub.",
       handler: async (ctx: ToolContext, params: Record<string, unknown>) => {
         const title = (params.title as string | undefined) ?? "";
         const summary = (params.summary as string | undefined) ?? "";
@@ -346,10 +441,30 @@ export const feedbackTool: ToolDef = categoryTool(
           );
         }
 
-        const payload = assemblePayload(title, summary, pythonWorkaround, idealTool, {
-          projectRoot: ctx.project?.projectDir ?? undefined,
-          projectName: ctx.project?.projectName ?? undefined,
-        });
+        // ── Routing ────────────────────────────────────────────────
+        // Work out whether a published plugin owns the surface being
+        // reported before assembling anything. Never fatal: a registry
+        // that is down, slow, or unreachable resolves to core, which is
+        // the behaviour that existed before routing did.
+        let routing: RoutingDecision | null = null;
+        try {
+          routing = await resolveRouting(ctx, { title, summary, idealTool, repo: params.repo as string | undefined });
+        } catch (e) {
+          warn("feedback", "routing lookup failed; filing against ue-mcp core", e);
+        }
+        let targetRepo: GitHubRepo = routing?.repo ?? CORE_REPO;
+
+        const payload = assemblePayload(
+          title,
+          summary,
+          pythonWorkaround,
+          idealTool,
+          {
+            projectRoot: ctx.project?.projectDir ?? undefined,
+            projectName: ctx.project?.projectName ?? undefined,
+          },
+          routing,
+        );
 
         // Two independent checks: (1) capture intent above, (2) validate
         // auth here. Auth validation only matters when intent is "user".
@@ -397,17 +512,25 @@ export const feedbackTool: ToolDef = categoryTool(
         // later review via `npx ue-mcp feedback list/approve/discard`.
         if (mode === "defer") {
           const entry = deferSubmission(
-            { title: payload.title, body: payload.body, labels: payload.labels },
+            {
+              title: payload.title,
+              body: payload.body,
+              labels: labelsForRepo(payload.labels, targetRepo),
+              repo: repoSlug(targetRepo),
+              routing: routingLine(routing, targetRepo),
+            },
             ctx.project?.projectName ?? null,
             useBotForSubmit ? "bot" : "user",
           );
           clearWorkarounds();
           return {
-            message: `Feedback deferred locally for later review (id ${entry.id}).`,
+            message: `Feedback deferred locally for later review (id ${entry.id}), aimed at ${repoSlug(targetRepo)}.`,
             deferred: true,
             id: entry.id,
             createdAt: entry.createdAt,
             mode: "defer",
+            target_repo: repoSlug(targetRepo),
+            routing: routingLine(routing, targetRepo),
             review_with: "npx ue-mcp feedback list",
           };
         }
@@ -417,12 +540,34 @@ export const feedbackTool: ToolDef = categoryTool(
         // body. Opt-in via config/env only; the agent has no surface
         // to set this.
         if (mode === "auto-approve") {
-          const result = await submitFeedback(
+          let postedTo = targetRepo;
+          let result = await submitFeedback(
             payload.title,
             payload.body,
-            payload.labels,
-            { useBot: useBotForSubmit },
+            labelsForRepo(payload.labels, targetRepo),
+            { useBot: useBotForSubmit, repo: targetRepo },
           );
+          if (result.kind === "repo_unavailable") {
+            // Nobody is at the keyboard in this mode. Losing the report
+            // because a plugin tracker is closed is worse than filing it on
+            // core, where the routing section still names the real owner.
+            warn("feedback", `${result.repo} refused the issue (HTTP ${result.status}); falling back to ue-mcp core`);
+            postedTo = CORE_REPO;
+            result = await submitFeedback(
+              payload.title,
+              payload.body,
+              labelsForRepo(payload.labels, CORE_REPO),
+              { useBot: useBotForSubmit, repo: CORE_REPO },
+            );
+          }
+          if (result.kind === "repo_unavailable") {
+            return {
+              message: `Feedback not posted: ${result.repo} refused the issue (HTTP ${result.status}).`,
+              submitted: false,
+              target_repo: result.repo,
+              manual_url: newIssueUrl(targetRepo, payload.title, payload.body),
+            };
+          }
           if (result.kind === "auth_required") {
             return directive(
               [
@@ -451,12 +596,15 @@ export const feedbackTool: ToolDef = categoryTool(
           }
           clearWorkarounds();
           return {
-            message: `Feedback auto-approved and submitted as ${result.authoredAs === "user" ? `@${result.authoredBy}` : "bot"} (auto-approve mode).`,
+            message: `Feedback auto-approved and submitted to ${repoSlug(postedTo)} as ${result.authoredAs === "user" ? `@${result.authoredBy}` : "bot"} (auto-approve mode).`,
             issue_url: result.url,
             issue_number: result.number,
             authored_by: result.authoredBy,
             authored_as: result.authoredAs,
-            labels: payload.labels,
+            labels: labelsForRepo(payload.labels, postedTo),
+            target_repo: repoSlug(postedTo),
+            routing: routingLine(routing, postedTo),
+            ...(sameRepo(postedTo, targetRepo) ? {} : { fell_back_to_core: true }),
             mode: "auto-approve",
           };
         }
@@ -465,9 +613,30 @@ export const feedbackTool: ToolDef = categoryTool(
         // NOTE: ctx.elicit is guaranteed defined here because the
         // mode === "interactive" + !ctx.elicit case returned above.
         let elicitResult;
+        // #772: a client that never renders the form still answers, and it
+        // answers instantly. Time the round trip so an auto-decline can be
+        // reported as "no form was shown" instead of being blamed on the user,
+        // who in the reported case never saw anything at all.
+        const elicitStartedAt = Date.now();
+
+        // A second tracker only appears in the form when there actually is
+        // one to choose. With no plugin candidate the schema is exactly what
+        // it always was: a single optional revisions field.
+        const altCandidate = routing?.target === "plugin"
+          ? routing.suggestions.find((s) => s.repo) ?? null
+          : (routing?.suggestions ?? []).find((s) => s.repo) ?? null;
+        const altRepo: GitHubRepo | null =
+          routing?.target === "plugin" ? CORE_REPO : (altCandidate?.repo ?? null);
+        const altLabel =
+          routing?.target === "plugin"
+            ? `${repoSlug(CORE_REPO)} (ue-mcp core)`
+            : altCandidate
+              ? `${repoSlug(altCandidate.repo!)} (${altCandidate.name})`
+              : "";
+
         try {
           elicitResult = await ctx.elicit!({
-            message: buildApprovalMessage(payload, authorPromptLine),
+            message: buildApprovalMessage(payload, authorPromptLine, targetRepo, routing),
             // Radio semantics on `decision` (two-value enum, mutually
             // exclusive by schema). Filling the `revisions` text field is
             // its own choice and takes precedence over `decision` — no
@@ -500,6 +669,25 @@ export const feedbackTool: ToolDef = categoryTool(
                   description:
                     "Leave EMPTY and click Accept to submit the body as shown. Fill in to ask the agent to rewrite the body per these notes — nothing posts until you re-approve the revised body. Click Decline to discard.",
                 },
+                // Tracker override. The body is identical either way — the
+                // routing section states what was matched, not where it
+                // landed — so flipping this cannot change the bytes you
+                // just read.
+                ...(altRepo
+                  ? {
+                      destination: {
+                        type: "string" as const,
+                        title: "Tracker",
+                        description: `Where the issue is filed. Defaults to ${repoSlug(targetRepo)}.`,
+                        enum: [repoSlug(targetRepo), repoSlug(altRepo)],
+                        enumNames: [
+                          `${repoSlug(targetRepo)}${routing?.target === "plugin" ? ` (${routing.candidate?.name})` : " (ue-mcp core)"}`,
+                          altLabel,
+                        ],
+                        default: repoSlug(targetRepo),
+                      },
+                    }
+                  : {}),
               },
             },
           });
@@ -526,9 +714,56 @@ export const feedbackTool: ToolDef = categoryTool(
             ? elicitResult.content.revisions.trim()
             : "";
 
+        // Honour a tracker flip, but only to one of the two repos the form
+        // actually offered. Anything else is ignored and the default stands.
+        const chosen =
+          typeof elicitResult.content?.destination === "string"
+            ? elicitResult.content.destination.trim()
+            : "";
+        if (chosen && altRepo && chosen === repoSlug(altRepo)) {
+          targetRepo = altRepo;
+        }
+
         // form-level Accept = submit. form-level Decline/cancel = discard.
         // Revisions text presence routes to the rewrite path on Accept.
         if (elicitResult.action !== "accept") {
+          // #772: no human reads a form and clicks Decline in under a second.
+          // A response that fast means the client resolved the elicitation
+          // itself without presenting anything, so saying "the user reviewed
+          // the prompt and clicked Decline" is a false statement about someone
+          // who was never asked - and it told the agent not to retry, leaving
+          // no way to submit at all.
+          const elapsedMs = Date.now() - elicitStartedAt;
+          // Overridable so both branches are testable without sleeping, and so
+          // an operator on a slow-but-real client can tune it. 0 disables the
+          // heuristic entirely.
+          const configured = Number(process.env.UE_MCP_ELICIT_MIN_HUMAN_MS);
+          const NoHumanCouldRespondMs = Number.isFinite(configured) && configured >= 0 ? configured : 1000;
+          if (NoHumanCouldRespondMs > 0 && elapsedMs < NoHumanCouldRespondMs) {
+            return directive(
+              [
+                `[FEEDBACK NOT SUBMITTED - NO APPROVAL FORM WAS SHOWN]`,
+                `The MCP client answered "${elicitResult.action}" in ${elapsedMs}ms, which is too fast for a human to have seen a form.`,
+                `Treat this as the client not supporting or not rendering elicitation, NOT as the user refusing.`,
+                ``,
+                `Ask the user directly, in plain text, whether to submit this feedback.`,
+                `Do NOT set autoApprove yourself - that bypasses the approval gate. If the user`,
+                `says yes, they can re-run with it, or fix their client's elicitation support.`,
+              ].join("\n"),
+              {
+                submitted: false,
+                code: "form_not_presented",
+                action: elicitResult.action,
+                elapsedMs,
+              },
+              {
+                kind: "feedback.blocked",
+                requiredActions: ["ask_user_in_text", "do_not_self_approve"],
+                context: { code: "form_not_presented", action: elicitResult.action, elapsedMs },
+              },
+            );
+          }
+
           const reasonCode =
             elicitResult.action === "decline"
               ? "user_declined_form"
@@ -593,9 +828,42 @@ export const feedbackTool: ToolDef = categoryTool(
         const result = await submitFeedback(
           payload.title,
           payload.body,
-          payload.labels,
-          { useBot: useBotForSubmit },
+          labelsForRepo(payload.labels, targetRepo),
+          { useBot: useBotForSubmit, repo: targetRepo },
         );
+
+        if (result.kind === "repo_unavailable") {
+          // The user approved this exact body for this exact tracker and that
+          // tracker said no. Re-aiming it at core without asking would post
+          // content to a place they did not agree to, so hand back the two
+          // honest options instead.
+          const manualUrl = newIssueUrl(targetRepo, payload.title, payload.body);
+          return directive(
+            [
+              `[FEEDBACK APPROVED BUT NOT POSTED - TRACKER REFUSED THE ISSUE]`,
+              `${result.repo} returned HTTP ${result.status}. Issues may be disabled there,`,
+              `or your account cannot open them on that repo.`,
+              ``,
+              `Nothing was posted anywhere. Two options for the user:`,
+              `  1. Open it manually (body prefilled): ${manualUrl}`,
+              `  2. Re-run feedback(submit) with repo="${repoSlug(CORE_REPO)}" to file it on ue-mcp core.`,
+              ``,
+              `Surface both to the user; do not pick for them.`,
+            ].join("\n"),
+            {
+              submitted: false,
+              code: "repo_unavailable",
+              target_repo: result.repo,
+              status: result.status,
+              manual_url: manualUrl,
+            },
+            {
+              kind: "feedback.blocked",
+              requiredActions: ["surface_manual_issue_url_to_user", "offer_core_tracker_fallback"],
+              context: { code: "repo_unavailable", target_repo: result.repo, status: result.status },
+            },
+          );
+        }
 
         if (result.kind === "auth_required") {
           // Should not happen: resolveAuthorship() falls back to bot when
@@ -639,12 +907,71 @@ export const feedbackTool: ToolDef = categoryTool(
         clearWorkarounds();
 
         return {
-          message: `Feedback submitted as ${result.authoredAs === "user" ? `@${result.authoredBy}` : "bot"}`,
+          message: `Feedback submitted to ${repoSlug(targetRepo)} as ${result.authoredAs === "user" ? `@${result.authoredBy}` : "bot"}`,
           issue_url: result.url,
           issue_number: result.number,
           authored_by: result.authoredBy,
           authored_as: result.authoredAs,
-          labels: payload.labels,
+          labels: labelsForRepo(payload.labels, targetRepo),
+          target_repo: repoSlug(targetRepo),
+          routing: routingLine(routing, targetRepo),
+        };
+      },
+    },
+
+    route: {
+      description:
+        "Dry run the tracker routing for a report without posting anything. Returns the repo the issue would be filed against, the matched plugin (if any), and why. Params: title, summary, idealTool?, repo?. Use it when you are unsure whether a gap belongs to ue-mcp core or to an installed/published plugin.",
+      handler: async (ctx: ToolContext, params: Record<string, unknown>) => {
+        const title = (params.title as string | undefined) ?? "";
+        const summary = (params.summary as string | undefined) ?? "";
+        const idealTool = params.idealTool as string | undefined;
+
+        if (routingDisabled()) {
+          return {
+            target: "core",
+            target_repo: repoSlug(CORE_REPO),
+            routing_enabled: false,
+            message: "Routing is disabled (UE_MCP_FEEDBACK_ROUTING). Everything files against ue-mcp core.",
+          };
+        }
+
+        const decision = await routeFeedback({
+          title,
+          summary,
+          idealTool,
+          explicitRepo: params.repo as string | undefined,
+          installed: ctx.getPlugins?.() ?? [],
+        });
+
+        return {
+          target: decision.target,
+          target_repo: repoSlug(decision.repo),
+          confidence: decision.candidate?.confidence ?? null,
+          matched_plugin: decision.candidate
+            ? {
+                name: decision.candidate.name,
+                slug: decision.candidate.slug,
+                package: decision.candidate.packageName,
+                repo: decision.candidate.repo ? repoSlug(decision.candidate.repo) : null,
+                installed: decision.candidate.installed,
+                reasons: decision.candidate.reasons,
+              }
+            : null,
+          suggestions: decision.suggestions.map((s) => ({
+            name: s.name,
+            slug: s.slug,
+            repo: s.repo ? repoSlug(s.repo) : null,
+            confidence: s.confidence,
+            reasons: s.reasons,
+          })),
+          core_anchor: decision.coreAnchor,
+          registry_reachable: decision.catalogAvailable,
+          note: decision.note,
+          message:
+            decision.target === "plugin"
+              ? `This report belongs on ${repoSlug(decision.repo)} (${decision.candidate?.name}). Call feedback(submit) as usual - it routes there on its own.`
+              : `This report belongs on ${repoSlug(CORE_REPO)}.`,
         };
       },
     },
@@ -670,6 +997,12 @@ export const feedbackTool: ToolDef = categoryTool(
       .optional()
       .describe(
         'Who the issue is authored by. "user" (default): credit me — requires a cached GitHub OAuth token. "bot": anonymous as the ue-mcp-feedback bot.',
+      ),
+    repo: z
+      .string()
+      .optional()
+      .describe(
+        'Override the tracker, as "owner/name". Leave it off: submit picks the right repo from the plugin registry on its own. Only ue-mcp core and repos owned by registered plugins are accepted; anything else is ignored and the report files against core.',
       ),
   },
 );

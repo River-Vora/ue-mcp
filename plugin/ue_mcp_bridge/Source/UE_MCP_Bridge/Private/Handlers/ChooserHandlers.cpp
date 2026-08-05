@@ -684,4 +684,6 @@ void FChooserHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("chooser_add_row"), &AddRow);
 	Registry.RegisterHandler(TEXT("chooser_set_row"), &SetRow);
 	Registry.RegisterHandler(TEXT("chooser_delete_row"), &DeleteRow);
+	Registry.RegisterHandler(TEXT("chooser_list_object_references"), &ListObjectReferences);
+	Registry.RegisterHandler(TEXT("chooser_remap_object_references"), &RemapObjectReferences);
 }

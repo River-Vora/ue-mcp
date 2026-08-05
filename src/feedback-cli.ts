@@ -19,6 +19,13 @@ import {
 } from "./feedback-deferred.js";
 import { submitFeedback } from "./github-app.js";
 import {
+  CORE_REPO,
+  newIssueUrl,
+  parseRepoSlug,
+  repoSlug,
+  type GitHubRepo,
+} from "./registry-catalog.js";
+import {
   getFeedbackMode,
   setFeedbackMode,
   getUserStatePath,
@@ -110,13 +117,15 @@ function cmdList(): void {
     "project".length,
     ...entries.map((e) => (e.project ?? "(none)").length),
   );
+  const repoWidth = Math.max("tracker".length, ...entries.map((e) => repoSlug(entryRepo(e)).length));
   console.log(
-    `  ${DIM}${"id".padEnd(idWidth)}  ${"project".padEnd(projWidth)}  ${"author".padEnd(4)}  title${RESET}`,
+    `  ${DIM}${"id".padEnd(idWidth)}  ${"project".padEnd(projWidth)}  ${"tracker".padEnd(repoWidth)}  ${"author".padEnd(4)}  title${RESET}`,
   );
   for (const e of entries) {
     const projLabel = (e.project ?? "(none)").padEnd(projWidth);
+    const repoLabel = repoSlug(entryRepo(e)).padEnd(repoWidth);
     const titlePreview = e.title.length > 70 ? `${e.title.slice(0, 67)}...` : e.title;
-    console.log(`  ${e.id.padEnd(idWidth)}  ${projLabel}  ${e.author.padEnd(4)}  ${titlePreview}`);
+    console.log(`  ${e.id.padEnd(idWidth)}  ${projLabel}  ${repoLabel}  ${e.author.padEnd(4)}  ${titlePreview}`);
   }
   console.log("");
   console.log(`  ${DIM}Approve with: npx ue-mcp feedback approve <id>${RESET}`);
@@ -131,6 +140,8 @@ function renderEntry(entry: DeferredFeedback, header?: string): void {
   console.log(`  ${BOLD}created ${RESET}${entry.createdAt}`);
   console.log(`  ${BOLD}project ${RESET}${entry.project ?? "(none)"}`);
   console.log(`  ${BOLD}author  ${RESET}${entry.author}`);
+  console.log(`  ${BOLD}tracker ${RESET}${repoSlug(entryRepo(entry))}`);
+  if (entry.routing) console.log(`  ${BOLD}routing ${RESET}${DIM}${entry.routing}${RESET}`);
   console.log(`  ${BOLD}labels  ${RESET}${entry.labels.join(", ") || "(none)"}`);
   console.log(`  ${BOLD}title   ${RESET}${entry.title}`);
   console.log("");
@@ -151,15 +162,24 @@ function cmdShow(id: string): void {
 
 /** Outcome an interactive caller needs to distinguish from a bare success. */
 type ApproveOutcome =
-  | { kind: "posted"; number: number; url: string }
+  | { kind: "posted"; number: number; url: string; repo: string }
   | { kind: "auth_required"; verification_uri: string; user_code: string }
+  | { kind: "repo_unavailable"; repo: string; status: number; manualUrl: string }
   | { kind: "error"; message: string };
 
+/** Where a deferred entry goes. Entries written before routing existed carry
+ *  no repo and keep landing on the core tracker. */
+function entryRepo(entry: DeferredFeedback): GitHubRepo {
+  return parseRepoSlug(entry.repo) ?? CORE_REPO;
+}
+
 async function approveEntry(entry: DeferredFeedback): Promise<ApproveOutcome> {
+  const repo = entryRepo(entry);
   let result: Awaited<ReturnType<typeof submitFeedback>>;
   try {
     result = await submitFeedback(entry.title, entry.body, entry.labels, {
       useBot: entry.author === "bot",
+      repo,
     });
   } catch (e) {
     return { kind: "error", message: e instanceof Error ? e.message : String(e) };
@@ -167,8 +187,18 @@ async function approveEntry(entry: DeferredFeedback): Promise<ApproveOutcome> {
   if (result.kind === "auth_required") {
     return { kind: "auth_required", verification_uri: result.verification_uri, user_code: result.user_code };
   }
+  if (result.kind === "repo_unavailable") {
+    // Left on disk on purpose: the report is still valid, it just needs a
+    // different door. The prefilled URL is that door.
+    return {
+      kind: "repo_unavailable",
+      repo: result.repo,
+      status: result.status,
+      manualUrl: newIssueUrl(repo, entry.title, entry.body),
+    };
+  }
   deleteDeferred(entry.id);
-  return { kind: "posted", number: result.number, url: result.url };
+  return { kind: "posted", number: result.number, url: result.url, repo: result.repo };
 }
 
 async function cmdApprove(id: string): Promise<void> {
@@ -178,11 +208,17 @@ async function cmdApprove(id: string): Promise<void> {
     process.exit(1);
   }
   console.log("");
-  info(`Posting ${id} to GitHub as ${entry.author === "bot" ? "ue-mcp-feedback bot" : "your GitHub user"}...`);
+  info(`Posting ${id} to ${repoSlug(entryRepo(entry))} as ${entry.author === "bot" ? "ue-mcp-feedback bot" : "your GitHub user"}...`);
   const outcome = await approveEntry(entry);
   if (outcome.kind === "error") {
     fail(`GitHub POST failed: ${outcome.message}`);
     info(`Entry left on disk; retry with: npx ue-mcp feedback approve ${id}`);
+    process.exit(1);
+  }
+  if (outcome.kind === "repo_unavailable") {
+    warn(`${outcome.repo} would not accept the issue (HTTP ${outcome.status}).`);
+    console.log(`  ${BOLD}Open it manually:${RESET} ${CYAN}${outcome.manualUrl}${RESET}`);
+    info(`Entry left on disk. Discard with: npx ue-mcp feedback discard ${id}`);
     process.exit(1);
   }
   if (outcome.kind === "auth_required") {
@@ -193,7 +229,7 @@ async function cmdApprove(id: string): Promise<void> {
     info(`Or discard with: npx ue-mcp feedback discard ${id}`);
     process.exit(1);
   }
-  ok(`Posted as issue #${outcome.number} (${outcome.url})`);
+  ok(`Posted as ${outcome.repo}#${outcome.number} (${outcome.url})`);
   info(`Removed local entry ${id}.`);
   console.log("");
 }
@@ -256,11 +292,18 @@ async function cmdReview(): Promise<void> {
         continue;
       }
 
-      info(`Posting ${entry.id} to GitHub as ${entry.author === "bot" ? "ue-mcp-feedback bot" : "your GitHub user"}...`);
+      info(`Posting ${entry.id} to ${repoSlug(entryRepo(entry))} as ${entry.author === "bot" ? "ue-mcp-feedback bot" : "your GitHub user"}...`);
       const outcome = await approveEntry(entry);
       if (outcome.kind === "posted") {
-        ok(`Posted as issue #${outcome.number} (${outcome.url})`);
+        ok(`Posted as ${outcome.repo}#${outcome.number} (${outcome.url})`);
         approved++;
+        continue;
+      }
+      if (outcome.kind === "repo_unavailable") {
+        warn(`${outcome.repo} would not accept the issue (HTTP ${outcome.status}).`);
+        console.log(`  ${BOLD}Open it manually:${RESET} ${CYAN}${outcome.manualUrl}${RESET}`);
+        info(`Entry left on disk; continuing with the rest of the queue.`);
+        skipped++;
         continue;
       }
       if (outcome.kind === "auth_required") {

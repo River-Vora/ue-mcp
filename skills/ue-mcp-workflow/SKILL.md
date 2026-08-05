@@ -48,4 +48,4 @@ If no native action covers your case:
 
 1. Try `reflection(action="search_classes"/"search_functions", query=...)` to confirm no UFUNCTION exists.
 2. Use `execute_python` as a last resort.
-3. Consider using `feedback` to open a GitHub issue against `db-lyon/ue-mcp` describing the gap.
+3. Consider using `feedback(action="submit")` to open a GitHub issue describing the gap. It checks the plugin registry and files against whichever tracker owns the surface - `db-lyon/ue-mcp` for core, or the plugin's own repo when the gap is in a plugin-provided category. Run `feedback(action="route")` first if you want to see where it would land without posting.

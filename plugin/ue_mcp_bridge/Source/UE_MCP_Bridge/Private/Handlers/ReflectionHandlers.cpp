@@ -8,6 +8,8 @@
 #include "UObject/UObjectIterator.h"
 #include "Engine/Engine.h"
 #include "Engine/UserDefinedEnum.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #include "Kismet2/EnumEditorUtils.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
@@ -20,6 +22,9 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "JsonSerializer.h"
+#include "JsonObjectConverter.h"
+#include "GameFramework/SaveGame.h"
+#include "Kismet/GameplayStatics.h"
 #include "HAL/PlatformFileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -39,6 +44,7 @@ void FReflectionHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("is_class_loaded"), &IsClassLoaded);
 	Registry.RegisterHandler(TEXT("is_module_loaded"), &IsModuleLoaded);
 	Registry.RegisterHandler(TEXT("list_loaded_modules"), &ListLoadedModules);
+	Registry.RegisterHandler(TEXT("inspect_save_game"), &InspectSaveGame);
 }
 
 // #689: report whether a UClass is currently loaded, and (separately) whether
@@ -129,6 +135,86 @@ TSharedPtr<FJsonValue> FReflectionHandlers::ListLoadedModules(const TSharedPtr<F
 	Result->SetNumberField(TEXT("count"), Out.Num());
 	Result->SetNumberField(TEXT("totalLoaded"), LoadedCount);
 	Result->SetNumberField(TEXT("totalModules"), Statuses.Num());
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FReflectionHandlers::InspectSaveGame(const TSharedPtr<FJsonObject>& Params)
+{
+	MCP_CHECK_GAME_THREAD();
+
+	FString SlotName;
+	if (auto Err = RequireString(Params, TEXT("slotName"), SlotName)) return Err;
+	int32 UserIndex = 0;
+	if (Params->HasField(TEXT("userIndex")))
+	{
+		double RawUserIndex = 0.0;
+		if (!Params->TryGetNumberField(TEXT("userIndex"), RawUserIndex) ||
+			!FMath::IsFinite(RawUserIndex) || RawUserIndex < 0.0 ||
+			RawUserIndex > static_cast<double>(MAX_int32) || FMath::TruncToDouble(RawUserIndex) != RawUserIndex)
+		{
+			return MCPError(TEXT("userIndex must be a non-negative integer"));
+		}
+		UserIndex = static_cast<int32>(RawUserIndex);
+	}
+
+	if (SlotName.Len() > 128 || SlotName != SlotName.TrimStartAndEnd() ||
+		SlotName == TEXT(".") || SlotName == TEXT("..") || SlotName.Contains(TEXT("..")) ||
+		SlotName != FPaths::MakeValidFileName(SlotName))
+	{
+		return MCPError(TEXT("Invalid slotName: use a plain filename without path separators, traversal, or surrounding whitespace"));
+	}
+	if (!UGameplayStatics::DoesSaveGameExist(SlotName, UserIndex))
+	{
+		return MCPError(FString::Printf(TEXT("Save game slot does not exist: %s (userIndex %d)"), *SlotName, UserIndex));
+	}
+
+	USaveGame* SaveGame = UGameplayStatics::LoadGameFromSlot(SlotName, UserIndex);
+	if (!SaveGame)
+	{
+		return MCPError(FString::Printf(TEXT("Failed to load save game slot: %s (userIndex %d)"), *SlotName, UserIndex));
+	}
+
+	TSharedPtr<FJsonObject> Properties = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> Skipped;
+	int32 PropertyCount = 0;
+	for (TFieldIterator<FProperty> It(SaveGame->GetClass(), EFieldIteratorFlags::IncludeSuper); It; ++It)
+	{
+		FProperty* Property = *It;
+		if (!Property || !Property->HasAnyPropertyFlags(CPF_SaveGame) ||
+			Property->HasAnyPropertyFlags(CPF_Transient | CPF_DuplicateTransient))
+		{
+			continue;
+		}
+
+		const void* Value = Property->ContainerPtrToValuePtr<void>(SaveGame);
+		TSharedPtr<FJsonValue> JsonValue = FJsonObjectConverter::UPropertyToJsonValue(
+			Property, Value, 0, CPF_Transient | CPF_DuplicateTransient);
+		// A property type the JSON converter cannot express (delegates, some
+		// container key types) must not abort the whole inspection. Report it
+		// and keep going so the caller still sees every readable value.
+		if (!JsonValue.IsValid())
+		{
+			TSharedPtr<FJsonObject> SkipEntry = MakeShared<FJsonObject>();
+			SkipEntry->SetStringField(TEXT("name"), Property->GetName());
+			SkipEntry->SetStringField(TEXT("type"), Property->GetClass()->GetName());
+			SkipEntry->SetStringField(TEXT("reason"), TEXT("Property type is not JSON-serializable"));
+			Skipped.Add(MakeShared<FJsonValueObject>(SkipEntry));
+			continue;
+		}
+
+		Properties->SetField(Property->GetName(), JsonValue);
+		++PropertyCount;
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("slotName"), SlotName);
+	Result->SetNumberField(TEXT("userIndex"), UserIndex);
+	Result->SetStringField(TEXT("className"), SaveGame->GetClass()->GetName());
+	Result->SetStringField(TEXT("classPath"), SaveGame->GetClass()->GetPathName());
+	Result->SetNumberField(TEXT("propertyCount"), PropertyCount);
+	Result->SetNumberField(TEXT("skippedCount"), Skipped.Num());
+	Result->SetArrayField(TEXT("skippedProperties"), Skipped);
+	Result->SetObjectField(TEXT("properties"), Properties);
 	return MCPResult(Result);
 }
 
@@ -406,6 +492,9 @@ TSharedPtr<FJsonValue> FReflectionHandlers::ReflectStruct(const TSharedPtr<FJson
 	return MCPResult(Result);
 }
 
+// Defined below, next to FindEnum.
+static TArray<FString> SuggestEnumNames(const FString& EnumName, int32 MaxSuggestions = 8);
+
 TSharedPtr<FJsonValue> FReflectionHandlers::ReflectEnum(const TSharedPtr<FJsonObject>& Params)
 {
 	FString EnumName;
@@ -414,11 +503,17 @@ TSharedPtr<FJsonValue> FReflectionHandlers::ReflectEnum(const TSharedPtr<FJsonOb
 	UEnum* Enum = FindEnum(EnumName);
 	if (!Enum)
 	{
-		return MCPError(FString::Printf(TEXT("Enum not found: %s"), *EnumName));
+		const TArray<FString> Suggestions = SuggestEnumNames(EnumName);
+		return MCPError(Suggestions.Num() > 0
+			? FString::Printf(TEXT("Enum not found: %s. Close matches: %s"),
+				*EnumName, *FString::Join(Suggestions, TEXT(", ")))
+			: FString::Printf(TEXT("Enum not found: %s"), *EnumName));
 	}
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("enumName"), Enum->GetName());
+	Result->SetStringField(TEXT("enumPath"), Enum->GetPathName());
+	Result->SetBoolField(TEXT("userDefined"), Enum->IsA<UUserDefinedEnum>());
 	AddIfNonEmpty(Result, TEXT("tooltip"), ReadTooltip(Enum));
 
 	TArray<TSharedPtr<FJsonValue>> ValuesArray;
@@ -664,8 +759,16 @@ UEnum* FReflectionHandlers::FindEnum(const FString& EnumName)
 		return Enum;
 	}
 
-	// Short-name lookup via FindFirstObject (UE 5.6+ replacement). Tries
-	// the caller's spelling, then E-prefixed - the standard UE convention.
+	// #762: project enums were reported "not found" while Python could reach
+	// them. Two gaps: NativeFirst biases the search away from content-defined
+	// enums, and a UUserDefinedEnum that has not been loaded yet is not in the
+	// object graph to find at all. Try the caller's spelling and the
+	// E-prefixed UE convention, unbiased, then fall back to the asset registry
+	// and load the asset before giving up.
+	// NativeFirst FIRST: it is the deterministic tiebreak. Dropping it made a
+	// project enum shadow a native one of the same name in object-hash order,
+	// so reflect_enum could answer differently between editor sessions. Only
+	// widen to an unbiased search once the native lookup has failed.
 	const TArray<FString> Candidates = { EnumName, TEXT("E") + EnumName };
 	for (const FString& Candidate : Candidates)
 	{
@@ -675,8 +778,54 @@ UEnum* FReflectionHandlers::FindEnum(const FString& EnumName)
 			return Enum;
 		}
 	}
+	for (const FString& Candidate : Candidates)
+	{
+		Enum = FindFirstObject<UEnum>(*Candidate, EFindFirstObjectOptions::None);
+		if (Enum)
+		{
+			return Enum;
+		}
+	}
+
+	// Unloaded UUserDefinedEnum assets: resolve through the asset registry and
+	// load, so a Blueprint enum behaves like a native one.
+	if (FModuleManager::Get().IsModuleLoaded(TEXT("AssetRegistry")))
+	{
+		IAssetRegistry& AssetRegistry =
+			FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+		TArray<FAssetData> EnumAssets;
+		AssetRegistry.GetAssetsByClass(UUserDefinedEnum::StaticClass()->GetClassPathName(), EnumAssets, true);
+		for (const FAssetData& Asset : EnumAssets)
+		{
+			const FString AssetName = Asset.AssetName.ToString();
+			if (AssetName == EnumName || AssetName == TEXT("E") + EnumName)
+			{
+				if (UEnum* Loaded = Cast<UEnum>(Asset.GetAsset()))
+				{
+					return Loaded;
+				}
+			}
+		}
+	}
 
 	return nullptr;
+}
+
+/** Enum short names close to a failed lookup, so the error can name alternatives. */
+static TArray<FString> SuggestEnumNames(const FString& EnumName, int32 MaxSuggestions)
+{
+	TArray<FString> Suggestions;
+	const FString Needle = EnumName.ToLower();
+	for (TObjectIterator<UEnum> It; It && Suggestions.Num() < MaxSuggestions; ++It)
+	{
+		if (!*It) continue;
+		const FString Name = It->GetName();
+		if (Name.ToLower().Contains(Needle))
+		{
+			Suggestions.AddUnique(Name);
+		}
+	}
+	return Suggestions;
 }
 
 TSharedPtr<FJsonValue> FReflectionHandlers::SerializeProperty(FProperty* Prop, void* Data)

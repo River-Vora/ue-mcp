@@ -47,8 +47,12 @@ function paramTokens(text) {
     else if (ch === ")") depth = Math.max(0, depth - 1);
     else if (depth === 0) out += ch;
   }
-  // Stop at first sentence-ending dot or "Returns" or "#NNN"
-  out = out.split(/\.\s|Returns|#\d+/)[0];
+  // Stop at first sentence-ending dot or "Returns" or "#NNN". The dot must
+  // also terminate at end-of-string: "Params: assetPath." otherwise kept the
+  // trailing period on the token, which then failed the identifier test below
+  // and silently dropped the last parameter of every description that ends in
+  // a full stop - reported as the doc having an extra param it shares.
+  out = out.split(/\.\s|\.$|Returns|#\d+/)[0];
   // Split on commas and "OR" (for assetPath OR assetPaths)
   const parts = out.split(/[,]/).map(s => s.trim()).filter(Boolean);
   const names = [];

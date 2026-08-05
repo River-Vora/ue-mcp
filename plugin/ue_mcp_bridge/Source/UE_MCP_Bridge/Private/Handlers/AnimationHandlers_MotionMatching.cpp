@@ -382,8 +382,17 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreateMirrorDataTable(const TSharedPt
 
 	Table->RowStruct = FMirrorTableRow::StaticStruct();
 	Table->Skeleton = Skeleton;
-	Table->MirrorAxis = EAxis::X;
-	Table->bMirrorRootMotion = true;
+	// mirrorAxis was accepted and ignored, always producing an X-axis table.
+	// A skeleton authored down Y mirrors to nonsense with no error anywhere.
+	const FString AxisStr = OptionalString(Params, TEXT("mirrorAxis"), TEXT("X")).ToUpper();
+	if      (AxisStr == TEXT("X")) Table->MirrorAxis = EAxis::X;
+	else if (AxisStr == TEXT("Y")) Table->MirrorAxis = EAxis::Y;
+	else if (AxisStr == TEXT("Z")) Table->MirrorAxis = EAxis::Z;
+	else
+	{
+		return MCPError(FString::Printf(TEXT("Unknown mirrorAxis '%s'. Expected X, Y or Z."), *AxisStr));
+	}
+	Table->bMirrorRootMotion = OptionalBool(Params, TEXT("mirrorRootMotion"), true);
 
 	// Build find/replace expressions. Default matches the UE mannequin (_l <-> _r suffix).
 	auto MethodFromString = [](const FString& M) -> EMirrorFindReplaceMethod::Type

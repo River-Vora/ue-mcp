@@ -359,7 +359,11 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AddState(const TSharedPtr<FJsonObject
 		UObject* GraphOuter = SMGraph->GetOuter();
 		if (GraphOuter)
 		{
+#if UE_MCP_HAS_5_7_API
+			if (UObject* Existing = StaticFindObject(nullptr, GraphOuter, *StateName, EFindObjectFlags::None))
+#else
 			if (UObject* Existing = StaticFindObject(nullptr, GraphOuter, *StateName, /*ExactClass*/ false))
+#endif
 			{
 				return MCPError(FString::Printf(
 					TEXT("Cannot create state '%s' - name collides with existing %s in the state machine graph outer. Pick a unique stateName."),
@@ -383,7 +387,11 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AddState(const TSharedPtr<FJsonObject
 	{
 		UObject* GraphOuter = NewState->BoundGraph->GetOuter();
 		const FString DesiredName = StateName;
+#if UE_MCP_HAS_5_7_API
+		if (UObject* Collision = StaticFindObject(nullptr, GraphOuter, *DesiredName, EFindObjectFlags::None))
+#else
 		if (UObject* Collision = StaticFindObject(nullptr, GraphOuter, *DesiredName, /*ExactClass*/ false))
+#endif
 		{
 			if (Collision != NewState->BoundGraph)
 			{
@@ -1274,6 +1282,16 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ReadIKRig(const TSharedPtr<FJsonObjec
 	}
 	Result->SetArrayField(TEXT("retargetChains"), ChainsArray);
 
+	// #766: the retarget root (pelvis) and skeleton root drive how a retargeter
+	// moves the whole character. Omitting them meant a caller inspecting a rig
+	// could not tell whether the root was set at all, and had to open the
+	// editor to find out.
+	Result->SetStringField(TEXT("retargetRoot"), IKRig->GetPelvis().ToString());
+	if (RigSkeleton.BoneNames.Num() > 0)
+	{
+		Result->SetStringField(TEXT("rootBone"), RigSkeleton.BoneNames[0].ToString());
+	}
+
 	// Solvers — enumerate via reflection since GetSolverArray not available in all UE versions
 	TArray<TSharedPtr<FJsonValue>> SolversArray;
 	FProperty* SolversProp = IKRig->GetClass()->FindPropertyByName(TEXT("Solvers"));
@@ -1355,6 +1373,20 @@ TSharedPtr<FJsonValue> FAnimationHandlers::CreateIKRetargeter(const TSharedPtr<F
 			if (Controller)
 			{
 #if UE_MCP_HAS_5_5_API
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7)
+				// #753/#766: the factory creates a retargeter with an EMPTY ops
+				// stack. On 5.7+ the chain mappings live ON the ops, so both
+				// AssignIKRigToAllOps and AutoMapChains below have nothing to
+				// map into and silently no-op - the handler reported
+				// chainsMapped: 0 and produced a retargeter that animates
+				// nothing. The IK Retargeter editor masks this because opening
+				// the asset adds the default ops for you. Install them here so
+				// the native path produces a working retargeter.
+				if (Controller->GetNumRetargetOps() == 0)
+				{
+					Controller->AddDefaultOps();
+				}
+#endif
 				if (!SourceRigPath.IsEmpty())
 				{
 					if (UIKRigDefinition* SrcRig = Cast<UIKRigDefinition>(LoadObject<UObject>(nullptr, *SourceRigPath)))
@@ -1748,7 +1780,14 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ReadPoseSearchDatabase(const TSharedP
 	for (int32 i = 0; i < AssetCount; ++i)
 	{
 #if UE_MCP_HAS_POSESEARCH_DATABASE_ASSET_API
+		// Non-templated accessor from 5.7 on: the templated overload is
+		// deprecated there and reinterpret_casts to the same base type this
+		// code reads through.
+	#if UE_MCP_HAS_5_7_API
+		const FPoseSearchDatabaseAnimationAssetBase* Entry = Database->GetDatabaseAnimationAsset(i);
+	#else
 		const FPoseSearchDatabaseAnimationAssetBase* Entry = Database->GetDatabaseAnimationAsset<FPoseSearchDatabaseAnimationAssetBase>(i);
+	#endif
 		if (!Entry) continue;
 		UObject* AnimationAsset = Entry->GetAnimationAsset();
 #else

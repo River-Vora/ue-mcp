@@ -77,6 +77,13 @@ If the user agrees, call feedback(action="submit") with:
   • pythonWorkaround — the Python code that was used
   • idealTool — what tool/action should handle this natively
 This creates a GitHub issue so the maintainers can add proper support.
+
+Not every gap belongs to ue-mcp core. Plugins (PIE Studio, Perforce, Meshy, ...)
+own their own surfaces and their own trackers. submit checks the plugin registry
+and aims the issue at the owning repo on its own, and the approval prompt lets
+the user change it — do NOT set the repo parameter yourself unless the user
+names a repo. feedback(action="route") answers "where would this land?" without
+posting anything.
 `;
 
 // Compact instructions used when context.strategy = "lean". The per-action
@@ -106,7 +113,9 @@ and run a matching flow with flow(action="run", flowName="<name>") instead of re
 
 ═══ FEEDBACK ═══
 If you had to fall back to editor(action="execute_python") because a native tool could not
-do the job, tell the user when done and offer to feedback(action="submit") the gap.
+do the job, tell the user when done and offer to feedback(action="submit") the gap. submit
+routes the issue to the tracker that owns the surface (core, or the plugin that provides it)
+by checking the plugin registry; feedback(action="route") previews that without posting.
 
 Full mode (every action listed inline) is the default. This lean surface is selected by
 context.strategy: lean in ue-mcp.yml or UE_MCP_CONTEXT_STRATEGY=lean.

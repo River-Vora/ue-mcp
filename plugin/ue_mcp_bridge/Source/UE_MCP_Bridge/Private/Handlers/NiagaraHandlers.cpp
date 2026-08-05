@@ -1,6 +1,9 @@
 #include "NiagaraHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+
+#include "UObject/StrongObjectPtr.h"
+#include "HandlerJsonProperty.h"
 #include "HandlerAssetCreate.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
@@ -272,6 +275,40 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::CreateNiagaraEmitter(const TSharedPtr<F
 	UNiagaraEmitterFactoryNew* Factory = NewObject<UNiagaraEmitterFactoryNew>();
 	FGCRootScope FactoryRoot(Factory);
 
+	// templatePath was documented and never read, so "create an emitter from
+	// this template" silently produced an empty default emitter instead - the
+	// caller only found out when the new emitter did none of what the template
+	// does. The factory's copy path is the same one the content browser's
+	// "create from template" uses.
+	TStrongObjectPtr<UNiagaraEmitter> TemplateGuard;
+	const FString TemplatePath = OptionalString(Params, TEXT("templatePath"));
+	if (TemplatePath.IsEmpty() && OptionalBool(Params, TEXT("inherit"), false))
+	{
+		return MCPError(TEXT("inherit=true needs a templatePath - there is nothing to inherit from otherwise."));
+	}
+	if (!TemplatePath.IsEmpty())
+	{
+		// LoadAssetByPath, not a bare LoadObject: asset(list)/asset(search)
+		// return "/Game/VFX/E_Fire" and only "/Game/VFX/E_Fire.E_Fire" loads,
+		// so the documented path form failed with a misleading type error.
+		UNiagaraEmitter* Template = LoadAssetByPath<UNiagaraEmitter>(TemplatePath);
+		if (!Template)
+		{
+			return MCPError(FString::Printf(
+				TEXT("templatePath did not resolve to a NiagaraEmitter: %s"), *TemplatePath));
+		}
+		// EmitterToCopy is a TWeakObjectPtr and nothing else references a
+		// freshly loaded asset. If it goes stale before FactoryCreateNew runs,
+		// the factory silently falls into its empty-emitter branch and produces
+		// the default asset this parameter exists to avoid.
+		TemplateGuard.Reset(Template);
+		Factory->EmitterToCopy = Template;
+		// Copy rather than inherit: an inherited emitter tracks the template and
+		// refuses local edits to inherited modules, which is not what a caller
+		// asking for a starting point wants, and is not reversible from here.
+		Factory->bUseInheritance = OptionalBool(Params, TEXT("inherit"), false);
+	}
+
 	auto Created = MCPCreateAssetIdempotent<UObject>(Name, PackagePath, OnConflict, TEXT("NiagaraEmitter"), EmitterClass, Factory);
 	if (Created.EarlyReturn) return Created.EarlyReturn;
 
@@ -281,6 +318,11 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::CreateNiagaraEmitter(const TSharedPtr<F
 	MCPSetCreated(Result);
 	Result->SetStringField(TEXT("path"), Created.Asset->GetPathName());
 	Result->SetStringField(TEXT("name"), Name);
+	if (!TemplatePath.IsEmpty())
+	{
+		Result->SetStringField(TEXT("templatePath"), TemplatePath);
+		Result->SetBoolField(TEXT("inherited"), Factory->bUseInheritance);
+	}
 	MCPSetDeleteAssetRollback(Result, Created.Asset->GetPathName());
 	return MCPResult(Result);
 }
@@ -1023,16 +1065,54 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SetRendererProperty(const TSharedPtr<FJ
 	else if (FNumericProperty* NP = CastField<FNumericProperty>(Prop))
 	{
 		if (!Params->TryGetNumberField(TEXT("value"), NumValue)) return MCPError(TEXT("Expected numeric 'value'"));
-		NP->SetFloatingPointPropertyValue(NP->ContainerPtrToValuePtr<void>(R), NumValue);
+		// SetFloatingPointPropertyValue is only implemented for float/double
+		// properties; integer and enum-backed numerics need the integer setter.
+		void* Addr = NP->ContainerPtrToValuePtr<void>(R);
+		if (NP->IsFloatingPoint())
+		{
+			NP->SetFloatingPointPropertyValue(Addr, NumValue);
+		}
+		else
+		{
+			NP->SetIntPropertyValue(Addr, (int64)FMath::RoundToDouble(NumValue));
+		}
 	}
 	else if (FStrProperty* SP = CastField<FStrProperty>(Prop))
 	{
 		if (!Params->TryGetStringField(TEXT("value"), StringValue)) return MCPError(TEXT("Expected string 'value'"));
 		SP->SetPropertyValue(SP->ContainerPtrToValuePtr<void>(R), StringValue);
 	}
+	else if (FObjectPropertyBase* OP = CastField<FObjectPropertyBase>(Prop))
+	{
+		// Object/asset reference (e.g. a sprite renderer's Material): 'value' is
+		// the asset path.
+		if (!Params->TryGetStringField(TEXT("value"), StringValue)) return MCPError(TEXT("Expected string asset path 'value'"));
+		UObject* Asset = UEditorAssetLibrary::LoadAsset(StringValue);
+		if (!Asset) return MCPError(FString::Printf(TEXT("Asset not found: %s"), *StringValue));
+		if (OP->PropertyClass && !Asset->IsA(OP->PropertyClass))
+		{
+			return MCPError(FString::Printf(TEXT("Asset %s is a %s, not a %s"), *StringValue, *Asset->GetClass()->GetName(), *OP->PropertyClass->GetName()));
+		}
+		OP->SetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(R), Asset);
+	}
 	else
 	{
-		return MCPError(FString::Printf(TEXT("Property type not yet supported: %s"), *Prop->GetCPPType()));
+		// #783: every renderer property type that is not bool/number/string/object
+		// used to dead-end here, so authoring stalled on the first struct, enum,
+		// name or array property. Route the rest through the shared recursive
+		// JSON setter (the one behind set_pcg_node_settings and
+		// set_component_property) instead of maintaining a type whitelist.
+		const TSharedPtr<FJsonValue> RawValue = Params->TryGetField(TEXT("value"));
+		if (!RawValue.IsValid())
+		{
+			return MCPError(TEXT("Expected a 'value' for this property"));
+		}
+		FString SetError;
+		if (!MCPJsonProperty::SetJsonOnProperty(Prop, Prop->ContainerPtrToValuePtr<void>(R), RawValue, SetError))
+		{
+			return MCPError(FString::Printf(
+				TEXT("Could not set %s (%s): %s"), *PropertyName, *Prop->GetCPPType(), *SetError));
+		}
 	}
 	R->PostEditChange();
 	Emitter->PostEditChange();
@@ -1315,7 +1395,9 @@ namespace
 		OutErr = FString::Printf(TEXT("unsupported input type '%s' for override-map set"), *T.GetName());
 		return false;
 	}
+
 }
+
 
 TSharedPtr<FJsonValue> FNiagaraHandlers::ListModuleInputs(const TSharedPtr<FJsonObject>& Params)
 {
@@ -1354,15 +1436,94 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::ListModuleInputs(const TSharedPtr<FJson
 			ModObj->SetStringField(TEXT("moduleName"), ModName);
 			ModObj->SetStringField(TEXT("scriptAsset"), FC->FunctionScript ? FC->FunctionScript->GetPathName() : FString());
 
+			// #784: the function-call node's PINS are only the compile-time
+			// switches and enums. The values an author actually sets - Spawn
+			// Rate, Lifetime, Colour, Sprite Size - are module-script inputs
+			// held in the override / rapid-iteration map, so enumerating pins
+			// listed everything except the things worth setting. Use the same
+			// enumeration set_module_input writes through, and read each value
+			// back so the list is discoverable AND verifiable.
 			TArray<TSharedPtr<FJsonValue>> Inputs;
+			{
+				FCompileConstantResolver Resolver(
+					FVersionedNiagaraEmitter(Emitter, Version), UsageOfContext(Slot.Context));
+				TArray<FNiagaraVariable> InputVars;
+				FNiagaraStackGraphUtilities::GetStackFunctionInputs(
+					*FC, InputVars, Resolver,
+					FNiagaraStackGraphUtilities::ENiagaraGetStackFunctionInputPinsOptions::ModuleInputsOnly, false);
+
+				TArray<UNiagaraScript*> Dependents;
+				for (const FScriptSlot& Dep : Scripts)
+				{
+					if (Dep.Script) Dependents.Add(Dep.Script);
+				}
+
+				for (const FNiagaraVariable& Var : InputVars)
+				{
+					const FString FullName = Var.GetName().ToString();
+					FString Head, Leaf;
+					const FString ShortName = FullName.Split(TEXT("."), &Head, &Leaf,
+						ESearchCase::IgnoreCase, ESearchDir::FromEnd) ? Leaf : FullName;
+
+					TSharedPtr<FJsonObject> InObj = MakeShared<FJsonObject>();
+					InObj->SetStringField(TEXT("name"), ShortName);
+					InObj->SetStringField(TEXT("qualifiedName"), FullName);
+					// Two inputs can share a leaf name (Module.Position.X and
+					// Module.Velocity.X both shorten to "X"), and the leaf is
+					// what set_module_input matches on - so flag when the short
+					// name is not uniquely addressable.
+					{
+						int32 SameLeaf = 0;
+						for (const FNiagaraVariable& Other : InputVars)
+						{
+							const FString OtherFull = Other.GetName().ToString();
+							FString OH, OL;
+							const FString OtherShort = OtherFull.Split(TEXT("."), &OH, &OL,
+								ESearchCase::IgnoreCase, ESearchDir::FromEnd) ? OL : OtherFull;
+							if (OtherShort == ShortName) ++SameLeaf;
+						}
+						if (SameLeaf > 1)
+						{
+							InObj->SetBoolField(TEXT("ambiguousShortName"), true);
+							InObj->SetStringField(TEXT("addressAs"), FullName);
+						}
+					}
+					InObj->SetStringField(TEXT("type"), Var.GetType().GetName());
+
+					// Whether set_module_input can bind this input through the
+					// override map. FNiagaraStackFunctionInputBinder::GetData is
+					// not exported from NiagaraEditor, so the current value
+					// cannot be read back from here; the binding check still
+					// tells the caller which inputs are writable, and the name
+					// is what set_module_input takes.
+					FNiagaraStackFunctionInputBinder Binder;
+					FText BindErr;
+					const bool bBound = Emitter && Binder.TryBind(
+						Slot.Script, Dependents, Resolver,
+						Emitter->GetUniqueEmitterName(), FC, FName(*ShortName),
+						TOptional<FNiagaraTypeDefinition>(Var.GetType()), true, BindErr);
+					InObj->SetBoolField(TEXT("settable"), bBound);
+					if (!bBound && !BindErr.IsEmpty())
+					{
+						InObj->SetStringField(TEXT("note"), BindErr.ToString());
+					}
+					Inputs.Add(MakeShared<FJsonValueObject>(InObj));
+				}
+			}
+
+			// Compile-time switch/enum pins, kept separate so the two kinds of
+			// "input" are not conflated the way they used to be.
+			TArray<TSharedPtr<FJsonValue>> SwitchPins;
 			TArray<TSharedPtr<FJsonValue>> Outputs;
 			for (UEdGraphPin* Pin : FC->Pins)
 			{
 				if (!Pin) continue;
-				if (Pin->Direction == EGPD_Input)  Inputs.Add(MakeShared<FJsonValueObject>(PinToJson(Pin)));
+				if (Pin->Direction == EGPD_Input)  SwitchPins.Add(MakeShared<FJsonValueObject>(PinToJson(Pin)));
 				if (Pin->Direction == EGPD_Output) Outputs.Add(MakeShared<FJsonValueObject>(PinToJson(Pin)));
 			}
 			ModObj->SetArrayField(TEXT("inputs"), Inputs);
+			ModObj->SetNumberField(TEXT("inputCount"), Inputs.Num());
+			ModObj->SetArrayField(TEXT("switchPins"), SwitchPins);
 			ModObj->SetArrayField(TEXT("outputs"), Outputs);
 			ModulesArr.Add(MakeShared<FJsonValueObject>(ModObj));
 		}
@@ -1403,6 +1564,7 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SetModuleInput(const TSharedPtr<FJsonOb
 
 	int32 SetCount = 0;
 	FString PrevValue;
+	FString WritePath;
 	FString MatchedContext;
 	TArray<FString> SeenModules;
 	for (const FScriptSlot& Slot : Scripts)
@@ -1455,12 +1617,39 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SetModuleInput(const TSharedPtr<FJsonOb
 					{
 						TArray<uint8> Bytes;
 						FString VErr;
-						if (FillNiagaraValueBytes(Found->GetType(), Value, Bytes, VErr))
+						if (!FillNiagaraValueBytes(Found->GetType(), Value, Bytes, VErr))
+						{
+							// The input WAS found; only the value failed to parse.
+							// Falling through to the pin-default loop below wrote
+							// the unparsed string straight into the pin and still
+							// reported success, and reaching the end reported
+							// "input not found", which sends the caller after the
+							// wrong problem entirely.
+							//
+							// With stackContext=all an earlier context may already
+							// have been written, so returning a bare error here
+							// would report failure for a call that did mutate.
+							// Say so instead of implying nothing happened.
+							return MCPError(FString::Printf(
+								TEXT("Cannot use value '%s' for input '%s' (type %s): %s%s"),
+								*Value, *InputName, *Found->GetType().GetName(), *VErr,
+								SetCount > 0
+									? TEXT(" NOTE: this input was already written in an earlier stack context before the failure - the asset is modified and unsaved; re-set it explicitly or discard the change.")
+									: TEXT("")));
+						}
 						{
 							FC->Modify();
 							Graph->Modify();
 							Binder.SetData(Bytes.GetData(), Bytes.Num());
-							if (SetCount == 0) PrevValue = TEXT("(override)");
+							if (SetCount == 0)
+							{
+								// The binder's value reader is not exported from
+								// NiagaraEditor, so the prior override value cannot be
+								// captured here; say so rather than reporting a
+								// placeholder that looks like a real value (#769).
+								PrevValue = TEXT("(unread: override map)");
+								WritePath = TEXT("overrideMap");
+							}
 							MatchedContext = Slot.Context;
 							++SetCount;
 							FC->MarkNodeRequiresSynchronization(TEXT("MCP_SetModuleInput"), true);
@@ -1476,7 +1665,11 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SetModuleInput(const TSharedPtr<FJsonOb
 				if (!Pin || Pin->Direction != EGPD_Input) continue;
 				if (Pin->PinName.ToString().Equals(InputName, ESearchCase::IgnoreCase))
 				{
-					if (SetCount == 0) PrevValue = Pin->DefaultValue;
+					if (SetCount == 0)
+					{
+						PrevValue = Pin->DefaultValue;
+						WritePath = TEXT("pinDefault");
+					}
 					FC->Modify();
 					Graph->Modify();
 					Pin->Modify();
@@ -1508,9 +1701,22 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::SetModuleInput(const TSharedPtr<FJsonOb
 	Res->SetStringField(TEXT("previousValue"), PrevValue);
 	Res->SetStringField(TEXT("stackContext"), MatchedContext);
 	Res->SetNumberField(TEXT("pinsUpdated"), SetCount);
-	Res->SetStringField(TEXT("note"), TEXT("Writes pin default on the function-call node. Inputs already bound via the stack override map will not observe this change; use the override-map variant in a future patch."));
+	Res->SetStringField(TEXT("writePath"), WritePath);
+	// #769: this note used to claim override-map inputs would not observe the
+	// change, which stopped being true once the binder path landed and led a
+	// caller to conclude a write that HAD applied had silently failed.
+	Res->SetStringField(TEXT("note"), WritePath == TEXT("overrideMap")
+		? TEXT("Written through the stack override map - the same path the Niagara stack editor uses, so the value applies. Reopen the system in the Niagara editor to confirm.")
+		: TEXT("Written as a pin default on the function-call node (this input is not override-map bound). Reopen the system in the Niagara editor to confirm."));
 
-	// Rollback: restore previous pin default
+	// Rollback: only meaningful when we captured a REAL previous value. On the
+	// override-map path previousValue is a placeholder, and emitting a rollback
+	// for it would write the literal text "(unread: override map)" into a
+	// numeric or colour input.
+	if (WritePath == TEXT("overrideMap"))
+	{
+		return MCPResult(Res);
+	}
 	TSharedPtr<FJsonObject> RbPayload = MakeShared<FJsonObject>();
 	RbPayload->SetStringField(TEXT("systemPath"), SystemPath);
 	RbPayload->SetStringField(TEXT("moduleName"), ModuleName);

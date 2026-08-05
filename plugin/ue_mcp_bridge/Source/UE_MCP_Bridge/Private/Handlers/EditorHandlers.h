@@ -140,13 +140,19 @@ private:
 	static TSharedPtr<FJsonValue> Undo(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> Redo(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReloadHandlers(const TSharedPtr<FJsonObject>& Params);
-	static TSharedPtr<FJsonValue> SaveAsset(const TSharedPtr<FJsonObject>& Params);
 	// #378: flush dirty packages and report per-package success/failure
 	static TSharedPtr<FJsonValue> SaveDirty(const TSharedPtr<FJsonObject>& Params);
 	// #340: enumerate currently-dirty content/map packages
 	static TSharedPtr<FJsonValue> ListDirtyPackages(const TSharedPtr<FJsonObject>& Params);
 	// Gracefully close the editor after dirty-package and PIE safety checks.
 	static TSharedPtr<FJsonValue> RequestEditorShutdown(const TSharedPtr<FJsonObject>& Params);
+	// PIE runtime inspection/control (#739/#756/#757/#761/#764/#770/#777/#778).
+	static TSharedPtr<FJsonValue> ListPIEInstances(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> InvokeObjectFunction(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> GetObjectProperties(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ReadBoneTransforms(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> TeleportRuntimeActor(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetMovementMode(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> PieGetRuntimeValue(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> BuildLighting(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> BuildAll(const TSharedPtr<FJsonObject>& Params);
@@ -189,7 +195,6 @@ private:
 	static TSharedPtr<FJsonValue> PieSetPlayerView(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> StageGameInput(const TSharedPtr<FJsonObject>& Params);
 	// #583: repeatedly invoke a parameterless UFUNCTION on an actor at an interval.
-	static TSharedPtr<FJsonValue> InvokeFunctionRepeating(const TSharedPtr<FJsonObject>& Params);
 	// #455: discover BlueprintFunctionLibrary classes (GeometryScript,
 	// Kismet*, AnimationLibrary, user-defined) so invoke_function callers
 	// can find the libraries that expose the ops they want.

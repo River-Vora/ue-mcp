@@ -3,6 +3,7 @@
 #include "HandlerUtils.h"
 #include "VolumeHelpers_Internal.h"
 #include "EditorScriptingUtilities/Public/EditorLevelLibrary.h"
+#include "ScopedTransaction.h"
 #include "Editor.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -151,6 +152,9 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("snap_actor_to_floor"), &SnapActorToFloor);
 	Registry.RegisterHandler(TEXT("delete_actors"), &DeleteActors);
 	Registry.RegisterHandlerWithTimeout(TEXT("delete_exact_labeled_actors_in_levels"), &DeleteExactLabeledActorsInLevels, 300.0f);
+	Registry.RegisterHandler(TEXT("set_actor_folder_path"), &SetActorFolderPath);
+	Registry.RegisterHandler(TEXT("list_actor_descs"), &ListActorDescs);
+	Registry.RegisterHandlerWithTimeout(TEXT("load_actor_descs"), &LoadActorDescs, 300.0f);
 	Registry.RegisterHandler(TEXT("add_actor_tag"), &AddActorTag);
 	Registry.RegisterHandler(TEXT("remove_actor_tag"), &RemoveActorTag);
 	Registry.RegisterHandler(TEXT("set_actor_tags"), &SetActorTags);
@@ -172,7 +176,7 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 TSharedPtr<FJsonValue> FLevelHandlers::GetOutliner(const TSharedPtr<FJsonObject>& Params)
 {
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
 	FString ClassFilter = OptionalString(Params, TEXT("classFilter"));
@@ -240,6 +244,9 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetOutliner(const TSharedPtr<FJsonObject>
 		ActorObj->SetStringField(TEXT("label"), ActorLabel);
 		ActorObj->SetStringField(TEXT("class"), ActorClass);
 		ActorObj->SetStringField(TEXT("path"), Actor->GetPathName());
+		// #767: the outliner folder is what an agent sees in the editor tree,
+		// so report it alongside the label rather than only being able to set it.
+		ActorObj->SetStringField(TEXT("folderPath"), Actor->GetFolderPath().ToString());
 		ActorObj->SetBoolField(TEXT("editorHidden"), bEditorHidden);
 
 		FVector Location = Actor->GetActorLocation();
@@ -350,7 +357,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::PlaceActor(const TSharedPtr<FJsonObject>&
 	// #585: respect world:pie so the actor spawns into the running PIE world
 	// instead of silently landing in the editor world.
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
@@ -475,19 +482,14 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorDetails(const TSharedPtr<FJsonObj
 	}
 
 	// World selection: "editor" (default) or "pie" (#111)
+	// #778: this hand-rolled loop took the FIRST PIE context, i.e. the server,
+	// so pieInstance could not select a client. Use the shared resolver.
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
 	UWorld* World = nullptr;
 	if (WorldScope.Equals(TEXT("pie"), ESearchCase::IgnoreCase) || WorldScope.Equals(TEXT("game"), ESearchCase::IgnoreCase))
 	{
-		for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
-		{
-			if (Ctx.WorldType == EWorldType::PIE || Ctx.WorldType == EWorldType::Game)
-			{
-				World = Ctx.World();
-				break;
-			}
-		}
-		if (!World) return MCPError(TEXT("No PIE/Game world active"));
+		World = ResolveWorldFromParams(Params, *WorldScope);
+		if (!World) return MCPError(TEXT("No PIE/Game world active (or no such pieInstance). See editor(list_pie_instances)."));
 	}
 	else
 	{
@@ -506,6 +508,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorDetails(const TSharedPtr<FJsonObj
 	Result->SetStringField(TEXT("name"), Actor->GetName());
 	Result->SetStringField(TEXT("class"), Actor->GetClass()->GetName());
 	Result->SetStringField(TEXT("path"), Actor->GetPathName());
+	Result->SetStringField(TEXT("folderPath"), Actor->GetFolderPath().ToString());
 
 	FVector Location = Actor->GetActorLocation();
 	TSharedPtr<FJsonObject> LocationObj = MakeShared<FJsonObject>();
@@ -601,7 +604,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentTree(const TSharedPtr<FJsonOb
 	}
 
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World)
 	{
 		return MCPError(FString::Printf(TEXT("World '%s' not available"), *WorldScope));
@@ -810,7 +813,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetRelativeTransform(const TSharedPtr<FJs
 	if (auto Err = RequireStringAlt(Params, TEXT("referenceLabel"), TEXT("reference"), ReferenceLabel)) return Err;
 
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(FString::Printf(TEXT("World '%s' not available"), *WorldScope));
 
 	AActor* TargetActor = FindActorByLabel(World, TargetLabel);
@@ -949,7 +952,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::MoveActor(const TSharedPtr<FJsonObject>& 
 	// resolves and the live actor moves. FindActorByLabelOrName also matches the
 	// runtime instance name PIE shows.
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	AActor* Actor = FindActorByLabelOrName(World, ActorLabel);
@@ -1003,7 +1006,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::AimActorAt(const TSharedPtr<FJsonObject>&
 	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
 
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	AActor* Actor = FindActorByLabel(World, ActorLabel);
@@ -1064,7 +1067,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::NavProjectPoint(const TSharedPtr<FJsonObj
 	const FVector Point = OptionalVec3(Params, TEXT("point"), FVector::ZeroVector);
 
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	UNavigationSystemV1* Nav = UNavigationSystemV1::GetCurrent(World);
@@ -1365,12 +1368,25 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 	FString PropertyName;
 	if (auto Err = RequireString(Params, TEXT("propertyName"), PropertyName)) return Err;
 
-	REQUIRE_EDITOR_WORLD(World);
+	// #763: this was hard-gated to the editor world, so runtime component
+	// writes - setting a movement mode or a gameplay field on a live PIE
+	// component - had no native path at all. Honour world/pieInstance like the
+	// other actor-facing actions.
+	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor")).ToLower();
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
+	if (!World)
+	{
+		return MCPError(WorldScope == TEXT("pie")
+			? TEXT("PIE not running (or no such pieInstance). See editor(list_pie_instances).")
+			: TEXT("Editor world not available"));
+	}
+	const bool bRuntimeWorld = World->IsGameWorld();
 
-	AActor* TargetActor = FindActorByLabel(World, ActorLabel);
+	AActor* TargetActor = FindActorByLabelNameOrPath(World, ActorLabel);
 	if (!TargetActor)
 	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+		return MCPError(FString::Printf(TEXT("Actor not found in the %s world: %s"),
+			bRuntimeWorld ? TEXT("PIE") : TEXT("editor"), *ActorLabel));
 	}
 
 	UActorComponent* TargetComp = FindComponentOnActor(TargetActor, ComponentName);
@@ -1570,7 +1586,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentDetails(const TSharedPtr<FJso
 	TArray<FString> PropFilter = JsonArrayToStringList(PropNamesArr);
 
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
 	AActor* TargetActor = FindActorByLabelNameOrPath(World, ActorLabel);
@@ -1849,7 +1865,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorsByClass(const TSharedPtr<FJsonOb
 	if (auto Err = RequireString(Params, TEXT("className"), ClassName)) return Err;
 
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	// #675: resolve className to an actual UClass so Blueprint subclasses of a
@@ -1917,7 +1933,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorsByComponentClass(const TSharedPt
 	if (auto Err = RequireStringAlt(Params, TEXT("componentClass"), TEXT("className"), ComponentClass)) return Err;
 
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	TArray<TSharedPtr<FJsonValue>> Out;
@@ -1962,7 +1978,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorsByComponentClass(const TSharedPt
 TSharedPtr<FJsonValue> FLevelHandlers::CountActorsByClass(const TSharedPtr<FJsonObject>& Params)
 {
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	const int32 TopN = OptionalInt(Params, TEXT("topN"), 0);
@@ -2013,7 +2029,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::CountActorsByClass(const TSharedPtr<FJson
 TSharedPtr<FJsonValue> FLevelHandlers::GetRVTSummary(const TSharedPtr<FJsonObject>& Params)
 {
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
 	TArray<TSharedPtr<FJsonValue>> VolumesArr;
@@ -2151,7 +2167,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorBounds(const TSharedPtr<FJsonObje
 	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
 
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
 	AActor* Actor = FindActorByLabelNameOrPath(World, ActorLabel);
@@ -2257,7 +2273,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorProperty(const TSharedPtr<FJsonOb
 	const bool bForce = OptionalBool(Params, TEXT("force"), false);
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
 
-	UWorld* World = ResolveWorldScope(WorldScope);
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World)
 	{
 		return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
@@ -2451,20 +2467,16 @@ namespace
 // Params:
 //   actorLabel? (single) OR actorLabels? (string[])
 //   world?: "pie" | "editor" (default: "pie" with editor fallback)
+//   pieInstance?: which PIE world when several are running
 TSharedPtr<FJsonValue> FLevelHandlers::ReadActorMotion(const TSharedPtr<FJsonObject>& Params)
 {
-	FString WorldArg = OptionalString(Params, TEXT("world"), TEXT("pie"));
-	UWorld* TargetWorld = nullptr;
-	auto EditorWorld = []() -> UWorld* { return GEditor ? GEditor->GetEditorWorldContext().World() : nullptr; };
-	if (WorldArg.Equals(TEXT("editor"), ESearchCase::IgnoreCase))
-	{
-		TargetWorld = EditorWorld();
-	}
-	else
-	{
-		TargetWorld = GetPIEWorld();
-		if (!TargetWorld) TargetWorld = EditorWorld();
-	}
+	// Shared resolver so pieInstance selects the client, matching every other
+	// PIE-aware read. Bare GetPIEWorld() always returned the first (server)
+	// context, which reads as success while sampling the wrong actor.
+	// "auto", not "pie": ResolveWorldScope only falls back to the editor world
+	// for "auto", and this action has always documented a PIE-preferred read
+	// that still answers with the editor world when PIE is not running.
+	UWorld* TargetWorld = ResolveWorldFromParams(Params, TEXT("auto"));
 	if (!TargetWorld) return MCPError(TEXT("No world available (editor + PIE both null)"));
 
 	TArray<FString> Labels;
@@ -2996,9 +3008,22 @@ TSharedPtr<FJsonValue> FLevelHandlers::SpawnSkeletalMeshActor(const TSharedPtr<F
 		{
 			if (UAnimSequence* Anim = LoadAssetByPath<UAnimSequence>(AnimPath))
 			{
+				const bool bLoop = OptionalBool(Params, TEXT("loop"), true);
 				Comp->SetAnimationMode(EAnimationMode::AnimationSingleNode);
 				Comp->SetAnimation(Anim);
-				Comp->Play(OptionalBool(Params, TEXT("loop"), true));
+				Comp->Play(bLoop);
+
+				// #766/#790: SetAnimation() only drives the RUNTIME single-node
+				// player. The editable AnimationData struct is what gets
+				// serialised with the level, so without also writing it the
+				// saved map stored AnimToPlay=None and every actor came back in
+				// A-pose after a reload - with no error to explain why.
+				Comp->AnimationData.AnimToPlay = Anim;
+				Comp->AnimationData.bSavedLooping = bLoop;
+				Comp->AnimationData.bSavedPlaying = true;
+				Comp->AnimationData.SavedPosition = 0.0f;
+				Comp->AnimationData.SavedPlayRate = 1.0f;
+				Comp->Modify();
 			}
 		}
 	}
@@ -3019,6 +3044,130 @@ TSharedPtr<FJsonValue> FLevelHandlers::SpawnSkeletalMeshActor(const TSharedPtr<F
 }
 
 // #220: bulk delete actors matching label prefix / class / tag.
+// #767: assign World Outliner folder paths in bulk. Editor-only organisation,
+// so it deliberately does not save the level - the caller decides when to
+// persist. Everything runs inside one transaction so a bulk move is a single
+// undo, and the write is read back per actor instead of being assumed.
+TSharedPtr<FJsonValue> FLevelHandlers::SetActorFolderPath(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
+
+	// An empty folder path is legitimate - it moves actors back to the root -
+	// so the parameter must be PRESENT but may be empty. RequireString rejects
+	// empty strings, which made the documented root-move impossible.
+	if (!Params->HasField(TEXT("folderPath")))
+	{
+		return MCPError(TEXT("Missing required parameter 'folderPath' (pass \"\" to move actors to the root)"));
+	}
+	FString FolderPath = OptionalString(Params, TEXT("folderPath"));
+	FolderPath = FolderPath.TrimStartAndEnd().Replace(TEXT("\\"), TEXT("/"));
+
+	const FString LabelPrefix = OptionalString(Params, TEXT("labelPrefix"));
+	const FString ClassName = OptionalString(Params, TEXT("className"));
+	const FString Tag = OptionalString(Params, TEXT("tag"));
+	const bool bDryRun = OptionalBool(Params, TEXT("dryRun"), false);
+
+	TSet<FString> ExactLabels;
+	const TArray<TSharedPtr<FJsonValue>>* LabelValues = nullptr;
+	if (Params->TryGetArrayField(TEXT("actorLabels"), LabelValues) && LabelValues)
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *LabelValues)
+		{
+			FString Label;
+			if (Value.IsValid() && Value->TryGetString(Label) && !Label.IsEmpty())
+			{
+				ExactLabels.Add(Label);
+			}
+		}
+	}
+
+	if (ExactLabels.Num() == 0 && LabelPrefix.IsEmpty() && ClassName.IsEmpty() && Tag.IsEmpty())
+	{
+		return MCPError(TEXT("Provide at least one filter: actorLabels, labelPrefix, className, or tag"));
+	}
+
+	TArray<AActor*> Matches;
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* A = *It;
+		if (!A) continue;
+		const FString Label = A->GetActorLabel();
+		if (ExactLabels.Num() > 0 && !ExactLabels.Contains(Label)) continue;
+		if (!LabelPrefix.IsEmpty() && !Label.StartsWith(LabelPrefix)) continue;
+		if (!ClassName.IsEmpty() && !A->GetClass()->GetName().Contains(ClassName)) continue;
+		if (!Tag.IsEmpty() && !A->ActorHasTag(FName(*Tag))) continue;
+		Matches.Add(A);
+	}
+
+	// Report labels the caller asked for by name that no actor answers to, so
+	// a typo does not read as "nothing needed moving".
+	TArray<TSharedPtr<FJsonValue>> MissingLabels;
+	if (ExactLabels.Num() > 0)
+	{
+		TSet<FString> Found;
+		for (AActor* A : Matches) Found.Add(A->GetActorLabel());
+		for (const FString& Label : ExactLabels)
+		{
+			if (!Found.Contains(Label)) MissingLabels.Add(MakeShared<FJsonValueString>(Label));
+		}
+	}
+
+	const FName NewFolder(*FolderPath);
+	TArray<TSharedPtr<FJsonValue>> Entries;
+	int32 Changed = 0;
+	int32 Verified = 0;
+
+	auto Apply = [&]()
+	{
+		for (AActor* A : Matches)
+		{
+			const FString Previous = A->GetFolderPath().ToString();
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetStringField(TEXT("label"), A->GetActorLabel());
+			Entry->SetStringField(TEXT("previousFolderPath"), Previous);
+			Entry->SetStringField(TEXT("folderPath"), FolderPath);
+
+			const bool bNeedsChange = Previous != FolderPath;
+			Entry->SetBoolField(TEXT("changed"), bNeedsChange && !bDryRun);
+
+			if (bNeedsChange && !bDryRun)
+			{
+				A->Modify();
+				A->SetFolderPath(NewFolder);
+				++Changed;
+				// Read the value back rather than trusting the setter.
+				const bool bOk = A->GetFolderPath().ToString() == FolderPath;
+				Entry->SetBoolField(TEXT("verified"), bOk);
+				if (bOk) ++Verified;
+			}
+			Entries.Add(MakeShared<FJsonValueObject>(Entry));
+		}
+	};
+
+	if (bDryRun)
+	{
+		Apply();
+	}
+	else
+	{
+		const FScopedTransaction Transaction(
+			FText::FromString(OptionalString(Params, TEXT("transactionLabel"), TEXT("Set actor folder paths"))));
+		Apply();
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetBoolField(TEXT("dryRun"), bDryRun);
+	Result->SetStringField(TEXT("folderPath"), FolderPath);
+	Result->SetNumberField(TEXT("matched"), Matches.Num());
+	Result->SetNumberField(TEXT("changed"), Changed);
+	Result->SetNumberField(TEXT("verified"), Verified);
+	Result->SetArrayField(TEXT("actors"), Entries);
+	Result->SetArrayField(TEXT("missingLabels"), MissingLabels);
+	Result->SetStringField(TEXT("note"),
+		TEXT("Folder paths are editor-only organisation. The level is left dirty and unsaved; save it yourself when ready."));
+	return MCPResult(Result);
+}
+
 TSharedPtr<FJsonValue> FLevelHandlers::DeleteActors(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);

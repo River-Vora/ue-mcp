@@ -101,7 +101,7 @@ The plugin runs a raw WebSocket server on a dedicated thread, dispatches incomin
 
 ### Handler Categories
 
-28 C++ handler groups are registered in `BridgeServer.cpp`. Together they expose <!-- count:actions -->736+<!-- /count --> method names (some of which are aliases mapped onto a smaller number of canonical handlers):
+28 C++ handler groups are registered in `BridgeServer.cpp`. Together they expose <!-- count:actions -->759+<!-- /count --> method names (some of which are aliases mapped onto a smaller number of canonical handlers):
 
 | Handler group | Coverage |
 |---------|----------|
@@ -133,6 +133,17 @@ The plugin runs a raw WebSocket server on a dedicated thread, dispatches incomin
 | DiffHandlers | Semantic Blueprint and asset diffing |
 | ProjectHandlers | Project info, world subsystem queries |
 | DemoHandlers | Neon Shrine demo builder |
+
+### Plugin Modules
+
+The plugin ships two modules, loading at different phases:
+
+| Module | Loading phase | Role |
+|--------|---------------|------|
+| `UE_MCP_BridgeStatus` | `PostConfigInit` | Publishes what the engine is doing (phase, slow-task name and percent, modal dialog, compile counts, game-thread stall) to `Saved/UE_MCP_Bridge/status.json` from a writer thread. Core-only dependencies, so it can load this early. |
+| `UE_MCP_Bridge` | `PostEngineInit` | The WebSocket server, the handler registry, and the Slate/Engine-backed sensors it injects into the status snapshot. |
+
+The split exists because the interesting failures happen before `PostEngineInit`: RHI init, plugin module loading, map load and Python startup all run while a single-module plugin would not yet exist. The status module covers that window; the bridge module upgrades the same snapshot once Slate, the shader compiler and the asset compiler are available.
 
 ### Plugin Dependencies
 
