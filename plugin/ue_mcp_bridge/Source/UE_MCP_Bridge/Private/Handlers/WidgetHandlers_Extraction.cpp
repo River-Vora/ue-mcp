@@ -441,7 +441,10 @@ TSharedPtr<FJsonValue> FWidgetHandlers::ExtractWidgetSubtree(const TSharedPtr<FJ
 		++CopiedBindings;
 	}
 
-#if (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 4) || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8) || ENGINE_MAJOR_VERSION > 5
+	// WidgetVariableNameToGuidMap keeps external references stable when a
+	// widget variable is later renamed. It landed in 5.5, so gate on the
+	// shared macro rather than an ad-hoc version expression.
+#if UE_MCP_HAS_5_5_API
 	for (const FExtractedWidgetPlanEntry& Entry : Plan)
 	{
 		const FName WidgetName(*Entry.DestinationName);
