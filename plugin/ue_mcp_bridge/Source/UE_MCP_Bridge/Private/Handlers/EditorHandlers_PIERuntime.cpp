@@ -552,10 +552,13 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 	// animation assertion usually wants, since it is independent of where the
 	// actor happens to be standing.
 	const bool bComponentSpace = OptionalString(Params, TEXT("space"), TEXT("world")).ToLower() == TEXT("component");
-	const FTransform ComponentToWorld = Mesh->GetComponentTransform();
-	// GetSocketTransform(RTS_Component) first composes through world space.
-	// Build the evaluated component transform directly so non-uniform component
-	// scale cannot leak into a bone-to-bone or socket-to-bone measurement.
+	// GetSocketTransform(RTS_Component) composes socket-local onto the bone's
+	// WORLD transform and only then divides the component transform back out.
+	// Rotation and componentwise scaling do not commute, so a non-uniform
+	// component scale rotates into the socket offset and does not cancel: the
+	// socket lands in the wrong place by exactly that shear. Composing
+	// socket-local onto the bone's component-space transform skips world space
+	// entirely, so the measurement is free of it.
 	auto ResolveComponentTransform = [Mesh](FName Name, FTransform& OutTransform, bool& bOutIsSocket)
 	{
 		FTransform SocketLocalTransform;
@@ -605,20 +608,27 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 	TArray<TSharedPtr<FJsonValue>> Samples;
 	TArray<TSharedPtr<FJsonValue>> Unknown;
 
-	auto AddSample = [&](const FString& Name, bool bIsSocket)
+	// ComponentTransform is the caller-resolved component-space transform for
+	// Name; it is only read for the component-space and relative outputs.
+	auto AddSample = [&](const FString& Name, bool bIsSocket, const FTransform& ComponentTransform)
 	{
-		// GetSocketTransform resolves sockets first, then bones, so one call
-		// covers both; bIsSocket only labels which one answered.
-		const FTransform WorldTransform = Mesh->GetSocketTransform(FName(*Name), RTS_World);
-		FTransform OutputTransform = bComponentSpace
-			? WorldTransform.GetRelativeTransform(ComponentToWorld)
-			: WorldTransform;
+		FTransform OutputTransform;
 		if (bRelative)
 		{
-			FTransform SampleComponent;
-			bool bResolvedAsSocket = false;
-			ResolveComponentTransform(FName(*Name), SampleComponent, bResolvedAsSocket);
-			OutputTransform = SampleComponent.GetRelativeTransform(RelativeToComponent);
+			// Both sides are evaluated component-space transforms, so the delta
+			// never round-trips through the component's world transform.
+			OutputTransform = ComponentTransform.GetRelativeTransform(RelativeToComponent);
+		}
+		else if (bComponentSpace)
+		{
+			OutputTransform = ComponentTransform;
+		}
+		else
+		{
+			// World space is where the engine itself puts anything attached to
+			// this socket, so report exactly what GetSocketTransform resolves.
+			// It covers sockets first, then bones, in one call.
+			OutputTransform = Mesh->GetSocketTransform(FName(*Name), RTS_World);
 		}
 		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
 		Entry->SetStringField(TEXT("name"), Name);
@@ -641,7 +651,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 			}
 			// A socket wins the lookup even when a bone shares its name, so
 			// report isSocket by what actually resolved, not by exclusion.
-			AddSample(Name, bIsSocket);
+			AddSample(Name, bIsSocket, ComponentTransform);
 		}
 	}
 	else
@@ -650,9 +660,15 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 		// dense rig cannot blow up the response.
 		const int32 Limit = FMath::Max(1, OptionalInt(Params, TEXT("limit"), 200));
 		const int32 NumBones = Mesh->GetNumBones();
+		const bool bNeedComponentTransform = bRelative || bComponentSpace;
 		for (int32 i = 0; i < NumBones && Samples.Num() < Limit; ++i)
 		{
-			AddSample(Mesh->GetBoneName(i).ToString(), false);
+			// Index straight off the bone here: these names came from the bone
+			// array, so there is nothing to resolve and no socket to shadow them.
+			const FTransform BoneComponentTransform = bNeedComponentTransform
+				? Mesh->GetBoneTransform(i, FTransform::Identity)
+				: FTransform::Identity;
+			AddSample(Mesh->GetBoneName(i).ToString(), false, BoneComponentTransform);
 		}
 	}
 
