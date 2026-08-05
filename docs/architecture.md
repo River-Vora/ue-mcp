@@ -89,7 +89,7 @@ Editor lifecycle actions (`start_editor`, `stop_editor`, `restart_editor`) do no
 
 A TCP read is a byte-stream event, not a message event, so the bridge treats it as one. Both ends accumulate bytes, decode as many whole WebSocket frames as have arrived, and join continuation frames into one message. Several pipelined requests in a single segment all arrive; a payload split across segments is reassembled rather than dropped.
 
-A single message is bounded at 64 MiB, as is the unparsed receive buffer. Exceeding either closes the connection with WebSocket status `1009` and a reason naming both the size and the limit, which the client repeats verbatim rather than reporting a generic lost connection. A frame stream that stops parsing (reserved bits set, an unknown opcode, a fragmented control frame) closes with `1002`.
+A single message is bounded at 64 MiB, as is the unparsed receive buffer, and so is any single frame's declared length. Exceeding any of them closes the connection with WebSocket status `1009` and a reason naming both the size and the limit, which the client repeats verbatim rather than reporting a generic lost connection. A frame stream that stops parsing (reserved bits set, an unknown opcode, a fragmented control frame, or a client frame sent unmasked, which RFC 6455 forbids) closes with `1002`.
 
 Control frames are answered as the protocol requires: a close frame gets its status code echoed back, a ping gets a pong carrying the same payload. When the editor shuts down with a client attached, the bridge closes with `1001` going away rather than severing the socket.
 

@@ -98,7 +98,7 @@ The bridge closes with a WebSocket status code and a reason, and the client repe
 |------|---------|
 | `1001` | The editor is shutting down |
 | `1002` | The frame stream stopped parsing. The reason names what was wrong |
-| `1009` | A message exceeded the 64 MiB bound. The reason names the size and the limit |
+| `1009` | A message, a frame, or the unparsed receive buffer exceeded the 64 MiB bound. The reason names the size and the limit |
 
 ### stop_editor or restart_editor says no port is published
 
