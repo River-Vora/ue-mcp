@@ -144,6 +144,8 @@ private:
 	static TSharedPtr<FJsonValue> SaveDirty(const TSharedPtr<FJsonObject>& Params);
 	// #340: enumerate currently-dirty content/map packages
 	static TSharedPtr<FJsonValue> ListDirtyPackages(const TSharedPtr<FJsonObject>& Params);
+	// Gracefully close the editor after dirty-package and PIE safety checks.
+	static TSharedPtr<FJsonValue> RequestEditorShutdown(const TSharedPtr<FJsonObject>& Params);
 	// PIE runtime inspection/control (#739/#756/#757/#761/#764/#770/#777/#778).
 	static TSharedPtr<FJsonValue> ListPIEInstances(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> InvokeObjectFunction(const TSharedPtr<FJsonObject>& Params);
