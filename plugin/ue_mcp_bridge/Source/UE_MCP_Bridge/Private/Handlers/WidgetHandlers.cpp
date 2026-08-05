@@ -801,11 +801,22 @@ TSharedPtr<FJsonValue> FWidgetHandlers::RemoveWidget(const TSharedPtr<FJsonObjec
 
 	if (!FoundWidget)
 	{
-		// Idempotent: nothing to delete
+		// Idempotent: nothing to delete. An asset last touched by an older build
+		// can still carry the GUID entry of a widget that is already gone, and
+		// this is the call an agent makes after the compiler complains about
+		// that name, so clear the dead metadata here too (#799).
+		const int32 PrunedOnly = MCPWidgetGuidMap::PruneStale(WidgetBP);
+		if (PrunedOnly > 0)
+		{
+			WidgetBP->MarkPackageDirty();
+			UEditorAssetLibrary::SaveAsset(AssetPath);
+		}
+
 		auto AlreadyResult = MCPSuccess();
 		AlreadyResult->SetBoolField(TEXT("alreadyDeleted"), true);
 		AlreadyResult->SetStringField(TEXT("widgetName"), WidgetName);
 		AlreadyResult->SetStringField(TEXT("assetPath"), AssetPath);
+		AlreadyResult->SetNumberField(TEXT("prunedGuidEntries"), PrunedOnly);
 		return MCPResult(AlreadyResult);
 	}
 
