@@ -47,6 +47,26 @@ describe("classifyWrite", () => {
     expect(r.contentPaths.sort()).toEqual(["/Game/A", "/Game/B"]);
   });
 
+  it("assembles bulk-upsert targets from packagePath + name", () => {
+    const r = classifyWrite("bulk_upsert_data_assets", {
+      items: [
+        { name: "DA_A", packagePath: "/Game/Data/Items", className: "/Script/X.Y" },
+        { name: "DA_B", packagePath: "/Game/Data/Items/", className: "/Script/X.Y" },
+      ],
+    });
+    expect(r.writes).toBe(true);
+    expect(r.contentPaths).toEqual(["/Game/Data/Items/DA_A", "/Game/Data/Items/DA_B"]);
+  });
+
+  it("treats a bulk-upsert dry run as a non-write", () => {
+    const r = classifyWrite("bulk_upsert_data_assets", {
+      dryRun: true,
+      items: [{ name: "DA_A", packagePath: "/Game/Data/Items", className: "/Script/X.Y" }],
+    });
+    expect(r.writes).toBe(false);
+    expect(r.contentPaths).toEqual([]);
+  });
+
   it("is a no-op write when a write verb carries no path param", () => {
     const r = classifyWrite("save_all_dirty", { saveMapPackages: true });
     expect(r.writes).toBe(false);
