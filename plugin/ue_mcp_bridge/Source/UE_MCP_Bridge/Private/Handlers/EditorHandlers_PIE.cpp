@@ -4,6 +4,7 @@
 // stays in EditorHandlers.cpp::RegisterHandlers.
 
 #include "EditorHandlers.h"
+#include "UE_MCP_BridgeModule.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 
@@ -278,10 +279,14 @@ TSharedPtr<FJsonValue> FEditorHandlers::PieControl(const TSharedPtr<FJsonObject>
 					continue;
 				}
 
+				// PIE recompiles every non-data Blueprint that IsPossiblyDirty()
+				// reports, which covers BS_Unknown as well as BS_Dirty. Those
+				// compiles can produce brand new errors after this handler has
+				// already decided what to suppress, so refuse them instead of
+				// arming a bypass that would not cover the result.
 				const bool bWillCompileBecauseDirty =
 					!FBlueprintEditorUtils::IsDataOnlyBlueprint(Blueprint)
-					&& Blueprint->IsPossiblyDirty()
-					&& Blueprint->Status != BS_Unknown;
+					&& Blueprint->IsPossiblyDirty();
 				const bool bErroredLevelBlueprint =
 					FBlueprintEditorUtils::IsLevelScriptBlueprint(Blueprint)
 					&& Blueprint->Status == BS_Error;
@@ -309,14 +314,39 @@ TSharedPtr<FJsonValue> FEditorHandlers::PieControl(const TSharedPtr<FJsonObject>
 				return MCPResult(Blocked);
 			}
 
-			ArmIgnoreBlueprintErrorsForNextPIELaunch(BlueprintsToSuppress);
-			Result->SetBoolField(TEXT("ignoredBlueprintErrors"), true);
+			// Nothing errored: this is an ordinary PIE start. Arming anyway
+			// would hold the single-bypass slot for 30s and claim a launch ran
+			// on broken Blueprints when none exist.
+			const bool bArmed = !BlueprintsToSuppress.IsEmpty();
+			if (bArmed)
+			{
+				ArmIgnoreBlueprintErrorsForNextPIELaunch(BlueprintsToSuppress);
+				UE_LOG(LogMCPBridge, Warning,
+					TEXT("PIE starting with the Blueprint compiler-error prompt suppressed for %d Blueprint(s) (authorization: %s). PIE may run stale or invalid Blueprint bytecode."),
+					BlueprintsToSuppress.Num(), *AuthorizationSource);
+				for (const UBlueprint* Blueprint : BlueprintsToSuppress)
+				{
+					UE_LOG(LogMCPBridge, Warning, TEXT("  suppressed Blueprint error: %s"), *Blueprint->GetPathName());
+				}
+			}
+
+			Result->SetBoolField(TEXT("ignoredBlueprintErrors"), bArmed);
 			Result->SetNumberField(TEXT("ignoredBlueprintErrorCount"), BlueprintsToSuppress.Num());
 			Result->SetStringField(TEXT("authorizationSource"), AuthorizationSource);
 			Result->SetArrayField(TEXT("loadedErroredBlueprints"), ErroredBlueprints);
 			Result->SetStringField(
 				TEXT("warning"),
-				TEXT("PIE may run stale or invalid Blueprint bytecode. Suppressed warning flags are restored after this PIE launch is processed."));
+				bArmed
+					? TEXT("PIE may run stale or invalid Blueprint bytecode. Suppressed warning flags are restored after this PIE launch is processed.")
+					: TEXT("No loaded Blueprint was in an error state, so nothing was suppressed. This was an ordinary PIE start."));
+		}
+		else if (bIgnoreErrorsBypassArmed)
+		{
+			// An earlier bypass never reached PIE (the launch was refused
+			// somewhere else) and its watchdog has not fired yet. Restore the
+			// warning flags now so this ordinary start cannot silently inherit
+			// a suppression nobody authorized it to use.
+			RestoreIgnoreBlueprintErrorsState();
 		}
 
 		FRequestPlaySessionParams SessionParams;
