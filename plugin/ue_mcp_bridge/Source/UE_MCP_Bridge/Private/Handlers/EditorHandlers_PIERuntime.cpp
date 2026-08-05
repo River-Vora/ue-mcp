@@ -605,7 +605,6 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 				OversizedValues.Add(MakeShared<FJsonValueString>(P->GetName()));
 			}
 		}
-		Emitted.Add(P->GetName().ToLower());
 		++Count;
 	}
 	// Name a requested property that does not exist, so a typo is reported
