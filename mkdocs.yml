@@ -60,6 +60,7 @@ nav:
   - Architecture: architecture.md
   - Tool Reference: tool-reference.md
   - Native Tools: native-tools.md
+  - Runtime Widget Inspection: runtime-widget-inspection.md
   - Handler Conventions: handler-conventions.md
   - Flows: flows.md
   - Plugins:

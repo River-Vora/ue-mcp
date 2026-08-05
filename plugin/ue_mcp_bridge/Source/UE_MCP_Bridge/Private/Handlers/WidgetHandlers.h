@@ -41,6 +41,9 @@ private:
 	// Runtime (PIE) widget inspection (#160)
 	static TSharedPtr<FJsonValue> ListRuntimeWidgets(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetRuntimeWidget(const TSharedPtr<FJsonObject>& Params);
+	// Read selected reflected properties from every matching live widget instance.
+	// Unlike GetRuntimeWidget, this never silently selects the first class match.
+	static TSharedPtr<FJsonValue> InspectRuntimeInstances(const TSharedPtr<FJsonObject>& Params);
 	// #161: Runtime delegate inspection
 	static TSharedPtr<FJsonValue> GetRuntimeDelegates(const TSharedPtr<FJsonObject>& Params);
 	// #602: instantiate a WidgetBlueprint into the live PIE viewport.
