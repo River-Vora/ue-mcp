@@ -70,6 +70,9 @@ struct FExtractedWidgetPlanEntry
 	FString DestinationName;
 	FString ParentDestinationName;
 	int32 ChildIndex = INDEX_NONE;
+	/** Set instead of ParentDestinationName when the widget lives in a named slot. */
+	FString NamedSlotHostDestinationName;
+	FName NamedSlotName = NAME_None;
 };
 
 bool ParseDestinationPath(const FString& RequestedPath, FString& OutPackagePath, FString& OutAssetName, FString& OutAssetPath, FString& OutError)
@@ -131,6 +134,40 @@ void BuildPlan(UWidget* SourceRoot, const FString& DestinationRootName, TArray<F
 			AddPlanEntry(Widget, false);
 		}
 	});
+
+	// Named slot content has no UPanelWidget parent, so record its host and
+	// slot separately. Without this the plan describes it as unparented and
+	// the idempotency check cannot tell one slot from another.
+	for (FExtractedWidgetPlanEntry& Entry : OutPlan)
+	{
+		if (Entry.SourceWidget == SourceRoot || !Entry.ParentDestinationName.IsEmpty())
+		{
+			continue;
+		}
+		for (const FExtractedWidgetPlanEntry& HostEntry : OutPlan)
+		{
+			INamedSlotInterface* NamedSlotHost = Cast<INamedSlotInterface>(HostEntry.SourceWidget);
+			if (!NamedSlotHost || HostEntry.SourceWidget == Entry.SourceWidget)
+			{
+				continue;
+			}
+			TArray<FName> SlotNames;
+			NamedSlotHost->GetSlotNames(SlotNames);
+			for (const FName& SlotName : SlotNames)
+			{
+				if (NamedSlotHost->GetContentForSlot(SlotName) == Entry.SourceWidget)
+				{
+					Entry.NamedSlotHostDestinationName = HostEntry.DestinationName;
+					Entry.NamedSlotName = SlotName;
+					break;
+				}
+			}
+			if (!Entry.NamedSlotHostDestinationName.IsEmpty())
+			{
+				break;
+			}
+		}
+	}
 }
 
 TArray<TSharedPtr<FJsonValue>> BuildMappingJson(const TArray<FExtractedWidgetPlanEntry>& Plan)
@@ -147,6 +184,11 @@ TArray<TSharedPtr<FJsonValue>> BuildMappingJson(const TArray<FExtractedWidgetPla
 		{
 			Item->SetStringField(TEXT("parent"), Entry.ParentDestinationName);
 			Item->SetNumberField(TEXT("childIndex"), Entry.ChildIndex);
+		}
+		else if (!Entry.NamedSlotHostDestinationName.IsEmpty())
+		{
+			Item->SetStringField(TEXT("parent"), Entry.NamedSlotHostDestinationName);
+			Item->SetStringField(TEXT("namedSlot"), Entry.NamedSlotName.ToString());
 		}
 		Mapping.Add(MakeShared<FJsonValueObject>(Item));
 	}
@@ -181,6 +223,15 @@ bool DestinationMatchesPlan(UWidgetBlueprint* Destination, const TArray<FExtract
 			UPanelWidget* ExistingParent = Existing->GetParent();
 			if (!ExistingParent || ExistingParent->GetName() != Entry.ParentDestinationName ||
 				ExistingParent->GetChildIndex(Existing) != Entry.ChildIndex)
+			{
+				return false;
+			}
+		}
+		else if (!Entry.NamedSlotHostDestinationName.IsEmpty())
+		{
+			UWidget* ExistingHost = Destination->WidgetTree->FindWidget(FName(*Entry.NamedSlotHostDestinationName));
+			INamedSlotInterface* ExistingNamedSlotHost = Cast<INamedSlotInterface>(ExistingHost);
+			if (!ExistingNamedSlotHost || ExistingNamedSlotHost->GetContentForSlot(Entry.NamedSlotName) != Existing)
 			{
 				return false;
 			}
