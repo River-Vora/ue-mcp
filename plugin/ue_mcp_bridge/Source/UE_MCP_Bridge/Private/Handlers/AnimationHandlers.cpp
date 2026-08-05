@@ -737,6 +737,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AuthorMontagesBatch(const TSharedPtr<
 			!Item->TryGetStringField(TEXT("animSequencePath"), SequencePath) || SequencePath.IsEmpty())
 		{
 			ItemResult->SetBoolField(TEXT("success"), false);
+			ItemResult->SetStringField(TEXT("stage"), TEXT("validate"));
 			ItemResult->SetStringField(TEXT("error"), TEXT("Each item requires non-empty 'name' and 'animSequencePath'"));
 			ItemResults.Add(MakeShared<FJsonValueObject>(ItemResult));
 			++Failed;
@@ -754,10 +755,15 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AuthorMontagesBatch(const TSharedPtr<
 		CreateParams->SetStringField(TEXT("onConflict"), OptionalString(Item, TEXT("onConflict"), TEXT("skip")));
 
 		FString Error;
+		// Which authoring step a failure came from. Every step below writes to
+		// the same montage, so the sub-handler's message alone ("Failed to load
+		// AnimMontage at ...") does not say what the caller got wrong.
+		FString Stage;
 		if (!MontageBatchCallSucceeded(FAnimationHandlers::CreateMontage(CreateParams), Error))
 		{
 			ItemResult->SetBoolField(TEXT("success"), false);
 			ItemResult->SetStringField(TEXT("name"), Name);
+			ItemResult->SetStringField(TEXT("stage"), TEXT("create"));
 			ItemResult->SetStringField(TEXT("error"), Error);
 			ItemResults.Add(MakeShared<FJsonValueObject>(ItemResult));
 			++Failed;
@@ -777,6 +783,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AuthorMontagesBatch(const TSharedPtr<
 				SlotParams->SetNumberField(TEXT("trackIndex"), TrackIndex);
 			}
 			bItemSuccess = MontageBatchCallSucceeded(FAnimationHandlers::SetMontageSlot(SlotParams), Error);
+			if (!bItemSuccess) Stage = TEXT("slot");
 		}
 
 		TSharedPtr<FJsonObject> PropertyParams = MakeShared<FJsonObject>();
@@ -788,6 +795,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AuthorMontagesBatch(const TSharedPtr<
 		if (bItemSuccess && PropertyParams->Values.Num() > 1)
 		{
 			bItemSuccess = MontageBatchCallSucceeded(FAnimationHandlers::SetMontageProperties(PropertyParams), Error);
+			if (!bItemSuccess) Stage = TEXT("properties");
 		}
 
 		const TArray<TSharedPtr<FJsonValue>>* Sections = nullptr;
@@ -800,6 +808,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AuthorMontagesBatch(const TSharedPtr<
 				if (!Section.IsValid() || !Section->TryGetStringField(TEXT("sectionName"), SectionName))
 				{
 					bItemSuccess = false;
+					Stage = TEXT("sections");
 					Error = TEXT("Each section requires 'sectionName'");
 					break;
 				}
@@ -815,6 +824,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AuthorMontagesBatch(const TSharedPtr<
 				if (!MontageBatchCallSucceeded(FAnimationHandlers::AddMontageSection(SectionParams), Error))
 				{
 					bItemSuccess = false;
+					Stage = TEXT("sections");
 					break;
 				}
 			}
@@ -833,6 +843,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AuthorMontagesBatch(const TSharedPtr<
 					!Notify->TryGetNumberField(TEXT("triggerTime"), TriggerTime))
 				{
 					bItemSuccess = false;
+					Stage = TEXT("notifies");
 					Error = TEXT("Each notify requires 'notifyName' and numeric 'triggerTime'");
 					break;
 				}
@@ -853,6 +864,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AuthorMontagesBatch(const TSharedPtr<
 				if (!MontageBatchCallSucceeded(FAnimationHandlers::AddAnimNotify(NotifyParams), Error))
 				{
 					bItemSuccess = false;
+					Stage = TEXT("notifies");
 					break;
 				}
 			}
@@ -861,6 +873,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AuthorMontagesBatch(const TSharedPtr<
 		if (bItemSuccess)
 		{
 			bItemSuccess = SaveMontagePackage(MontagePath, Error);
+			if (!bItemSuccess) Stage = TEXT("save");
 		}
 
 		ItemResult->SetBoolField(TEXT("success"), bItemSuccess);
@@ -870,6 +883,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AuthorMontagesBatch(const TSharedPtr<
 		ItemResult->SetBoolField(TEXT("existed"), bExistedBefore);
 		if (!bItemSuccess)
 		{
+			ItemResult->SetStringField(TEXT("stage"), Stage);
 			ItemResult->SetStringField(TEXT("error"), Error);
 			++Failed;
 		}
