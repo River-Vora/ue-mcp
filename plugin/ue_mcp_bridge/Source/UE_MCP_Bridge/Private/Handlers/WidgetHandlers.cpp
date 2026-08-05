@@ -1240,7 +1240,12 @@ namespace WidgetRuntime_Internal
 		return Result;
 	}
 
-	static FDerivedClipState ResolveAncestorClipState(UWidget* Widget)
+	// Seed lets the caller start from the hosting UUserWidget's clip state, which
+	// is not reachable through GetParent() from a widget-tree root.
+	static FDerivedClipState ResolveAncestorClipState(
+		UWidget* Widget,
+		const FDerivedClipState& Seed = FDerivedClipState(),
+		const FString& PathPrefix = FString())
 	{
 		TArray<UWidget*> Ancestors;
 		for (UPanelWidget* Parent = Widget ? Widget->GetParent() : nullptr; Parent; Parent = Parent->GetParent())
@@ -1248,8 +1253,8 @@ namespace WidgetRuntime_Internal
 			Ancestors.Add(Parent);
 		}
 
-		FDerivedClipState Result;
-		FString AncestorPath;
+		FDerivedClipState Result = Seed;
+		FString AncestorPath = PathPrefix;
 		for (int32 Index = Ancestors.Num() - 1; Index >= 0; --Index)
 		{
 			UWidget* Ancestor = Ancestors[Index];
@@ -1264,9 +1269,9 @@ namespace WidgetRuntime_Internal
 		return Result;
 	}
 
-	static double ResolveAncestorOpacity(UWidget* Widget)
+	static double ResolveAncestorOpacity(UWidget* Widget, double Seed = 1.0)
 	{
-		double Result = 1.0;
+		double Result = Seed;
 		for (UPanelWidget* Parent = Widget ? Widget->GetParent() : nullptr; Parent; Parent = Parent->GetParent())
 		{
 			Result *= Parent->GetRenderOpacity();
@@ -1738,7 +1743,11 @@ TSharedPtr<FJsonValue> FWidgetHandlers::GetRuntimeWidget(const TSharedPtr<FJsonO
 	Result->SetStringField(TEXT("visibility"), VisibilityToString(Found->GetVisibility()));
 	Result->SetBoolField(TEXT("inViewport"), Found->IsInViewport());
 
-	UWidget* ScanRoot = Found;
+	// `tree` stays rooted at the widget-tree root (or the named child) exactly as
+	// before, so existing consumers keep indexing the same node and maxDepth keeps
+	// counting from the same place. The hosting UUserWidget is reported separately
+	// under `host` when layout diagnostics are requested.
+	UWidget* ScanRoot = nullptr;
 	if (!ChildName.IsEmpty())
 	{
 		if (!Found->WidgetTree)
@@ -1763,12 +1772,18 @@ TSharedPtr<FJsonValue> FWidgetHandlers::GetRuntimeWidget(const TSharedPtr<FJsonO
 		}
 		ScanRoot = Target;
 	}
+	else if (Found->WidgetTree)
+	{
+		ScanRoot = Found->WidgetTree->RootWidget;
+	}
 
 	FRuntimeScanContext Ctx;
 	Ctx.bIncludeLayout = bIncludeLayout;
 
 	FString CaptureKey;
 	TOptional<uint64> PreviousFrame;
+	FDerivedClipState HostClip;
+	double HostOpacity = 1.0;
 	if (bIncludeLayout)
 	{
 		Result->SetNumberField(TEXT("instanceId"), Found->GetUniqueID());
@@ -1790,23 +1805,52 @@ TSharedPtr<FJsonValue> FWidgetHandlers::GetRuntimeWidget(const TSharedPtr<FJsonO
 				Ctx.ViewportRect = ViewportWidget->GetCachedGeometry().GetRenderBoundingRect();
 			}
 		}
+
+		// The host UUserWidget is not a UPanelWidget parent, so its geometry,
+		// clipping and opacity are unreachable from the tree root by GetParent().
+		// Capture it once and seed the tree walk with it. Passing MaxDepth as the
+		// starting depth stops the walk after this node, so the subtree is not
+		// duplicated under `host`.
+		TSharedPtr<FJsonObject> HostNode = BuildRuntimeNode(
+			Found,
+			MaxDepth,
+			MaxDepth,
+			Found->GetName(),
+			ResolveAncestorClipState(Found),
+			ResolveAncestorOpacity(Found),
+			Ctx);
+		if (HostNode.IsValid())
+		{
+			Result->SetObjectField(TEXT("host"), HostNode);
+		}
+		HostClip = ResolveClipState(
+			Found,
+			Found->GetName(),
+			Found->GetCachedGeometry(),
+			Found->GetDesiredSize(),
+			ResolveAncestorClipState(Found));
+		HostOpacity = ResolveAncestorOpacity(Found) * Found->GetRenderOpacity();
 	}
 
-	const FString ScanPath =
-		ScanRoot == Found
-			? Found->GetName()
-			: Found->GetName() + TEXT("/") + ScanRoot->GetName();
-	TSharedPtr<FJsonObject> Tree = BuildRuntimeNode(
-		ScanRoot,
-		0,
-		MaxDepth,
-		ScanPath,
-		ResolveAncestorClipState(ScanRoot),
-		ResolveAncestorOpacity(ScanRoot),
-		Ctx);
-	if (Tree.IsValid())
+	if (ScanRoot)
 	{
-		Result->SetObjectField(TEXT("tree"), Tree);
+		const FString ScanPath = Found->GetName() + TEXT("/") + ScanRoot->GetName();
+		TSharedPtr<FJsonObject> Tree = BuildRuntimeNode(
+			ScanRoot,
+			0,
+			MaxDepth,
+			ScanPath,
+			ResolveAncestorClipState(ScanRoot, HostClip, Found->GetName()),
+			ResolveAncestorOpacity(ScanRoot, HostOpacity),
+			Ctx);
+		if (Tree.IsValid())
+		{
+			Result->SetObjectField(TEXT("tree"), Tree);
+		}
+	}
+	else
+	{
+		Result->SetStringField(TEXT("tree"), TEXT("empty"));
 	}
 
 	if (bIncludeLayout)
