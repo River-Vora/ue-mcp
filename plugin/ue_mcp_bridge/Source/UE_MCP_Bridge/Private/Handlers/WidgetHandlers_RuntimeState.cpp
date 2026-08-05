@@ -98,10 +98,15 @@ TSharedPtr<FJsonValue> FWidgetHandlers::InspectRuntimeInstances(const TSharedPtr
 	MCP_CHECK_GAME_THREAD();
 	using namespace WidgetRuntimeState;
 
+	// "auto" (and an explicit editor scope) resolve to the editor world when no
+	// session is running. Editor Utility Widgets live in that world, so without
+	// this guard a query made before PIE started would answer with editor-side
+	// instances and label them with a PIE net mode. Refuse anything that is not
+	// a live play world instead.
 	UWorld* World = ResolveWorldFromParams(Params, TEXT("pie"));
-	if (!World)
+	if (!World || (World->WorldType != EWorldType::PIE && World->WorldType != EWorldType::Game))
 	{
-		return MCPError(TEXT("No requested PIE/Game world is available. Start PIE or select a valid pieInstance."));
+		return MCPError(TEXT("No live PIE/Game world. Runtime widget inspection reads a running session only: start PIE, or pass a pieInstance that exists."));
 	}
 
 	const FString WidgetName = OptionalString(Params, TEXT("widgetName"));
