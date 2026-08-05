@@ -4,6 +4,55 @@
 #include "UObject/PropertyPortFlags.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "GameplayTagContainer.h"
+
+namespace
+{
+	// #820: keys that a JSON object can name directly. Anything else (a struct
+	// key above all) is emitted as a [{key, value}] array instead, because a
+	// JSON field name cannot carry it and its export text does not read back.
+	bool KeyFitsAJsonFieldName(const FProperty* KeyProp)
+	{
+		if (!KeyProp) return false;
+		if (KeyProp->IsA<FStrProperty>() || KeyProp->IsA<FNameProperty>()) return true;
+		if (KeyProp->IsA<FBoolProperty>()) return true;
+		if (KeyProp->IsA<FEnumProperty>()) return true;
+		if (KeyProp->IsA<FNumericProperty>()) return true;
+		if (const FStructProperty* StructProp = CastField<FStructProperty>(KeyProp))
+		{
+			// A tag (or a struct deriving from one) reads and writes as its name.
+			return StructProp->Struct->IsChildOf(FGameplayTag::StaticStruct());
+		}
+		return false;
+	}
+
+	// The JSON object field name for a key value, in the exact form the setter
+	// reads back: a tag as its name, everything else as its plain text.
+	FString KeyToFieldName(const FProperty* KeyProp, const void* KeyAddr)
+	{
+		if (const FStructProperty* StructProp = CastField<FStructProperty>(KeyProp))
+		{
+			if (StructProp->Struct->IsChildOf(FGameplayTag::StaticStruct()))
+			{
+				// The tag lives in the FGameplayTag base at offset 0, so a
+				// struct deriving from it reads the same way. An unset tag is
+				// an empty string, never "None": the setter reads "" back as
+				// the empty tag and would reject "None" as unknown.
+				const FGameplayTag& Tag = *static_cast<const FGameplayTag*>(KeyAddr);
+				return Tag.IsValid() ? Tag.GetTagName().ToString() : FString();
+			}
+		}
+
+		FString Text;
+		KeyProp->ExportTextItem_Direct(Text, KeyAddr, nullptr, nullptr, PPF_None);
+		Text.TrimStartAndEndInline();
+		if (Text.Len() >= 2 && Text.StartsWith(TEXT("\"")) && Text.EndsWith(TEXT("\"")))
+		{
+			Text = Text.Mid(1, Text.Len() - 2);
+		}
+		return Text;
+	}
+}
 
 TSharedPtr<FJsonValue> FMCPJsonSerializer::SerializeValue(const void* Value, FProperty* Property)
 {
@@ -159,6 +208,24 @@ TSharedPtr<FJsonValue> FMCPJsonSerializer::SerializePropertyValue(const void* Va
 		{
 			return SerializeLinearColor(*static_cast<const FLinearColor*>(Value));
 		}
+		else if (StructProp->Struct->IsChildOf(FGameplayTag::StaticStruct()))
+		{
+			// #820: a tag reads back as its name, which is the form the setter
+			// takes. Emitting {TagName: "..."} instead made a read-then-write
+			// round trip go through raw field assignment with no tag lookup.
+			// An unset tag is an empty string, which the setter reads as "clear".
+			const FGameplayTag& Tag = *static_cast<const FGameplayTag*>(Value);
+			return MakeShared<FJsonValueString>(Tag.IsValid() ? Tag.GetTagName().ToString() : FString());
+		}
+		else if (StructProp->Struct->IsChildOf(FGameplayTagContainer::StaticStruct()))
+		{
+			TArray<TSharedPtr<FJsonValue>> Tags;
+			for (const FGameplayTag& Tag : *static_cast<const FGameplayTagContainer*>(Value))
+			{
+				Tags.Add(MakeShared<FJsonValueString>(Tag.GetTagName().ToString()));
+			}
+			return MakeShared<FJsonValueArray>(Tags);
+		}
 		else
 		{
 			// Generic struct: recursively serialize each field (#196, #199)
@@ -176,6 +243,15 @@ TSharedPtr<FJsonValue> FMCPJsonSerializer::SerializePropertyValue(const void* Va
 			return MakeShared<FJsonValueObject>(StructJson);
 		}
 	}
+	// #820: soft references first. FSoftObjectProperty derives from
+	// FObjectPropertyBase, so the hard-reference branch used to claim them and
+	// report null for any target that happened to be unloaded, which turned a
+	// read-then-write round trip into a cleared reference.
+	else if (FSoftObjectProperty* SoftObjProp = CastField<FSoftObjectProperty>(Property))
+	{
+		const FSoftObjectPtr& SoftPtr = SoftObjProp->GetPropertyValue(Value);
+		return MakeShared<FJsonValueString>(SoftPtr.ToString());
+	}
 	else if (FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(Property))
 	{
 		UObject* ObjValue = ObjProp->GetObjectPropertyValue(Value);
@@ -184,11 +260,6 @@ TSharedPtr<FJsonValue> FMCPJsonSerializer::SerializePropertyValue(const void* Va
 			return MakeShared<FJsonValueString>(ObjValue->GetPathName());
 		}
 		return MakeShared<FJsonValueNull>();
-	}
-	else if (FSoftObjectProperty* SoftObjProp = CastField<FSoftObjectProperty>(Property))
-	{
-		const FSoftObjectPtr& SoftPtr = SoftObjProp->GetPropertyValue(Value);
-		return MakeShared<FJsonValueString>(SoftPtr.ToString());
 	}
 	else if (FEnumProperty* EnumProp = CastField<FEnumProperty>(Property))
 	{
@@ -220,6 +291,54 @@ TSharedPtr<FJsonValue> FMCPJsonSerializer::SerializePropertyValue(const void* Va
 			}
 		}
 		return MakeShared<FJsonValueArray>(JsonArray);
+	}
+	else if (FSetProperty* SetProp = CastField<FSetProperty>(Property))
+	{
+		// #820: a set used to fall through to export text, which the setter
+		// then had to re-parse. Emit the array the setter already accepts.
+		TArray<TSharedPtr<FJsonValue>> JsonArray;
+		FScriptSetHelper SetHelper(SetProp, Value);
+		for (FScriptSetHelper::FIterator It = SetHelper.CreateIterator(); It; ++It)
+		{
+			TSharedPtr<FJsonValue> ItemJson = SerializePropertyValue(SetHelper.GetElementPtr(It), SetProp->ElementProp);
+			if (ItemJson.IsValid())
+			{
+				JsonArray.Add(ItemJson);
+			}
+		}
+		return MakeShared<FJsonValueArray>(JsonArray);
+	}
+	else if (FMapProperty* MapProp = CastField<FMapProperty>(Property))
+	{
+		// #820: emit a map in the shape its own setter takes back. Keys that a
+		// JSON field name can carry become an object; everything else, struct
+		// keys above all, becomes a [{key, value}] array. Export text is not an
+		// option here: its pair form does not import back for struct keys, so
+		// copying it into a setter used to empty the destination map.
+		FScriptMapHelper MapHelper(MapProp, Value);
+		const bool bObjectShape = KeyFitsAJsonFieldName(MapProp->KeyProp);
+
+		if (bObjectShape)
+		{
+			TSharedPtr<FJsonObject> MapJson = MakeShared<FJsonObject>();
+			for (FScriptMapHelper::FIterator It = MapHelper.CreateIterator(); It; ++It)
+			{
+				MapJson->SetField(
+					KeyToFieldName(MapProp->KeyProp, MapHelper.GetKeyPtr(It)),
+					SerializePropertyValue(MapHelper.GetValuePtr(It), MapProp->ValueProp));
+			}
+			return MakeShared<FJsonValueObject>(MapJson);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> Pairs;
+		for (FScriptMapHelper::FIterator It = MapHelper.CreateIterator(); It; ++It)
+		{
+			TSharedPtr<FJsonObject> PairJson = MakeShared<FJsonObject>();
+			PairJson->SetField(TEXT("key"), SerializePropertyValue(MapHelper.GetKeyPtr(It), MapProp->KeyProp));
+			PairJson->SetField(TEXT("value"), SerializePropertyValue(MapHelper.GetValuePtr(It), MapProp->ValueProp));
+			Pairs.Add(MakeShared<FJsonValueObject>(PairJson));
+		}
+		return MakeShared<FJsonValueArray>(Pairs);
 	}
 
 	// Fallback: use ExportText for any remaining property types

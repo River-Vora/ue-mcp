@@ -3,7 +3,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { z } from "zod";
 import { categoryTool, bp, type ToolDef } from "../types.js";
-import { deploy, deploySummary, findEngineInstall } from "../deployer.js";
+import { deploy, deploySummary, attach, attachSummary, findEngineInstall } from "../deployer.js";
+import { startEditor, isBridgeReachable } from "../editor-control.js";
 import { resolveConfigPath, findIniFiles, parseIni, buildTagTree } from "../config-parser.js";
 import { parseHeader, collectFiles, findSourceRoots, resolveModuleDir } from "../cpp-parser.js";
 import { readDeployedBridgeApiVersion } from "../plugin/bridge-api.js";
@@ -142,19 +143,43 @@ export const projectTool: ToolDef = categoryTool(
           // matches a flow's name/description, prefer flow(action="run")
           // over composing the sequence by hand. See SERVER_INSTRUCTIONS.
           flows: flows.length > 0 ? flows : undefined,
+          // #817: only beyond one editor, so a single-editor status response
+          // is exactly what it has always been.
+          editors: ctx.sessions && ctx.sessions.size > 1
+            ? ctx.sessions.list().map((s) => s.info(s === ctx.sessions!.active))
+            : undefined,
         };
       },
     },
     set_project: {
       description: "Switch project: moves both path resolution and the editor connection to the new .uproject. Params: projectPath",
       handler: async (ctx, p) => {
+        const projectPath = p.projectPath as string;
+        if (!projectPath) throw new Error("Missing 'projectPath'");
+
+        // #817: with several editors registered, switching this session onto a
+        // project another session already holds would leave two sessions
+        // pointed at one editor. Name the one that already has it instead.
+        const existing = ctx.sessions?.find(projectPath);
+        if (existing && existing !== ctx.session) {
+          throw new Error(
+            `'${existing.name}' is already registered for that project. ` +
+              `Use project(action='use_editor', editorTarget='${existing.name}') to switch to it.`,
+          );
+        }
+
         // switchProject moves the bridge and the path resolver together (#818).
         // Doing it here by hand is what left the socket on the previous
         // project's editor while every path resolved against the new one.
-        const switched = await switchProject(ctx.project, ctx.bridge, p.projectPath as string);
+        const switched = await switchProject(ctx.project, ctx.bridge, projectPath);
+        // Sessions are keyed by project root, so the key has to move with the
+        // project. Without this the session stays addressable only under the
+        // project it just left.
+        const editor = ctx.sessions && ctx.session ? ctx.sessions.rekey(ctx.session) : undefined;
         const result = deploy(ctx.project);
         return {
           success: true,
+          editor: editor?.name,
           projectName: ctx.project.projectName,
           contentDir: ctx.project.contentDir,
           engineAssociation: ctx.project.engineAssociation,
@@ -170,6 +195,113 @@ export const projectTool: ToolDef = categoryTool(
           // nothing can reach the previous project's editor any more.
           editorUnreachable: switched.connectError,
           bridgeSetup: deploySummary(result),
+        };
+      },
+    },
+    list_editors: {
+      description: "List every editor session this server drives: name, project, bridge port, whether the socket is connected, whether anything is answering on that port, and which session untargeted calls fall through to (#817)",
+      handler: async (ctx) => {
+        if (!ctx.sessions) {
+          return {
+            editorCount: 1,
+            activeEditor: null,
+            editors: [{ name: "default", projectPath: ctx.project.projectPath, connected: ctx.bridge.isConnected, active: true }],
+            note: "This server was built without a session registry, so it drives one editor.",
+          };
+        }
+        const active = ctx.sessions.active;
+        const editors = await Promise.all(
+          ctx.sessions.list().map(async (s) => {
+            const info = s.info(s === active);
+            return {
+              ...info,
+              bridgeReachable: await isBridgeReachable(s.bridge.port),
+              pluginBuildStale: s.project.projectPath
+                ? (checkPluginFreshness(s.project.projectPath).stale || undefined)
+                : undefined,
+            };
+          }),
+        );
+        const ambiguous = editors.filter((e) => e.portSharedWith?.length);
+        return {
+          editorCount: editors.length,
+          activeEditor: active.name,
+          editors,
+          targeting: editors.length > 1
+            ? "Pass editor=\"<name>\" on any call to run it in that editor. Untargeted calls run in the active editor."
+            : "One editor: every call runs in it, and no 'editor' parameter is advertised.",
+          warning: ambiguous.length > 0
+            ? `These sessions share a bridge port and cannot be told apart: ${ambiguous.map((e) => e.name).join(", ")}. Give each project its own 'bridge.port' in its ue-mcp.yml, or unset UE_MCP_PORT.`
+            : undefined,
+        };
+      },
+    },
+    use_editor: {
+      description: "Make one editor session the default target for untargeted calls. Does not change the session set and never touches any editor process. Params: editorTarget (session name, project name, or .uproject path) (#817)",
+      handler: async (ctx, p) => {
+        if (!ctx.sessions) throw new Error("This server drives one editor; there is nothing to switch between.");
+        const target = p.editorTarget as string;
+        if (!target) throw new Error("Missing 'editorTarget'");
+        const session = ctx.sessions.use(target);
+        return {
+          success: true,
+          activeEditor: session.name,
+          projectPath: session.project.projectPath,
+          bridgePort: session.bridge.port,
+          editorConnected: session.bridge.isConnected,
+        };
+      },
+    },
+    add_editor: {
+      description: "Register another project as an addressable editor session, with its own bridge connection and port. Optionally launch its editor. Every category then accepts editor=\"<name>\" to run a call there. Params: projectPath, editorName? (defaults to the project name), start? (launch the editor and wait for it to be ready), timeout? (seconds, default 300) (#817)",
+      handler: async (ctx, p) => {
+        if (!ctx.sessions) throw new Error("This server was built without a session registry.");
+        const projectPath = p.projectPath as string;
+        if (!projectPath) throw new Error("Missing 'projectPath'");
+        const before = ctx.sessions.size;
+        const session = ctx.sessions.register({
+          projectPath,
+          name: typeof p.editorName === "string" && p.editorName ? p.editorName : undefined,
+        });
+        const alreadyRegistered = ctx.sessions.size === before;
+
+        const attachResult = attach(session.project);
+        let started: unknown;
+        if (p.start === true) {
+          const timeout = typeof p.timeout === "number" && p.timeout > 0 ? p.timeout : 300;
+          started = await startEditor(session.project, timeout, ctx.onProgress);
+        }
+        try { await session.bridge.connect(); } catch { /* editor may not be running yet */ }
+
+        return {
+          success: true,
+          editor: session.name,
+          alreadyRegistered: alreadyRegistered || undefined,
+          projectName: session.project.projectName,
+          projectPath: session.project.projectPath,
+          bridgePort: session.bridge.port,
+          editorConnected: session.bridge.isConnected,
+          bridgeSetup: attachSummary(attachResult),
+          started,
+          editorCount: ctx.sessions.size,
+          hint: `Call any action with editor="${session.name}" to run it there, or project(action="use_editor", editorTarget="${session.name}") to make it the default.`,
+        };
+      },
+    },
+    drop_editor: {
+      description: "Forget an editor session and close its bridge socket. The editor process is LEFT RUNNING and untouched - this detaches, it does not stop anything (use editor(stop_editor) for that). Params: editorTarget (#817)",
+      handler: async (ctx, p) => {
+        if (!ctx.sessions) throw new Error("This server drives one editor; there is nothing to drop.");
+        const target = p.editorTarget as string;
+        if (!target) throw new Error("Missing 'editorTarget'");
+        const dropped = ctx.sessions.drop(target);
+        return {
+          success: true,
+          dropped: dropped.name,
+          projectPath: dropped.projectPath,
+          editorLeftRunning: true,
+          activeEditor: ctx.sessions.active.name,
+          editorCount: ctx.sessions.size,
         };
       },
     },
@@ -809,7 +941,11 @@ export const projectTool: ToolDef = categoryTool(
   },
   undefined,
   {
-    projectPath: z.string().optional().describe("For set_project: path to .uproject"),
+    projectPath: z.string().optional().describe("For set_project / add_editor: path to .uproject"),
+    editorName: z.string().optional().describe("For add_editor: name to address the new session by (default the project name) (#817)"),
+    editorTarget: z.string().optional().describe("For use_editor / drop_editor: session name, project name, or .uproject path (#817)"),
+    start: z.boolean().optional().describe("For add_editor: launch the editor for that project and wait until it is ready (#817)"),
+    timeout: z.number().optional().describe("For add_editor with start: seconds to wait for readiness (default 300)"),
     configName: z.string().optional().describe("For read_config/set_config: config file name"),
     query: z.string().optional().describe("For search_config/search_cpp: search text"),
     headerPath: z.string().optional().describe("For read_cpp_header: path to .h file"),

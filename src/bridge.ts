@@ -162,6 +162,27 @@ interface PendingRequest {
 }
 
 /**
+ * A call the client stopped waiting for, and the reply that turned up after
+ * (#799). The editor applies and saves a mutation before it answers, so a
+ * timeout says nothing about whether the change landed. Keeping the record
+ * lets the late reply be reconciled and logged instead of dropped on the floor
+ * as an unrecognised message.
+ */
+export interface AbandonedCall {
+  operationId: string;
+  method: string;
+  /** Epoch ms the client gave up waiting. */
+  abandonedAt: number;
+  /** Epoch ms the editor's reply arrived, if it ever did. */
+  answeredAt?: number;
+  result?: unknown;
+  error?: string;
+}
+
+/** How many abandoned calls to remember. Oldest are dropped first. */
+const ABANDONED_HISTORY = 32;
+
+/**
  * How the port the bridge is about to use was chosen.
  *
  * The first three are attributable to the targeted project: the lockfile is
@@ -208,6 +229,7 @@ export interface IBridge {
 export class EditorBridge implements IBridge {
   private ws: WebSocket | null = null;
   private pending = new Map<string, PendingRequest>();
+  private abandoned = new Map<string, AbandonedCall>();
   private reconnectTimer: ReturnType<typeof setInterval> | null = null;
   private connectInFlight: Promise<void> | null = null;
   private idCounter = 0;
@@ -495,11 +517,19 @@ export class EditorBridge implements IBridge {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        if (this.ws === ws) {
-          ws.terminate();
-          this.ws = null;
-        }
-        reject(new McpError(ErrorCode.BRIDGE_TIMEOUT, `Bridge call '${method}' timed out after ${Math.round(timeout / 1000)}s`));
+        // #799: the request was sent, so the editor may have run it to
+        // completion (mutating handlers apply and save the asset before they
+        // answer). The connection is not at fault and is left open, both so
+        // concurrent calls survive and so the late reply can be reconciled.
+        this.rememberAbandoned(id, method);
+        reject(new McpError(
+          ErrorCode.BRIDGE_TIMEOUT,
+          `Bridge call '${method}' timed out after ${Math.round(timeout / 1000)}s. `
+          + `Outcome is unknown: the editor may have already applied and saved this call `
+          + `(operation ${id}). Read the current state back before retrying, and prefer `
+          + `an idempotent retry (pass the same names) so a call that did land is not repeated.`,
+          { outcome: "unknown", operationId: id, method },
+        ));
       }, timeout);
 
       this.pending.set(id, { resolve, reject, timer, method });
@@ -619,12 +649,47 @@ export class EditorBridge implements IBridge {
     });
   }
 
+  /** Record a call the client gave up on, capping the history. */
+  private rememberAbandoned(id: string, method: string): void {
+    this.abandoned.set(id, { operationId: id, method, abandonedAt: Date.now() });
+    while (this.abandoned.size > ABANDONED_HISTORY) {
+      const oldest = this.abandoned.keys().next();
+      if (oldest.done) break;
+      this.abandoned.delete(oldest.value);
+    }
+  }
+
+  /**
+   * Calls this client stopped waiting for, newest last. An entry with
+   * `answeredAt` set is one the editor finished after the timeout, which is
+   * proof the mutation ran (#799).
+   */
+  get abandonedCalls(): AbandonedCall[] {
+    return [...this.abandoned.values()];
+  }
+
   private setupListeners(ws: WebSocket): void {
     ws.on("message", (data) => {
       try {
         const msg = JSON.parse(data.toString()) as BridgeResponse;
         const pending = this.pending.get(msg.id);
-        if (!pending) return;
+        if (!pending) {
+          // A reply to a call that already timed out on this side. Nobody is
+          // waiting for it, but it settles whether that call ran (#799).
+          const abandonedCall = this.abandoned.get(msg.id);
+          if (abandonedCall) {
+            abandonedCall.answeredAt = Date.now();
+            if (msg.error) abandonedCall.error = msg.error.message;
+            else abandonedCall.result = msg.result;
+            warn(
+              "bridge",
+              `editor finished '${abandonedCall.method}' (operation ${msg.id}) `
+              + `${Date.now() - abandonedCall.abandonedAt}ms after the client timed out; `
+              + `the call ${msg.error ? "failed" : "completed"}`,
+            );
+          }
+          return;
+        }
 
         this.pending.delete(msg.id);
         clearTimeout(pending.timer);

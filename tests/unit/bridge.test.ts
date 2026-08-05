@@ -131,10 +131,10 @@ describe("EditorBridge connection handling", () => {
     }
   });
 
-  it("terminates a timed-out socket so the next call can reconnect", async () => {
+  it("keeps the connection after a call times out", async () => {
     const server = await withBridgeServer((request, socket) => {
       if (request.method === "hang") return;
-      socket.send(JSON.stringify({ id: request.id, result: "reconnected" }));
+      socket.send(JSON.stringify({ id: request.id, result: "still here" }));
     });
 
     const { EditorBridge } = await import("../../src/bridge.js");
@@ -142,10 +142,61 @@ describe("EditorBridge connection handling", () => {
 
     try {
       await expect(bridge.call("hang", {}, 50)).rejects.toThrow("timed out");
-      expect(bridge.isConnected).toBe(false);
+      // A slow editor is not a broken connection: tearing the socket down would
+      // take every concurrent call with it and lose the late reply (#799).
+      expect(bridge.isConnected).toBe(true);
 
-      await expect(bridge.call("ping", {}, 1000)).resolves.toBe("reconnected");
-      expect(server.connectionCount()).toBe(2);
+      await expect(bridge.call("ping", {}, 1000)).resolves.toBe("still here");
+      expect(server.connectionCount()).toBe(1);
+    } finally {
+      bridge.disconnect();
+      await server.close();
+    }
+  });
+
+  it("reports a timed-out call as an unknown outcome, not a failure", async () => {
+    const server = await withBridgeServer(() => {});
+
+    const { EditorBridge } = await import("../../src/bridge.js");
+    const { McpError, ErrorCode } = await import("../../src/errors.js");
+    const bridge = new EditorBridge("127.0.0.1", server.port);
+
+    try {
+      const error = await bridge.call("add_widget", {}, 50).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(McpError);
+      const mcpError = error as InstanceType<typeof McpError>;
+      expect(mcpError.code).toBe(ErrorCode.BRIDGE_TIMEOUT);
+      expect(mcpError.details?.outcome).toBe("unknown");
+      expect(mcpError.details?.method).toBe("add_widget");
+      expect(mcpError.details?.operationId).toBeTruthy();
+      expect(mcpError.message).toContain("may have already applied");
+    } finally {
+      bridge.disconnect();
+      await server.close();
+    }
+  });
+
+  it("reconciles a reply that arrives after the client gave up", async () => {
+    let held: { id: unknown; socket: import("ws").WebSocket } | null = null;
+    const server = await withBridgeServer((request, socket) => {
+      held = { id: request.id, socket };
+    });
+
+    const { EditorBridge } = await import("../../src/bridge.js");
+    const bridge = new EditorBridge("127.0.0.1", server.port);
+
+    try {
+      await expect(bridge.call("add_widget", {}, 50)).rejects.toThrow("timed out");
+
+      const pendingCall = held as unknown as { id: unknown; socket: import("ws").WebSocket };
+      pendingCall.socket.send(JSON.stringify({ id: pendingCall.id, result: { created: true } }));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const [abandoned] = bridge.abandonedCalls;
+      expect(abandoned.method).toBe("add_widget");
+      expect(abandoned.answeredAt).toBeTypeOf("number");
+      expect(abandoned.result).toEqual({ created: true });
     } finally {
       bridge.disconnect();
       await server.close();

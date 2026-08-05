@@ -78,6 +78,31 @@ launching 0s -> loading modules and plugins 0.8s -> config init 1.8s
 
 There is no reason to poll after it returns, and no reason to poll while it runs.
 
+### A call timed out - did it happen or not?
+
+**Symptom:** a mutating call such as `widget(add_widget)` returns `timed out after 30s`, and reading the asset back shows the change is already there and saved.
+
+It happened. A handler applies the mutation, compiles, and saves the asset before it sends its reply, so a client-side timeout only says the reply did not arrive in time. It says nothing about whether the work ran.
+
+The timeout error names this explicitly:
+
+```
+Bridge call 'add_widget' timed out after 30s. Outcome is unknown: the editor may
+have already applied and saved this call (operation 12). Read the current state
+back before retrying, and prefer an idempotent retry (pass the same names) so a
+call that did land is not repeated.
+```
+
+A `MACHINE_ERROR` block carries the same thing structurally: `{"code":"BRIDGE_TIMEOUT","outcome":"unknown","operationId":"12","method":"add_widget"}`. Treat `outcome: "unknown"` as "verify, then retry", never as "failed".
+
+What to do:
+
+1. **Read the state back** (`widget(read_tree)`, `asset(get_details)`, `level(get_outliner)`) before deciding anything.
+2. **Retry idempotently.** Pass the same names you passed the first time. `widget(add_widget)` is idempotent by `assetPath` + `widgetName`: a retry that finds the widget already there returns `existed: true` instead of adding a second one. Omitting `widgetName` gives up that protection, because there is then nothing to match a replay against.
+3. **Check the server log** for the late reply. The connection is kept open through a timeout, so when the editor finally answers, the client logs `editor finished 'add_widget' (operation 12) 41000ms after the client timed out; the call completed`. That line is the definitive answer for that operation id.
+
+The usual cause of the wait is the asset being open in its editor: a Widget Blueprint open in the UMG designer makes every compile far more expensive. `widget(add_widget)` and `widget(remove_widget)` allow 120s for that reason. Closing the asset tab, or using `editor(get_engine_state)` to see what the game thread is doing, covers the rest.
+
 ### The tool call sits there showing nothing while the editor starts
 
 **Symptom:** `start_editor` displays as a motionless line - `ue-mcp - editor (MCP)(action: "start_editor", timeout: 600)` - for the whole launch, with no progress.
@@ -111,6 +136,16 @@ The editor publishes that file while its bridge is listening and removes it on a
 3. **A previous editor was killed rather than closed.** Its lockfile is still on disk naming a PID that has gone. Delete `<project>/Saved/UE_MCP_Bridge/port.json` and the message clears.
 
 `start_editor` refusing with "Editor is already running for this project" is the same targeting rule from the other side: it names the PID, and that PID has this project's `.uproject` on its command line. Editors for other projects and headless shards never trigger it.
+
+### A call ran in the wrong editor
+
+Only possible with more than one editor session registered. Start with `project(action="list_editors")`: it reports every session, the bridge port each resolved to, and which one untargeted calls fall through to.
+
+- **The call had no target.** Untargeted calls run in the active session. Pass `editor="<name>"` on the call, or move the default with `project(action="use_editor", editorTarget="<name>")`.
+- **The `editor` parameter is not advertised.** It appears only while more than one session is registered. Add the other project with `project(action="add_editor", projectPath="...")`, or list both `.uproject` paths in your MCP client config.
+- **Two sessions on one port.** `list_editors` reports it as `portSharedWith`. It happens when two projects pin the same `bridge.port`, or when a global `UE_MCP_PORT` overrides both, and it means the editor answering there cannot be attributed to either project. Give each project its own port, or unset the variable, then restart the server.
+
+Lifecycle actions are not affected by the last case: they resolve through the addressed project's own lockfile and the PID it names, and refuse rather than guess.
 
 ## Plugin Build Issues
 
@@ -152,7 +187,7 @@ If the editor starts but the bridge doesn't appear in the Output Log:
 - **"Bridge not connected"** — the editor isn't running or the plugin isn't loaded. See connection issues above.
 - **"Handler not found"** — the action name might be wrong. Check the [Tool Reference](tool-reference.md) for valid action names.
 - **"Asset not found"** — asset paths should use the `/Game/` prefix (e.g., `/Game/Blueprints/BP_Player`), not filesystem paths.
-- **Timeout** — the default timeout is 30 seconds. Long operations (build lighting, cook content) may need patience.
+- **Timeout** - the default timeout is 30 seconds, and some actions set their own (`widget(add_widget)` allows 120s, project builds 300s). A timeout is not a failed call: see [A call timed out - did it happen or not?](#a-call-timed-out-did-it-happen-or-not) before retrying.
 
 ## Asset Path Issues
 
@@ -241,6 +276,27 @@ If `--build` reports success but the behavior still persists, force a clean rebu
 1. Delete `<Project>/Plugins/UE_MCP_Bridge/Binaries/` and `<Project>/Plugins/UE_MCP_Bridge/Intermediate/`.
 2. Delete any `*.patch_*.{dll,pdb,lib,exp}` under `<Project>/Binaries/Win64/`.
 3. Run `ue-mcp update --build` again, then restart the editor.
+
+## Widget Blueprint Says a Variable Was Deleted but Still Has a GUID
+
+**Symptom:** compiling a Widget Blueprint raises an ensure in the editor log, and it comes back on every later compile:
+
+```
+Ensure condition failed: SeenVariableNames.Contains(It.Key())
+Variable [TaskbarContent] was deleted but still has a GUID referenced by WidgetBlueprint [WBP_ComputerTaskbar]
+```
+
+A Widget Blueprint keeps a map of widget variable names to GUIDs so references survive a rename, and the compiler checks it both ways: every widget needs a GUID, and every GUID needs a widget behind it. An entry left behind by a widget that is gone breaks the second check, and name lookups keep resolving through the dead key.
+
+`widget(add_widget)`, `widget(remove_widget)`, `widget(set_root)` and `widget(wrap_root)` now prune that map on both sides of the compile, so this cannot accumulate.
+
+To repair an asset that already carries a dead entry, call `remove_widget` with the name from the ensure message:
+
+```
+widget(action="remove_widget", assetPath="/Game/UI/WBP_ComputerTaskbar", widgetName="TaskbarContent")
+```
+
+The widget is already gone, so the call reports `alreadyDeleted: true`, drops the dead entries, and saves. `prunedGuidEntries` in the result says how many it removed; `0` means the map was already clean and nothing was written.
 
 ## Search Not Finding Assets
 
