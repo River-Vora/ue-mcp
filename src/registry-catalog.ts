@@ -48,6 +48,21 @@ export function registryBase(): string {
   return (process.env.UE_MCP_REGISTRY ?? "https://plugins.ue-mcp.com").replace(/\/+$/, "");
 }
 
+/**
+ * Origin of the anonymous feedback signing service.
+ *
+ * Separate from the registry on purpose. Feedback about ue-mcp core has nothing
+ * to do with the plugin catalog, and addressing it through the catalog's
+ * hostname tied two unrelated surfaces together. Both names happen to be served
+ * by the same deployment today, which is an operational detail, not a contract.
+ *
+ * `UE_MCP_FEEDBACK` overrides the origin; `UE_MCP_FEEDBACK_ENDPOINT` (read in
+ * src/github-app.ts) overrides the full URL when the path differs too.
+ */
+export function feedbackBase(): string {
+  return (process.env.UE_MCP_FEEDBACK ?? "https://feedback.ue-mcp.com").replace(/\/+$/, "");
+}
+
 /** `https://github.com/db-lyon/pie-studio(.git)` -> `{owner, repo}`. */
 export function parseGitHubRepo(url: string | null | undefined): GitHubRepo | null {
   if (!url) return null;
