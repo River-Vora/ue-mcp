@@ -64,7 +64,6 @@ void FWidgetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("create_widget_blueprint"), &CreateWidgetBlueprint);
 	Registry.RegisterHandler(TEXT("read_widget_tree"), &ReadWidgetTree);
 	Registry.RegisterHandler(TEXT("extract_widget_subtree"), &ExtractWidgetSubtree);
-	Registry.RegisterHandler(TEXT("widget.extract_subtree"), &ExtractWidgetSubtree);
 	Registry.RegisterHandler(TEXT("create_editor_utility_widget"), &CreateEditorUtilityWidget);
 	Registry.RegisterHandler(TEXT("create_editor_utility_blueprint"), &CreateEditorUtilityBlueprint);
 	Registry.RegisterHandler(TEXT("get_widget_details"), &GetWidgetProperties);

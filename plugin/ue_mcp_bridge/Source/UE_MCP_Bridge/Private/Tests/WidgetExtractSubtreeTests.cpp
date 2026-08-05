@@ -15,7 +15,6 @@ bool FWidgetExtractSubtreeRegistrationTest::RunTest(const FString& Parameters)
 	FWidgetHandlers::RegisterHandlers(Registry);
 
 	TestTrue(TEXT("canonical handler is registered"), Registry.HasHandler(TEXT("extract_widget_subtree")));
-	TestTrue(TEXT("dotted bridge alias is registered"), Registry.HasHandler(TEXT("widget.extract_subtree")));
 
 	const TSharedPtr<FJsonValue> Response = Registry.ExecuteHandler(
 		TEXT("extract_widget_subtree"), MakeShared<FJsonObject>());
