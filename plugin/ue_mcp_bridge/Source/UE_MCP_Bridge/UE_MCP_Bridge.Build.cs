@@ -2,8 +2,10 @@ using UnrealBuildTool;
 
 public class UE_MCP_Bridge : ModuleRules
 {
-	// Touched when Private/EngineStatus.cpp was added: UBT caches the module's
-	// file list and will not pick up a new .cpp until this file changes.
+	// Touched when Private/EngineStatus.cpp was added, and again for
+	// Private/Handlers/WidgetHandlers_Extraction.cpp plus the first file under
+	// Private/Tests: UBT caches the module's file list and will not pick up a
+	// new .cpp until this file changes.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;

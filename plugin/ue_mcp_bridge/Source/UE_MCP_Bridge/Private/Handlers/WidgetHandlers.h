@@ -13,6 +13,10 @@ private:
 	static TSharedPtr<FJsonValue> ListWidgetBlueprints(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadWidgetTree(const TSharedPtr<FJsonObject>& Params);
+	// Extract an authored designer subtree into a new or empty WidgetBlueprint.
+	// The implementation uses UMG's clipboard serializer so editable widget
+	// properties, hierarchy, and internal panel slot data stay intact.
+	static TSharedPtr<FJsonValue> ExtractWidgetSubtree(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreateEditorUtilityWidget(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreateEditorUtilityBlueprint(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetWidgetProperties(const TSharedPtr<FJsonObject>& Params);
