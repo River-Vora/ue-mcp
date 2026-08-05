@@ -1571,7 +1571,19 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScreenshot(const TSharedPtr<FJson
 				TEXT("Synchronous selected PIE game-viewport capture including UMG/Slate UI."));
 			if (CaptureResult.IsValid() && CaptureResult->Type == EJson::Object)
 			{
-				CaptureResult->AsObject()->SetBoolField(TEXT("includesDebugCanvas"), true);
+				// The capture is the game viewport's composited output, which is
+				// where AddOnScreenDebugMessage draws. That overlay exists only
+				// while the engine is drawing on-screen messages at all, so read
+				// the flags instead of advertising the canvas unconditionally.
+				const bool bDebugCanvas = GEngine->bEnableOnScreenDebugMessages
+					&& GEngine->bEnableOnScreenDebugMessagesDisplay;
+				CaptureResult->AsObject()->SetBoolField(TEXT("includesDebugCanvas"), bDebugCanvas);
+				if (!bDebugCanvas)
+				{
+					CaptureResult->AsObject()->SetStringField(
+						TEXT("debugCanvasNote"),
+						TEXT("On-screen debug messages are disabled on GEngine, so AddOnScreenDebugMessage overlays are not drawn into this capture."));
+				}
 			}
 			return CaptureResult;
 		}
