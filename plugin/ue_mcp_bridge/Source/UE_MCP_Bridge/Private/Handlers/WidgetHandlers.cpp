@@ -2,6 +2,7 @@
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 #include "HandlerAssetCreate.h"
+#include <type_traits>
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
@@ -465,6 +466,127 @@ static UClass* ResolveWidgetClass(const FString& ClassName)
 	return nullptr;
 }
 
+// ── Widget variable GUID metadata (#728, #799) ───────────────────────────────
+// UWidgetBlueprint keeps a WidgetVariableNameToGuidMap so external references
+// survive a widget rename. The WidgetBlueprintCompiler checks it both ways:
+// every widget variable must own a GUID, and every GUID must still name a live
+// variable. Registering an entry without ever dropping it leaves the map
+// pointing at names nothing answers to, and the next compile of that asset
+// raises "Variable [X] was deleted but still has a GUID referenced by
+// WidgetBlueprint [Y]" and keeps raising it on every later compile.
+//
+// The map is editor-only data whose presence has moved around across engine
+// versions, so it is detected at compile time here rather than tracked with a
+// hand-maintained version window.
+namespace MCPWidgetGuidMap
+{
+	template <typename T, typename = void>
+	struct THasMap : std::false_type {};
+
+	template <typename T>
+	struct THasMap<T, std::void_t<decltype(T::WidgetVariableNameToGuidMap)>> : std::true_type {};
+
+	/** Give a widget/animation variable a GUID entry when it has none. */
+	template <typename TWidgetBP>
+	void Register(TWidgetBP* WidgetBP, const FName& VariableName)
+	{
+		if constexpr (THasMap<TWidgetBP>::value)
+		{
+			if (WidgetBP && !VariableName.IsNone() && !WidgetBP->WidgetVariableNameToGuidMap.Contains(VariableName))
+			{
+				WidgetBP->WidgetVariableNameToGuidMap.Add(VariableName, FGuid::NewGuid());
+			}
+		}
+	}
+
+	/**
+	 * Drop every entry whose name no longer resolves to a widget in the tree,
+	 * an animation, or a blueprint variable. Returns how many were dropped.
+	 * This is the set the compiler builds when it validates the map, so an
+	 * entry outside it is dead metadata by definition.
+	 */
+	template <typename TWidgetBP>
+	int32 PruneStale(TWidgetBP* WidgetBP)
+	{
+		if constexpr (THasMap<TWidgetBP>::value)
+		{
+			if (!WidgetBP) return 0;
+
+			TSet<FName> Live;
+			if (WidgetBP->WidgetTree)
+			{
+				WidgetBP->WidgetTree->ForEachWidget([&Live](UWidget* Widget)
+				{
+					if (Widget) Live.Add(Widget->GetFName());
+				});
+			}
+			for (const auto& Animation : WidgetBP->Animations)
+			{
+				if (Animation) Live.Add(Animation->GetFName());
+			}
+			for (const auto& Variable : WidgetBP->NewVariables)
+			{
+				Live.Add(Variable.VarName);
+			}
+
+			TArray<FName> Stale;
+			for (const auto& Entry : WidgetBP->WidgetVariableNameToGuidMap)
+			{
+				if (!Live.Contains(Entry.Key)) Stale.Add(Entry.Key);
+			}
+			for (const FName& Name : Stale)
+			{
+				WidgetBP->WidgetVariableNameToGuidMap.Remove(Name);
+			}
+			return Stale.Num();
+		}
+		else
+		{
+			return 0;
+		}
+	}
+}
+
+/**
+ * Compile state of a Widget Blueprint as a stable string (#799). A caller that
+ * gets `created: true` still needs to know whether the asset it just changed
+ * compiles, so the mutation handlers report this alongside the outcome.
+ */
+static FString WidgetCompileStatusString(const UWidgetBlueprint* WidgetBP)
+{
+	if (!WidgetBP) return TEXT("unknown");
+	switch (WidgetBP->Status.GetValue())
+	{
+	case BS_UpToDate:             return TEXT("upToDate");
+	case BS_UpToDateWithWarnings: return TEXT("upToDateWithWarnings");
+	case BS_Dirty:                return TEXT("dirty");
+	case BS_Error:                return TEXT("error");
+	case BS_BeingCreated:         return TEXT("beingCreated");
+	default:                      return TEXT("unknown");
+	}
+}
+
+/** Stamp compile state onto a mutation result, and withdraw the success claim
+ *  when the blueprint no longer compiles (#799). */
+static void MCPSetWidgetCompileOutcome(
+	TSharedPtr<FJsonObject> Result,
+	const UWidgetBlueprint* WidgetBP,
+	const FString& AssetPath,
+	const FString& WhatHappened)
+{
+	const FString CompileStatus = WidgetCompileStatusString(WidgetBP);
+	Result->SetStringField(TEXT("compileStatus"), CompileStatus);
+	if (CompileStatus == TEXT("error"))
+	{
+		// The mutation is already on disk, so keep reporting what landed, but a
+		// blueprint that no longer compiles is not a success.
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), FString::Printf(
+			TEXT("%s and saved, but '%s' no longer compiles - open the blueprint's compiler results for the cause."),
+			*WhatHappened, *AssetPath));
+	}
+}
+
 TSharedPtr<FJsonValue> FWidgetHandlers::AddWidget(const TSharedPtr<FJsonObject>& Params)
 {
 	// ── Required: assetPath ──
@@ -494,7 +616,18 @@ TSharedPtr<FJsonValue> FWidgetHandlers::AddWidget(const TSharedPtr<FJsonObject>&
 		return MCPError(TEXT("WidgetTree is null"));
 	}
 
-	// Idempotency: if widget with this name already exists, return existed
+	// ── Resolve the UClass ──
+	UClass* WClass = ResolveWidgetClass(WidgetClassName);
+	if (!WClass)
+	{
+		return MCPError(FString::Printf(TEXT("Unknown widget class '%s'. Use short names like TextBlock, CanvasPanel, Image, Button, etc."), *WidgetClassName));
+	}
+
+	// Idempotency by assetPath + widgetName: a caller that retries after an
+	// ambiguous result (a client-side timeout on a call the editor actually
+	// completed) gets the same answer instead of a duplicate widget (#799).
+	// The class is compared too, so a name that already belongs to something
+	// else is reported rather than passed off as the requested widget.
 	if (!WidgetName.IsEmpty())
 	{
 		UWidget* Existing = nullptr;
@@ -504,20 +637,28 @@ TSharedPtr<FJsonValue> FWidgetHandlers::AddWidget(const TSharedPtr<FJsonObject>&
 		});
 		if (Existing)
 		{
+			if (Existing->GetClass() != WClass)
+			{
+				return MCPError(FString::Printf(
+					TEXT("Widget '%s' already exists in '%s' as a %s, not a %s. Pick another widgetName or remove the existing widget first."),
+					*WidgetName, *AssetPath, *Existing->GetClass()->GetName(), *WClass->GetName()));
+			}
+
 			auto ExistingResult = MCPSuccess();
 			MCPSetExisted(ExistingResult);
 			ExistingResult->SetStringField(TEXT("widgetName"), WidgetName);
+			ExistingResult->SetStringField(TEXT("requestedWidgetName"), WidgetName);
+			ExistingResult->SetStringField(TEXT("persistedWidgetName"), WidgetName);
+			ExistingResult->SetBoolField(TEXT("renamed"), false);
 			ExistingResult->SetStringField(TEXT("widgetClass"), Existing->GetClass()->GetName());
 			ExistingResult->SetStringField(TEXT("assetPath"), AssetPath);
+			if (UPanelWidget* ExistingParent = Existing->GetParent())
+			{
+				ExistingResult->SetStringField(TEXT("parentWidgetName"), ExistingParent->GetName());
+			}
+			ExistingResult->SetBoolField(TEXT("isRoot"), WidgetBP->WidgetTree->RootWidget == Existing);
 			return MCPResult(ExistingResult);
 		}
-	}
-
-	// ── Resolve the UClass ──
-	UClass* WClass = ResolveWidgetClass(WidgetClassName);
-	if (!WClass)
-	{
-		return MCPError(FString::Printf(TEXT("Unknown widget class '%s'. Use short names like TextBlock, CanvasPanel, Image, Button, etc."), *WidgetClassName));
 	}
 
 	// ── Construct the widget ──
@@ -579,35 +720,57 @@ TSharedPtr<FJsonValue> FWidgetHandlers::AddWidget(const TSharedPtr<FJsonObject>&
 	}
 
 	// #728: the WidgetBlueprintCompiler ensures every added widget has an entry in
-	// WidgetVariableNameToGuidMap (UMGEditor WidgetBlueprintCompiler.cpp: "Widget
-	// [X] was added but did not get a GUID"). The map was present in 5.4, absent
-	// in the 5.5-5.7 window, and present again in 5.8, so register the GUID on
-	// 5.4 and on 5.8+ (skipping the versions where the member does not exist).
-#if (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 4) || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8) || ENGINE_MAJOR_VERSION > 5
-	if (!WidgetBP->WidgetVariableNameToGuidMap.Contains(NewWidget->GetFName()))
-	{
-		WidgetBP->WidgetVariableNameToGuidMap.Add(NewWidget->GetFName(), FGuid::NewGuid());
-	}
-#endif
+	// WidgetVariableNameToGuidMap ("Widget [X] was added but did not get a GUID").
+	// #799: it ensures the other way too, so drop entries the tree no longer
+	// backs before compiling instead of accumulating them.
+	MCPWidgetGuidMap::Register(WidgetBP, NewWidget->GetFName());
+	MCPWidgetGuidMap::PruneStale(WidgetBP);
 
 	// ── Save ──
+	// Read the name back off the widget after the compile, not before: the
+	// compile is what settles the name the asset is saved with (#799).
+	TWeakObjectPtr<UWidget> AddedWidget(NewWidget);
+	FString PersistedName = NewWidget->GetName();
+
 	WidgetBP->MarkPackageDirty();
 	FKismetEditorUtilities::CompileBlueprint(WidgetBP);
+
+	// The compile can rename a widget whose requested name collided with an
+	// existing variable. Re-point the metadata at the tree as it stands now, so
+	// the name that reaches disk is the name that owns the GUID (#799).
+	if (AddedWidget.IsValid())
+	{
+		PersistedName = AddedWidget->GetName();
+		MCPWidgetGuidMap::Register(WidgetBP, AddedWidget->GetFName());
+	}
+	MCPWidgetGuidMap::PruneStale(WidgetBP);
+
 	UEditorAssetLibrary::SaveAsset(AssetPath);
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("widgetName"), NewWidget->GetName());
+	Result->SetStringField(TEXT("widgetName"), PersistedName);
+	// Both names, always: the requested one is what a caller retries with, the
+	// persisted one is what the asset actually holds (#799).
+	Result->SetStringField(TEXT("persistedWidgetName"), PersistedName);
+	if (!WidgetName.IsEmpty())
+	{
+		Result->SetStringField(TEXT("requestedWidgetName"), WidgetName);
+		Result->SetBoolField(TEXT("renamed"), !WidgetName.Equals(PersistedName, ESearchCase::CaseSensitive));
+	}
+	Result->SetStringField(TEXT("assetPath"), AssetPath);
 	Result->SetStringField(TEXT("widgetClass"), WClass->GetName());
 	Result->SetBoolField(TEXT("isRoot"), bIsRoot);
 	if (!ParentWidgetName.IsEmpty())
 	{
 		Result->SetStringField(TEXT("parentWidgetName"), ParentWidgetName);
 	}
+	MCPSetWidgetCompileOutcome(Result, WidgetBP, AssetPath,
+		FString::Printf(TEXT("Widget '%s' was added"), *PersistedName));
 
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("assetPath"), AssetPath);
-	Payload->SetStringField(TEXT("widgetName"), NewWidget->GetName());
+	Payload->SetStringField(TEXT("widgetName"), PersistedName);
 	MCPSetRollback(Result, TEXT("remove_widget"), Payload);
 
 	return MCPResult(Result);
@@ -645,11 +808,22 @@ TSharedPtr<FJsonValue> FWidgetHandlers::RemoveWidget(const TSharedPtr<FJsonObjec
 
 	if (!FoundWidget)
 	{
-		// Idempotent: nothing to delete
+		// Idempotent: nothing to delete. An asset last touched by an older build
+		// can still carry the GUID entry of a widget that is already gone, and
+		// this is the call an agent makes after the compiler complains about
+		// that name, so clear the dead metadata here too (#799).
+		const int32 PrunedOnly = MCPWidgetGuidMap::PruneStale(WidgetBP);
+		if (PrunedOnly > 0)
+		{
+			WidgetBP->MarkPackageDirty();
+			UEditorAssetLibrary::SaveAsset(AssetPath);
+		}
+
 		auto AlreadyResult = MCPSuccess();
 		AlreadyResult->SetBoolField(TEXT("alreadyDeleted"), true);
 		AlreadyResult->SetStringField(TEXT("widgetName"), WidgetName);
 		AlreadyResult->SetStringField(TEXT("assetPath"), AssetPath);
+		AlreadyResult->SetNumberField(TEXT("prunedGuidEntries"), PrunedOnly);
 		return MCPResult(AlreadyResult);
 	}
 
@@ -668,17 +842,28 @@ TSharedPtr<FJsonValue> FWidgetHandlers::RemoveWidget(const TSharedPtr<FJsonObjec
 		WidgetBP->WidgetTree->RootWidget = nullptr;
 	}
 
-	// Remove from widget tree
+	// Remove from widget tree (takes the whole subtree with it)
 	WidgetBP->WidgetTree->RemoveWidget(FoundWidget);
+
+	// #799: the removed widget and every descendant it took with it still own
+	// entries in WidgetVariableNameToGuidMap. Drop them before the compile that
+	// validates the map, otherwise this asset ensures on every later compile
+	// and lookups keep resolving to widgets that no longer exist.
+	const int32 PrunedGuids = MCPWidgetGuidMap::PruneStale(WidgetBP);
 
 	WidgetBP->MarkPackageDirty();
 	FKismetEditorUtilities::CompileBlueprint(WidgetBP);
+	MCPWidgetGuidMap::PruneStale(WidgetBP);
 	UEditorAssetLibrary::SaveAsset(AssetPath);
 
 	auto Result = MCPSuccess();
 	Result->SetBoolField(TEXT("deleted"), true);
 	Result->SetStringField(TEXT("widgetName"), WidgetName);
 	Result->SetStringField(TEXT("widgetClass"), RemovedClass);
+	Result->SetStringField(TEXT("assetPath"), AssetPath);
+	Result->SetNumberField(TEXT("prunedGuidEntries"), PrunedGuids);
+	MCPSetWidgetCompileOutcome(Result, WidgetBP, AssetPath,
+		FString::Printf(TEXT("Widget '%s' was removed"), *WidgetName));
 	// No rollback: remove_widget is destructive (would need to snapshot widget tree to reverse).
 
 	return MCPResult(Result);
@@ -856,8 +1041,13 @@ TSharedPtr<FJsonValue> FWidgetHandlers::SetRoot(const TSharedPtr<FJsonObject>& P
 
 	WidgetBP->WidgetTree->RootWidget = NewRoot;
 
+	// #799: the previous root and its descendants left the tree, so their GUID
+	// entries are dead metadata. Drop them before the compile validates the map.
+	MCPWidgetGuidMap::PruneStale(WidgetBP);
+
 	WidgetBP->MarkPackageDirty();
 	FKismetEditorUtilities::CompileBlueprint(WidgetBP);
+	MCPWidgetGuidMap::PruneStale(WidgetBP);
 	UEditorAssetLibrary::SaveAsset(AssetPath);
 
 	auto Result = MCPSuccess();
@@ -918,16 +1108,20 @@ TSharedPtr<FJsonValue> FWidgetHandlers::WrapRoot(const TSharedPtr<FJsonObject>& 
 	Wrapper->AddChild(OldRoot);
 
 	// #728: register the new wrapper's GUID so the WidgetBlueprintCompiler ensure
-	// does not fire (see add_widget). Same version window as there.
-#if (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 4) || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8) || ENGINE_MAJOR_VERSION > 5
-	if (!WidgetBP->WidgetVariableNameToGuidMap.Contains(Wrapper->GetFName()))
-	{
-		WidgetBP->WidgetVariableNameToGuidMap.Add(Wrapper->GetFName(), FGuid::NewGuid());
-	}
-#endif
+	// does not fire (see add_widget), and #799: prune whatever the reshuffle
+	// orphaned so the map matches the tree that is about to be saved.
+	MCPWidgetGuidMap::Register(WidgetBP, Wrapper->GetFName());
+	MCPWidgetGuidMap::PruneStale(WidgetBP);
+
+	TWeakObjectPtr<UPanelWidget> AddedWrapper(Wrapper);
 
 	WidgetBP->MarkPackageDirty();
 	FKismetEditorUtilities::CompileBlueprint(WidgetBP);
+	if (AddedWrapper.IsValid())
+	{
+		MCPWidgetGuidMap::Register(WidgetBP, AddedWrapper->GetFName());
+	}
+	MCPWidgetGuidMap::PruneStale(WidgetBP);
 	UEditorAssetLibrary::SaveAsset(AssetPath);
 
 	auto Result = MCPSuccess();
@@ -1949,10 +2143,10 @@ TSharedPtr<FJsonValue> FWidgetHandlers::AddWidgetToViewport(const TSharedPtr<FJs
 }
 
 // ─────────────────────────────────────────────────────────────
-// #559  Fire a UFUNCTION or button click on a live PIE UUserWidget.
+// #559  Fire a UFUNCTION or a child-widget interaction on a live PIE UUserWidget.
 //   Params: widgetName|className (locate the UserWidget), functionName
-//   (a parameterless UFUNCTION on the widget), OR childName + "OnClicked"
-//   to simulate a button click on a child UButton.
+//   (a parameterless UFUNCTION on the widget), OR childName (+ optional value,
+//   functionName, commitMethod) to drive an interactive child widget (#812).
 // ─────────────────────────────────────────────────────────────
 TSharedPtr<FJsonValue> FWidgetHandlers::InvokeRuntimeWidgetFunction(const TSharedPtr<FJsonObject>& Params)
 {
@@ -1989,8 +2183,12 @@ TSharedPtr<FJsonValue> FWidgetHandlers::InvokeRuntimeWidgetFunction(const TShare
 	const FString ChildName = OptionalString(Params, TEXT("childName"));
 	const FString FunctionName = OptionalString(Params, TEXT("functionName"));
 
-	// Button-click path: childName names a UButton, broadcast OnClicked.
-	if (!ChildName.IsEmpty() && (FunctionName.IsEmpty() || FunctionName.Equals(TEXT("OnClicked"), ESearchCase::IgnoreCase)))
+	// Child-interaction path: childName names an interactive child widget. The
+	// simulation lives in WidgetHandlers_Interaction.cpp and covers buttons,
+	// checkboxes, sliders, spin boxes, text entry and combo boxes (#812).
+	// functionName, when given here, selects which of the child's delegates to
+	// fire rather than naming a UFUNCTION on the parent.
+	if (!ChildName.IsEmpty())
 	{
 		UWidget* Target = nullptr;
 		if (Found->WidgetTree)
@@ -2004,16 +2202,15 @@ TSharedPtr<FJsonValue> FWidgetHandlers::InvokeRuntimeWidgetFunction(const TShare
 		{
 			return MCPError(FString::Printf(TEXT("Child widget '%s' not found inside '%s'"), *ChildName, *Found->GetName()));
 		}
-		if (UButton* Button = Cast<UButton>(Target))
+
+		auto Result = MCPSuccess();
+		Result->SetStringField(TEXT("widget"), Found->GetName());
+		Result->SetStringField(TEXT("child"), ChildName);
+		if (TSharedPtr<FJsonValue> Err = SimulateRuntimeChildInteraction(Target, Params, Result))
 		{
-			Button->OnClicked.Broadcast();
-			auto Result = MCPSuccess();
-			Result->SetStringField(TEXT("widget"), Found->GetName());
-			Result->SetStringField(TEXT("child"), ChildName);
-			Result->SetStringField(TEXT("invoked"), TEXT("OnClicked"));
-			return MCPResult(Result);
+			return Err;
 		}
-		return MCPError(FString::Printf(TEXT("Child '%s' is a %s, not a UButton (only OnClicked is supported for click simulation)"), *ChildName, *Target->GetClass()->GetName()));
+		return MCPResult(Result);
 	}
 
 	// UFUNCTION path: call a parameterless function on the UserWidget.

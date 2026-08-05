@@ -51,6 +51,20 @@ function withUpgradeNotice(content: TextBlock[]): TextBlock[] {
 }
 
 /**
+ * Structured tail for an error a caller has to make a decision about (#799).
+ * A bridge timeout is not a failed call: the editor may have finished it. The
+ * prose says so, and this block says so in a form a client can branch on
+ * without matching strings.
+ */
+function machineErrorBlock(e: unknown): TextBlock[] {
+  if (!(e instanceof McpError) || !e.details) return [];
+  return [{
+    type: "text" as const,
+    text: "MACHINE_ERROR=" + JSON.stringify({ code: e.code, ...e.details }),
+  }];
+}
+
+/**
  * Turn an MCP request's progress token into a reporter the tools can call.
  *
  * Without this a long tool is a frozen line in the client UI: stderr from an
@@ -459,7 +473,10 @@ async function main() {
         if (!result.success) {
           const msg = result.error?.message ?? `Task ${taskName} failed`;
           return {
-            content: withUpgradeNotice([{ type: "text" as const, text: `Error [TASK_FAILED]: ${msg}` }]),
+            content: withUpgradeNotice([
+              { type: "text" as const, text: `Error [TASK_FAILED]: ${msg}` },
+              ...machineErrorBlock(result.error),
+            ]),
             isError: true,
           };
         }
@@ -493,7 +510,10 @@ async function main() {
         const msg = e instanceof Error ? e.message : String(e);
         const code = e instanceof McpError ? e.code : "UNKNOWN";
         return {
-          content: withUpgradeNotice([{ type: "text" as const, text: `Error [${code}]: ${msg}` }]),
+          content: withUpgradeNotice([
+            { type: "text" as const, text: `Error [${code}]: ${msg}` },
+            ...machineErrorBlock(e),
+          ]),
           isError: true,
         };
       }

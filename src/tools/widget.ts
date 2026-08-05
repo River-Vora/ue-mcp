@@ -22,8 +22,19 @@ export const widgetTool: ToolDef = categoryTool(
     run_utility_widget:       bp("Open editor utility widget. Params: assetPath", "run_editor_utility_widget"),
     create_utility_blueprint: bp("Create editor utility blueprint. Params: assetPath, name?, packagePath?", "create_editor_utility_blueprint"),
     run_utility_blueprint:    bp("Run editor utility blueprint. Params: assetPath", "run_editor_utility_blueprint"),
-    add_widget:               bp("Add widget to widget tree. Params: assetPath, widgetClass, widgetName?, parentWidgetName?", "add_widget"),
-    remove_widget:            bp("Remove widget from tree. Params: assetPath, widgetName", "remove_widget"),
+    // #799: both compile and save the Widget Blueprint before they answer, and
+    // that can run well past the 30s default when the asset is open in the
+    // designer. The mutation is on disk by the time the default cap expires, so
+    // giving up early only turns a completed call into an ambiguous one. Both
+    // are idempotent by assetPath + widgetName, so a retry is safe.
+    add_widget: {
+      ...bp("Add widget to widget tree. Idempotent by assetPath + widgetName: passing widgetName makes a retry safe, and the result carries requestedWidgetName/persistedWidgetName/renamed plus compileStatus. Params: assetPath, widgetClass, widgetName?, parentWidgetName?", "add_widget"),
+      timeoutMs: 120_000,
+    },
+    remove_widget: {
+      ...bp("Remove widget from tree. Idempotent, and clears the widget's Widget Blueprint GUID metadata so later compiles stop reporting a deleted variable (#799). Params: assetPath, widgetName", "remove_widget"),
+      timeoutMs: 120_000,
+    },
     move_widget:              bp("Reparent widget. Params: assetPath, widgetName, newParentWidgetName", "move_widget"),
     set_root:                 bp("Replace WBP root with an existing widget by name (#365). Params: assetPath, widgetName", "set_root_widget", (p) => ({ assetPath: p.assetPath, widgetName: p.widgetName })),
     wrap_root:                bp("Wrap the current root in a new panel widget (UMG 'Wrap With'). Params: assetPath, wrapperClass (must be a UPanelWidget subclass), wrapperName? (#365)", "wrap_root_widget", (p) => ({ assetPath: p.assetPath, wrapperClass: p.wrapperClass, widgetClass: p.widgetClass, wrapperName: p.wrapperName })),
@@ -34,7 +45,7 @@ export const widgetTool: ToolDef = categoryTool(
     inspect_runtime_instances: bp("Inspect every matching live widget instance (never an implicit first match), with stable identity/owning-player metadata and selected reflected properties on the widget or subtree. Requires a running PIE/Game world and errors instead of falling back to the editor world. Passing childName or childClassFilter implies includeSubtree. Provide widgetName or classFilter. Params: widgetName?, classFilter?, propertyNames[]?, includeSubtree?, childName?, childClassFilter?, viewportOnly?, world?, pieInstance?, maxInstances?, maxNodesPerInstance?", "inspect_runtime_instances", (p) => ({ widgetName: p.widgetName, classFilter: p.classFilter, propertyNames: p.propertyNames, includeSubtree: p.includeSubtree, childName: p.childName, childClassFilter: p.childClassFilter, viewportOnly: p.viewportOnly, world: p.world, pieInstance: p.pieInstance, maxInstances: p.maxInstances, maxNodesPerInstance: p.maxNodesPerInstance })),
     get_runtime_delegates:    bp("(#161) Read delegate binding state on a live PIE widget. Params: widgetName, className?. Returns array of {delegateName, isBound, numBindings}", "get_runtime_delegates"),
     add_to_viewport:          bp("(#602) Instantiate a WidgetBlueprint and add it to the live PIE viewport for visual verification. Requires PIE running. Params: assetPath (WidgetBlueprint path), zOrder?", "add_to_viewport", (p) => ({ assetPath: p.assetPath, zOrder: p.zOrder })),
-    invoke_runtime_function:  bp("(#559) Fire a UI interaction on a live PIE widget: a parameterless UFUNCTION (functionName) on the located UserWidget, OR a button click via childName (broadcasts the child UButton's OnClicked). Locate the widget with widgetName or className. Params: widgetName?|className?, functionName?, childName?", "invoke_runtime_function", (p) => ({ widgetName: p.widgetName, className: p.className, functionName: p.functionName, childName: p.childName })),
+    invoke_runtime_function:  bp("(#559/#812) Fire a UI interaction on a live PIE widget: a parameterless UFUNCTION (functionName) on the located UserWidget, OR drive an interactive child via childName - Button (click), CheckBox (value true/false/toggle), Slider and SpinBox (numeric value), EditableText/EditableTextBox/MultiLineEditableText/MultiLineEditableTextBox (string value), ComboBoxString (option string or index). The matching delegate is broadcast so bound Blueprint logic runs. functionName alongside childName picks the delegate (e.g. OnPressed, OnTextChanged). Locate the widget with widgetName or className. Params: widgetName?|className?, functionName?, childName?, value?, commitMethod?", "invoke_runtime_function", (p) => ({ widgetName: p.widgetName, className: p.className, functionName: p.functionName, childName: p.childName, value: p.value, commitMethod: p.commitMethod })),
   },
   undefined,
   {
@@ -66,7 +77,8 @@ export const widgetTool: ToolDef = categoryTool(
     namePrefix: z.string().optional().describe("Instance name prefix filter for list_runtime"),
     viewportOnly: z.boolean().optional().describe("list_runtime/inspect_runtime_instances: only return widgets currently added to the viewport"),
     childName: z.string().optional().describe("get_runtime/invoke_runtime_function/inspect_runtime_instances: named child inside the UserWidget (#559)"),
-    functionName: z.string().optional().describe("invoke_runtime_function: parameterless UFUNCTION to call on the live widget (#559)"),
+    functionName: z.string().optional().describe("invoke_runtime_function: parameterless UFUNCTION to call on the live widget (#559), or with childName the child delegate to fire (#812)"),
+    commitMethod: z.string().optional().describe("invoke_runtime_function: text/spin box commit type - OnEnter (default), OnUserMovedFocus, OnCleared, Default (#812)"),
     zOrder: z.number().optional().describe("add_to_viewport: viewport Z-order (#602)"),
     maxDepth: z.number().optional().describe("get_runtime: max widget-tree depth to walk (default 6)"),
     includeLayout: z.boolean().optional().describe("get_runtime: add read-only layout diagnostics (geometry, slot, clipping, viewport, per-node deltas) to every node and report the host UserWidget under `host` (#775)"),
