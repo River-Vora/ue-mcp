@@ -191,6 +191,27 @@ namespace
 		return nullptr;
 	}
 
+	/**
+	 * #802: match a requested property name against a reflected one, accepting
+	 * the spelling the Details panel shows. A Blueprint variable declared as
+	 * WorldContextObject is displayed (and asked for) as "World Context Object",
+	 * and a bool bIsActive is displayed as "Is Active", so an exact-name filter
+	 * reports a property that plainly exists as missing.
+	 */
+	bool PropertyNameMatches(const FProperty* Prop, const FString& Requested)
+	{
+		if (!Prop) return false;
+		const FString Actual = Prop->GetName();
+		if (Actual.Equals(Requested, ESearchCase::IgnoreCase)) return true;
+
+		const FString Squashed = Requested.Replace(TEXT(" "), TEXT(""));
+		if (Squashed.IsEmpty()) return false;
+		if (Actual.Equals(Squashed, ESearchCase::IgnoreCase)) return true;
+		// The display name of a bool drops the Unreal "b" prefix.
+		if (Prop->IsA<FBoolProperty>() && Actual.Equals(TEXT("b") + Squashed, ESearchCase::IgnoreCase)) return true;
+		return false;
+	}
+
 	/** Marshal JSON args into a UFunction frame, call it, and read outputs back. */
 	TSharedPtr<FJsonValue> CallFunctionWithJsonArgs(
 		UObject* CallTarget,
@@ -386,7 +407,12 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 
 	TSharedPtr<FJsonObject> Props = MakeShared<FJsonObject>();
 	TArray<TSharedPtr<FJsonValue>> Missing;
-	TSet<FString> Emitted;
+	// Tracked per requested name rather than per emitted name: a request spelled
+	// the way the Details panel spells it ("World Context Object") resolves to a
+	// property whose reflected name is different, and comparing the two strings
+	// afterwards would report the match as missing.
+	TArray<bool> WantedMatched;
+	WantedMatched.Init(false, Wanted.Num());
 	int32 Count = 0;
 	// Bound the response. Exporting every reflected property of something like
 	// a GameState with replicated arrays builds a payload big enough to drop
@@ -399,16 +425,20 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 	{
 		FProperty* P = *It;
 		if (!P) continue;
-		if (Wanted.Num() > 0 && !Wanted.ContainsByPredicate(
-				[&](const FString& N) { return N.Equals(P->GetName(), ESearchCase::IgnoreCase); }))
+		if (Wanted.Num() > 0)
 		{
-			continue;
+			int32 WantedIndex = INDEX_NONE;
+			for (int32 i = 0; i < Wanted.Num(); ++i)
+			{
+				if (PropertyNameMatches(P, Wanted[i])) { WantedIndex = i; break; }
+			}
+			if (WantedIndex == INDEX_NONE) continue;
+			// Marked before the cap check so a capped-but-real property is not
+			// reported under missingProperties, which means "no such property".
+			WantedMatched[WantedIndex] = true;
 		}
 		if (Count >= MaxProperties)
 		{
-			// Record it as seen so a capped-but-real property is not reported
-			// under missingProperties, which means "no such property".
-			Emitted.Add(P->GetName().ToLower());
 			++Skipped;
 			continue;
 		}
@@ -420,16 +450,15 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 			++TruncatedValues;
 		}
 		Props->SetStringField(P->GetName(), S);
-		Emitted.Add(P->GetName().ToLower());
 		++Count;
 	}
 	// Name a requested property that does not exist, so a typo is reported
 	// rather than quietly returning an empty object.
-	for (const FString& N : Wanted)
+	for (int32 i = 0; i < Wanted.Num(); ++i)
 	{
-		if (!Emitted.Contains(N.ToLower()))
+		if (!WantedMatched[i])
 		{
-			Missing.Add(MakeShared<FJsonValueString>(N));
+			Missing.Add(MakeShared<FJsonValueString>(Wanted[i]));
 		}
 	}
 
