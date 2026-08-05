@@ -27,6 +27,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "Modules/ModuleManager.h"
+#include "UObject/Script.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/UnrealType.h"
@@ -740,7 +741,13 @@ namespace
 					{
 						It->InitializeValue_InContainer(Frame);
 					}
-					CurObject->ProcessEvent(Fn, Frame);
+					{
+						// #806: without this guard an actor getter called against
+						// the editor world is skipped and the zeroed frame reads
+						// back as a real value.
+						FEditorScriptExecutionGuard ScriptGuard;
+						CurObject->ProcessEvent(Fn, Frame);
+					}
 					FProperty* RetProp = Fn->GetReturnProperty();
 					if (RetProp)
 					{
@@ -990,14 +997,42 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 			: TEXT("No editor world available"));
 	}
 
+	// Describe the world that was actually resolved, not the requested scope:
+	// world="auto" resolves to PIE when a session is running.
+	const FString WorldLabel = World->IsPlayInEditor() ? TEXT("PIE") : TEXT("editor");
+
 	// #654: also match internal UObject name and full path so unlabeled actors
 	// (e.g. AI controllers spawned at runtime, which have no editor label) can
 	// be targeted, not just editor-labelled placed actors.
+	// #806: the lookup walks the placed instances of the resolved world in a
+	// fixed label -> name -> path order, and a miss is an error. There is no
+	// class-default fallback here and there must never be one: a default object
+	// answers every call with default state, which reads as success.
 	AActor* Target = FindActorByLabelNameOrPath(World, ActorLabel);
 	if (!Target)
 	{
-		return MCPError(FString::Printf(TEXT("Actor not found in %s world (matched by label, name, or path): %s"), WorldScope == TEXT("pie") ? TEXT("PIE") : TEXT("editor"), *ActorLabel));
+		return MCPError(MCPDescribeActorLookupMiss(World, ActorLabel, WorldLabel));
 	}
+	// Defensive: the lookup iterates placed actors, so neither of these can fire
+	// today. They exist so that a future change which lets an archetype or an
+	// actor from another world through fails loudly instead of quietly
+	// answering from default state, which is the failure this issue reported.
+	if (Target->HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject))
+	{
+		return MCPError(FString::Printf(
+			TEXT("'%s' resolved to a class default object, not a placed actor. Refusing the call: a default object would answer from default state and report success."),
+			*ActorLabel));
+	}
+	if (Target->GetWorld() != World)
+	{
+		return MCPError(FString::Printf(
+			TEXT("'%s' resolved to an actor outside the %s world. Refusing the call."),
+			*ActorLabel, *WorldLabel));
+	}
+	// Read now: the call below can destroy the actor, and the response says
+	// which instance ran it.
+	const FString ResolvedActorLabel = Target->GetActorLabel();
+	const FString ResolvedActorPath = Target->GetPathName();
 
 	// #382: optional `component` redirects the call target to a named subobject
 	// (e.g. invoke `Server_Deconstruct` on the actor's BuildModeComponent).
@@ -1099,8 +1134,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 				}
 				return MCPError(FString::Printf(
 					TEXT("actorArgs[%s]: actor '%s' not found in %s world"),
-					*P->GetName(), *ActorArgLabel,
-					WorldScope == TEXT("pie") ? TEXT("PIE") : TEXT("editor")));
+					*P->GetName(), *ActorArgLabel, *WorldLabel));
 			}
 			if (!RefActor->IsA(OP->PropertyClass))
 			{
@@ -1135,10 +1169,27 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 	// ProcessEvent can run arbitrary game code, including code that tears down
 	// the world and collects garbage, and CallTarget is read again below.
 	FGCObjectScopeGuard CallTargetGuard(CallTarget);
-	CallTarget->ProcessEvent(Func, ParamBuf.GetData());
+	// #806: AActor::ProcessEvent refuses to run script in a world whose actors
+	// were never initialised for play, which is every editor world, unless the
+	// function is marked CallInEditor. The refusal is silent: the parameter
+	// frame stays zero-initialised and those zeros are then exported as if they
+	// were the answer, so K2_GetActorLocation on a placed actor reported
+	// (X=0,Y=0,Z=0) with success. FEditorScriptExecutionGuard opens the same
+	// gate the editor itself uses for CallInEditor functions, for this call
+	// only, so the placed instance actually runs the function.
+	{
+		FEditorScriptExecutionGuard ScriptGuard;
+		CallTarget->ProcessEvent(Func, ParamBuf.GetData());
+	}
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	// #806: report the instance that ran the call. The reported defect was a
+	// call that looked successful while answering from somewhere other than the
+	// placed actor, and there was nothing in the response to see that with.
+	Result->SetStringField(TEXT("resolvedActorLabel"), ResolvedActorLabel);
+	Result->SetStringField(TEXT("resolvedActorPath"), ResolvedActorPath);
+	Result->SetStringField(TEXT("world"), WorldLabel);
 	if (!ComponentName.IsEmpty()) Result->SetStringField(TEXT("component"), ComponentName);
 	Result->SetStringField(TEXT("functionName"), FunctionName);
 
