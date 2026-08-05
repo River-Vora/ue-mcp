@@ -226,8 +226,13 @@ private:
 	 * Buffer and whatever follows is left in place, so a read that delivered two
 	 * pipelined requests yields both instead of dropping the second. On
 	 * NeedMoreData nothing is consumed and the caller reads again.
+	 *
+	 * On ProtocolError OutCloseCode carries the status the peer should be closed
+	 * with: 1002 for framing the bridge cannot follow, 1009 when the frame is
+	 * merely too large. The caller sends that code, so the client can tell a
+	 * size refusal from a broken stream.
 	 */
-	static EMCPFrameDecode DecodeWebSocketFrame(TArray<uint8>& Buffer, FMCPWebSocketFrame& OutFrame, FString& OutError);
+	static EMCPFrameDecode DecodeWebSocketFrame(TArray<uint8>& Buffer, FMCPWebSocketFrame& OutFrame, FString& OutError, uint16& OutCloseCode);
 
 	/** Frame a control opcode (close, ping, pong) with its payload. */
 	static TArray<uint8> CreateControlFrame(EMCPWebSocketOpcode Opcode, const TArray<uint8>& Payload);

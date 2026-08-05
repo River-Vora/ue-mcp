@@ -1284,7 +1284,8 @@ void FMCPBridgeServer::ProcessWebSocketMessages(FMCPSocketHandle ClientSocketFD,
 		{
 			FMCPWebSocketFrame Frame;
 			FString DecodeError;
-			const EMCPFrameDecode Status = DecodeWebSocketFrame(PendingBytes, Frame, DecodeError);
+			uint16 DecodeCloseCode = 1002;
+			const EMCPFrameDecode Status = DecodeWebSocketFrame(PendingBytes, Frame, DecodeError, DecodeCloseCode);
 
 			if (Status == EMCPFrameDecode::NeedMoreData)
 			{
@@ -1293,7 +1294,7 @@ void FMCPBridgeServer::ProcessWebSocketMessages(FMCPSocketHandle ClientSocketFD,
 			if (Status == EMCPFrameDecode::ProtocolError)
 			{
 				UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] WebSocket protocol error, closing connection: %s"), *DecodeError);
-				SendCloseFrame(ClientSocketFD, 1002, DecodeError);
+				SendCloseFrame(ClientSocketFD, DecodeCloseCode, DecodeError);
 				bDone = true;
 				break;
 			}
@@ -1508,8 +1509,13 @@ TArray<uint8> FMCPBridgeServer::CreateWebSocketFrame(const FString& Message)
 	return Frame;
 }
 
-EMCPFrameDecode FMCPBridgeServer::DecodeWebSocketFrame(TArray<uint8>& Buffer, FMCPWebSocketFrame& OutFrame, FString& OutError)
+EMCPFrameDecode FMCPBridgeServer::DecodeWebSocketFrame(TArray<uint8>& Buffer, FMCPWebSocketFrame& OutFrame, FString& OutError, uint16& OutCloseCode)
 {
+	// Everything below is a framing violation (1002) unless it is specifically
+	// a size refusal, which the caller has to report as 1009 for the client to
+	// tell "you sent too much" apart from "your framing is wrong".
+	OutCloseCode = 1002;
+
 	const int64 Available = (int64)Buffer.Num();
 	if (Available < 2)
 	{
@@ -1612,6 +1618,7 @@ EMCPFrameDecode FMCPBridgeServer::DecodeWebSocketFrame(TArray<uint8>& Buffer, FM
 		OutError = FString::Printf(
 			TEXT("frame payload of %llu bytes exceeds the %lld byte bridge limit"),
 			PayloadLen, kMaxWebSocketMessageBytes);
+		OutCloseCode = 1009; // message too big, same as the assembled-message bound
 		return EMCPFrameDecode::ProtocolError;
 	}
 
