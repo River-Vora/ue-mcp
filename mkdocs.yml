@@ -59,12 +59,14 @@ nav:
   - Getting Started: getting-started.md
   - Architecture: architecture.md
   - Tool Reference: tool-reference.md
-  - Runtime Widget Layout Diagnostics: runtime-widget-layout-diagnostics.md
-  - Widget Parameters: widget-parameters.md
   - Native Tools: native-tools.md
-  - Runtime Widget Inspection: runtime-widget-inspection.md
   - Handler Conventions: handler-conventions.md
-  - Runtime Widget Interaction: runtime-widget-interaction.md
+  - Widgets:
+    - widgets.md
+    - Parameter Contract: widget-parameters.md
+    - Runtime Inspection: runtime-widget-inspection.md
+    - Runtime Interaction: runtime-widget-interaction.md
+    - Layout Diagnostics: runtime-widget-layout-diagnostics.md
   - Flows: flows.md
   - Plugins:
     - plugins.md

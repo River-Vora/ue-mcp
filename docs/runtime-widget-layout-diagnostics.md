@@ -1,4 +1,4 @@
-# Runtime Widget Layout Diagnostics
+# Runtime widget layout diagnostics
 
 `widget.get_runtime` can return a read-only layout snapshot for every runtime
 widget node while PIE is active. It complements the native Widget Reflector with
