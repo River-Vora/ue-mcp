@@ -2,6 +2,7 @@
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 #include "HandlerAssetCreate.h"
+#include <type_traits>
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
@@ -458,6 +459,87 @@ static UClass* ResolveWidgetClass(const FString& ClassName)
 	return nullptr;
 }
 
+// ── Widget variable GUID metadata (#728, #799) ───────────────────────────────
+// UWidgetBlueprint keeps a WidgetVariableNameToGuidMap so external references
+// survive a widget rename. The WidgetBlueprintCompiler checks it both ways:
+// every widget variable must own a GUID, and every GUID must still name a live
+// variable. Registering an entry without ever dropping it leaves the map
+// pointing at names nothing answers to, and the next compile of that asset
+// raises "Variable [X] was deleted but still has a GUID referenced by
+// WidgetBlueprint [Y]" and keeps raising it on every later compile.
+//
+// The map is editor-only data whose presence has moved around across engine
+// versions, so it is detected at compile time here rather than tracked with a
+// hand-maintained version window.
+namespace MCPWidgetGuidMap
+{
+	template <typename T, typename = void>
+	struct THasMap : std::false_type {};
+
+	template <typename T>
+	struct THasMap<T, std::void_t<decltype(T::WidgetVariableNameToGuidMap)>> : std::true_type {};
+
+	/** Give a widget/animation variable a GUID entry when it has none. */
+	template <typename TWidgetBP>
+	void Register(TWidgetBP* WidgetBP, const FName& VariableName)
+	{
+		if constexpr (THasMap<TWidgetBP>::value)
+		{
+			if (WidgetBP && !VariableName.IsNone() && !WidgetBP->WidgetVariableNameToGuidMap.Contains(VariableName))
+			{
+				WidgetBP->WidgetVariableNameToGuidMap.Add(VariableName, FGuid::NewGuid());
+			}
+		}
+	}
+
+	/**
+	 * Drop every entry whose name no longer resolves to a widget in the tree,
+	 * an animation, or a blueprint variable. Returns how many were dropped.
+	 * This is the set the compiler builds when it validates the map, so an
+	 * entry outside it is dead metadata by definition.
+	 */
+	template <typename TWidgetBP>
+	int32 PruneStale(TWidgetBP* WidgetBP)
+	{
+		if constexpr (THasMap<TWidgetBP>::value)
+		{
+			if (!WidgetBP) return 0;
+
+			TSet<FName> Live;
+			if (WidgetBP->WidgetTree)
+			{
+				WidgetBP->WidgetTree->ForEachWidget([&Live](UWidget* Widget)
+				{
+					if (Widget) Live.Add(Widget->GetFName());
+				});
+			}
+			for (const auto& Animation : WidgetBP->Animations)
+			{
+				if (Animation) Live.Add(Animation->GetFName());
+			}
+			for (const auto& Variable : WidgetBP->NewVariables)
+			{
+				Live.Add(Variable.VarName);
+			}
+
+			TArray<FName> Stale;
+			for (const auto& Entry : WidgetBP->WidgetVariableNameToGuidMap)
+			{
+				if (!Live.Contains(Entry.Key)) Stale.Add(Entry.Key);
+			}
+			for (const FName& Name : Stale)
+			{
+				WidgetBP->WidgetVariableNameToGuidMap.Remove(Name);
+			}
+			return Stale.Num();
+		}
+		else
+		{
+			return 0;
+		}
+	}
+}
+
 TSharedPtr<FJsonValue> FWidgetHandlers::AddWidget(const TSharedPtr<FJsonObject>& Params)
 {
 	// ── Required: assetPath ──
@@ -572,20 +654,27 @@ TSharedPtr<FJsonValue> FWidgetHandlers::AddWidget(const TSharedPtr<FJsonObject>&
 	}
 
 	// #728: the WidgetBlueprintCompiler ensures every added widget has an entry in
-	// WidgetVariableNameToGuidMap (UMGEditor WidgetBlueprintCompiler.cpp: "Widget
-	// [X] was added but did not get a GUID"). The map was present in 5.4, absent
-	// in the 5.5-5.7 window, and present again in 5.8, so register the GUID on
-	// 5.4 and on 5.8+ (skipping the versions where the member does not exist).
-#if (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 4) || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8) || ENGINE_MAJOR_VERSION > 5
-	if (!WidgetBP->WidgetVariableNameToGuidMap.Contains(NewWidget->GetFName()))
-	{
-		WidgetBP->WidgetVariableNameToGuidMap.Add(NewWidget->GetFName(), FGuid::NewGuid());
-	}
-#endif
+	// WidgetVariableNameToGuidMap ("Widget [X] was added but did not get a GUID").
+	// #799: it ensures the other way too, so drop entries the tree no longer
+	// backs before compiling instead of accumulating them.
+	MCPWidgetGuidMap::Register(WidgetBP, NewWidget->GetFName());
+	MCPWidgetGuidMap::PruneStale(WidgetBP);
 
 	// ── Save ──
+	TWeakObjectPtr<UWidget> AddedWidget(NewWidget);
+
 	WidgetBP->MarkPackageDirty();
 	FKismetEditorUtilities::CompileBlueprint(WidgetBP);
+
+	// The compile can rename a widget whose requested name collided with an
+	// existing variable. Re-point the metadata at the tree as it stands now, so
+	// the name that reaches disk is the name that owns the GUID (#799).
+	if (AddedWidget.IsValid())
+	{
+		MCPWidgetGuidMap::Register(WidgetBP, AddedWidget->GetFName());
+	}
+	MCPWidgetGuidMap::PruneStale(WidgetBP);
+
 	UEditorAssetLibrary::SaveAsset(AssetPath);
 
 	auto Result = MCPSuccess();
@@ -661,17 +750,25 @@ TSharedPtr<FJsonValue> FWidgetHandlers::RemoveWidget(const TSharedPtr<FJsonObjec
 		WidgetBP->WidgetTree->RootWidget = nullptr;
 	}
 
-	// Remove from widget tree
+	// Remove from widget tree (takes the whole subtree with it)
 	WidgetBP->WidgetTree->RemoveWidget(FoundWidget);
+
+	// #799: the removed widget and every descendant it took with it still own
+	// entries in WidgetVariableNameToGuidMap. Drop them before the compile that
+	// validates the map, otherwise this asset ensures on every later compile
+	// and lookups keep resolving to widgets that no longer exist.
+	const int32 PrunedGuids = MCPWidgetGuidMap::PruneStale(WidgetBP);
 
 	WidgetBP->MarkPackageDirty();
 	FKismetEditorUtilities::CompileBlueprint(WidgetBP);
+	MCPWidgetGuidMap::PruneStale(WidgetBP);
 	UEditorAssetLibrary::SaveAsset(AssetPath);
 
 	auto Result = MCPSuccess();
 	Result->SetBoolField(TEXT("deleted"), true);
 	Result->SetStringField(TEXT("widgetName"), WidgetName);
 	Result->SetStringField(TEXT("widgetClass"), RemovedClass);
+	Result->SetNumberField(TEXT("prunedGuidEntries"), PrunedGuids);
 	// No rollback: remove_widget is destructive (would need to snapshot widget tree to reverse).
 
 	return MCPResult(Result);
@@ -849,8 +946,13 @@ TSharedPtr<FJsonValue> FWidgetHandlers::SetRoot(const TSharedPtr<FJsonObject>& P
 
 	WidgetBP->WidgetTree->RootWidget = NewRoot;
 
+	// #799: the previous root and its descendants left the tree, so their GUID
+	// entries are dead metadata. Drop them before the compile validates the map.
+	MCPWidgetGuidMap::PruneStale(WidgetBP);
+
 	WidgetBP->MarkPackageDirty();
 	FKismetEditorUtilities::CompileBlueprint(WidgetBP);
+	MCPWidgetGuidMap::PruneStale(WidgetBP);
 	UEditorAssetLibrary::SaveAsset(AssetPath);
 
 	auto Result = MCPSuccess();
@@ -911,16 +1013,20 @@ TSharedPtr<FJsonValue> FWidgetHandlers::WrapRoot(const TSharedPtr<FJsonObject>& 
 	Wrapper->AddChild(OldRoot);
 
 	// #728: register the new wrapper's GUID so the WidgetBlueprintCompiler ensure
-	// does not fire (see add_widget). Same version window as there.
-#if (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 4) || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8) || ENGINE_MAJOR_VERSION > 5
-	if (!WidgetBP->WidgetVariableNameToGuidMap.Contains(Wrapper->GetFName()))
-	{
-		WidgetBP->WidgetVariableNameToGuidMap.Add(Wrapper->GetFName(), FGuid::NewGuid());
-	}
-#endif
+	// does not fire (see add_widget), and #799: prune whatever the reshuffle
+	// orphaned so the map matches the tree that is about to be saved.
+	MCPWidgetGuidMap::Register(WidgetBP, Wrapper->GetFName());
+	MCPWidgetGuidMap::PruneStale(WidgetBP);
+
+	TWeakObjectPtr<UPanelWidget> AddedWrapper(Wrapper);
 
 	WidgetBP->MarkPackageDirty();
 	FKismetEditorUtilities::CompileBlueprint(WidgetBP);
+	if (AddedWrapper.IsValid())
+	{
+		MCPWidgetGuidMap::Register(WidgetBP, AddedWrapper->GetFName());
+	}
+	MCPWidgetGuidMap::PruneStale(WidgetBP);
 	UEditorAssetLibrary::SaveAsset(AssetPath);
 
 	auto Result = MCPSuccess();
