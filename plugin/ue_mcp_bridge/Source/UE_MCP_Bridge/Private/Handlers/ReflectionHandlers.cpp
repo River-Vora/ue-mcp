@@ -818,7 +818,8 @@ static TArray<FString> SuggestEnumNames(const FString& EnumName, int32 MaxSugges
 	const FString Needle = EnumName.ToLower();
 	for (TObjectIterator<UEnum> It; It && Suggestions.Num() < MaxSuggestions; ++It)
 	{
-		
+		// TObjectIterator only stops on live objects and its dereference is annotated
+		// non-null, so a null test here is dead code that Clang rejects under -Werror.
 		const FString Name = It->GetName();
 		if (Name.ToLower().Contains(Needle))
 		{
