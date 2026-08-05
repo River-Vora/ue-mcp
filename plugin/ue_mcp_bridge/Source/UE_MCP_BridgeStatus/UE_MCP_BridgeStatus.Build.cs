@@ -8,8 +8,8 @@ using UnrealBuildTool;
  * invisible to ue-mcp because nothing of ours was loaded yet.
  *
  * Dependencies are deliberately minimal: Core carries the slow-task scope
- * stack, the application heartbeat and the threading needed to publish the
- * snapshot. Slate and Engine are NOT dependencies - they are not reliably
+ * stack, the application heartbeat (UE 5.8+) and the threading needed to
+ * publish the snapshot. Slate and Engine are NOT dependencies - they are not reliably
  * up this early, so the bridge module injects those richer sources
  * (modal-dialog description, shader/asset compile counts) when it loads.
  */

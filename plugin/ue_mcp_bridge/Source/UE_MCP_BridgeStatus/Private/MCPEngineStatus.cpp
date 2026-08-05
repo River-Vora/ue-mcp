@@ -16,6 +16,16 @@
 #include "Modules/ModuleManager.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "Runtime/Launch/Resources/Version.h"
+
+// Same definition as the canonical one in UE_MCP_Bridge/Public/HandlerUtils.h.
+// It is repeated rather than shared because this module loads at
+// PostConfigInit and must not depend on the bridge module, and because the
+// bridge module lists this one as a private dependency, so its public headers
+// cannot reach in the other direction either. Keep the two in step.
+#ifndef UE_MCP_HAS_5_8_API
+#define UE_MCP_HAS_5_8_API ((ENGINE_MAJOR_VERSION > 5) || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8))
+#endif
 
 DEFINE_LOG_CATEGORY(LogMCPBridgeStatus);
 
@@ -50,7 +60,7 @@ void FMCPEngineStatus::Install()
 	// Two Core-only capture hooks, which is all that exists this early:
 	//
 	//  - the core ticker covers ordinary frames;
-	//  - the application heartbeat is broadcast by
+	//  - on UE 5.8+ the application heartbeat is broadcast by
 	//    FFeedbackContext::ProgressReported on every slow-task progress frame,
 	//    so an operation that advances its progress bar without ever returning
 	//    to the tick loop still refreshes the percentage. Startup is almost
@@ -71,10 +81,31 @@ void FMCPEngineStatus::Install()
 			return true;
 		}), 0.0f);
 
+#if UE_MCP_HAS_5_8_API
 	HeartbeatHandle = FCoreDelegates::ApplicationHeartbeat.AddLambda([this]()
 	{
 		CaptureNow();
 	});
+#else
+	// Before 5.8 there is no application heartbeat at all:
+	// FFeedbackContext::ProgressReported is an empty virtual and Core carries
+	// no other per-progress broadcast. Slow-task progress is still captured,
+	// one link further down the same chain: the editor's progress path ticks
+	// Slate on every report (FFeedbackContextEditor::ProgressReported calls
+	// TickSlate, which calls FSlateApplication::Tick), and the bridge module
+	// hooks FSlateApplication::OnPreTick when it loads at PostEngineInit.
+	//
+	// What is genuinely lost on those versions is progress refresh during the
+	// splash-only phase, before Slate can display windows: there the editor
+	// updates the splash text and returns without ticking Slate. Slow-task
+	// scopes opening and closing, and modules finishing loading, still refresh
+	// the snapshot throughout, so the phase and stall figures stay honest.
+	// Say this out loud once, because a missing hook and a working hook that
+	// never fires look identical in the log otherwise.
+	UE_LOG(LogMCPBridgeStatus, Log,
+		TEXT("[UE-MCP] UE %d.%d has no FCoreDelegates::ApplicationHeartbeat (5.8+ only). Slow-task progress is captured from the Slate pre-tick once the bridge module loads; it does not refresh during the splash phase."),
+		ENGINE_MAJOR_VERSION, ENGINE_MINOR_VERSION);
+#endif
 
 	// Neither of the above fires during PreInit: there is no tick loop yet, and
 	// the heartbeat rides on slow-task progress reporting that startup does not
@@ -125,11 +156,13 @@ void FMCPEngineStatus::Shutdown()
 		TickerHandle.Reset();
 	}
 
+#if UE_MCP_HAS_5_8_API
 	if (HeartbeatHandle.IsValid())
 	{
 		FCoreDelegates::ApplicationHeartbeat.Remove(HeartbeatHandle);
 		HeartbeatHandle.Reset();
 	}
+#endif
 
 	if (ModulesChangedHandle.IsValid())
 	{

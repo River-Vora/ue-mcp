@@ -32,9 +32,11 @@ DECLARE_LOG_CATEGORY_EXTERN(LogMCPBridgeStatus, Log, All);
  *
  * This lives in its own module so it can load at PostConfigInit, long before
  * the bridge module (PostEngineInit). Its two Core-only hooks - the core
- * ticker and FCoreDelegates::ApplicationHeartbeat, which every slow-task
- * progress frame broadcasts - cover the entire startup window that used to be
- * invisible: asset registry scan, startup shader compilation, map load.
+ * ticker and, on UE 5.8+, FCoreDelegates::ApplicationHeartbeat, which every
+ * slow-task progress frame broadcasts - cover the entire startup window that
+ * used to be invisible: asset registry scan, startup shader compilation, map
+ * load. Earlier engine versions have no heartbeat delegate; see Install() for
+ * what covers those frames there and what it costs.
  *
  * Sources that need Slate or Engine are injected by the bridge module when it
  * loads (SetModalProvider / SetCompileProvider / CaptureNow from Slate ticks),
@@ -134,6 +136,7 @@ private:
 	/** Bind the slow-task events on whichever feedback context GWarn is now. */
 	void RebindFeedbackContextIfNeeded();
 
+	/** Bound on UE 5.8+ only, where the heartbeat delegate exists. */
 	FDelegateHandle HeartbeatHandle;
 	FDelegateHandle ModulesChangedHandle;
 	FDelegateHandle SlowTaskStartHandle;
