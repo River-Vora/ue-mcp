@@ -256,6 +256,7 @@ export const editorTool: ToolDef = categoryTool(
     stage_game_input: bp("Stage input for the running game: set input mode (gameOnly|gameAndUI|uiOnly) and mouse cursor so injected/simulated input reaches the pawn. This only sets the mode - the injection itself lives in the pie category (pie(inject_input*)), not here. Requires PIE. Params: inputMode? (default gameOnly), showMouseCursor? (#671)", "stage_game_input", (p) => ({ inputMode: p.inputMode, showMouseCursor: p.showMouseCursor })),
     run_automation_tests: bp("Run registered Automation tests matching a filter and return per-test pass/fail plus error lines. Runs them synchronously through the test framework rather than the console queue, and suspends the editor's unfocused-CPU throttle for the duration - otherwise an unfocused editor drops to a few FPS and the framework's interactive-frame-rate gate never opens, leaving tests queued forever (#765). Params: filter?, maxTests? (default 50) (#693)", "run_automation_tests", (p) => ({ filter: p.filter, maxTests: p.maxTests })),
     list_dirty_packages: bp("Enumerate currently-dirty content + map packages (#340)", "list_dirty_packages"),
+    request_editor_shutdown: bp("Ask the editor to close itself from inside the engine, after it has checked that closing is safe. Refuses by default when any content or map package is dirty (including an unsaved /Temp world) and reports which ones, so nothing is lost to a silent discard. Ends an active PIE/SIE session first and closes only once play has actually stopped. The response is returned before the process exits. Use editor(stop_editor) for the full stop-and-confirm flow; this action is the in-engine half of it. Params: requireClean? (default true), endPIE? (default true)", "request_editor_shutdown", (p) => ({ requireClean: p.requireClean, endPIE: p.endPIE })),
   },
   undefined,
   {
@@ -279,6 +280,8 @@ export const editorTool: ToolDef = categoryTool(
     functionName: z.string().optional(),
     timeout: z.number().optional().describe("start_editor: seconds to wait for the bridge (default 120) (#758)"),
     probeWindows: z.boolean().optional().describe("get_engine_state: also enumerate native windows to catch pre-Slate dialogs (default true, costs ~2s)"),
+    requireClean: z.boolean().optional().describe("request_editor_shutdown: refuse to close while any content or map package is dirty (default true)"),
+    endPIE: z.boolean().optional().describe("request_editor_shutdown: end an active PIE/SIE session before closing (default true); false refuses to close while play is running"),
     pieInstance: z.number().optional().describe("Select which PIE world to target: 0 = server/primary, 1..N = clients. See list_pie_instances (#778)"),
     subsystemClass: z.string().optional().describe("invoke_object_function/get_object_properties: subsystem class name or /Script path (#739)"),
     bones: z.array(z.string()).optional().describe("read_bone_transforms: bone OR socket names; omit for every bone (#756)"),
