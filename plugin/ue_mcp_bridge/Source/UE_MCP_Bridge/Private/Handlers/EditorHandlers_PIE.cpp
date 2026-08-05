@@ -4,6 +4,7 @@
 // stays in EditorHandlers.cpp::RegisterHandlers.
 
 #include "EditorHandlers.h"
+#include "UE_MCP_BridgeModule.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 
@@ -13,6 +14,7 @@
 #include "Containers/Ticker.h"
 #include "Editor.h"
 #include "Editor/EditorEngine.h"
+#include "Engine/Blueprint.h"
 #include "Engine/World.h"
 #include "Engine/Engine.h"
 #include "EngineUtils.h"
@@ -31,10 +33,89 @@
 #include "UObject/Package.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "Settings/LevelEditorPlaySettings.h"
 
 namespace
 {
+	static FDelegateHandle IgnoreErrorsPostPIEHandle;
+	static FDelegateHandle IgnoreErrorsEndPIEHandle;
+	static FTSTicker::FDelegateHandle IgnoreErrorsTimeoutHandle;
+	static bool bIgnoreErrorsBypassArmed = false;
+	static TArray<TWeakObjectPtr<UBlueprint>> SuppressedBlueprintWarnings;
+
+	static void RestoreIgnoreBlueprintErrorsState(bool bFromTimeoutTicker = false)
+	{
+		if (!bIgnoreErrorsBypassArmed)
+		{
+			return;
+		}
+
+		for (const TWeakObjectPtr<UBlueprint>& Blueprint : SuppressedBlueprintWarnings)
+		{
+			if (Blueprint.IsValid())
+			{
+				Blueprint->bDisplayCompilePIEWarning = true;
+			}
+		}
+		SuppressedBlueprintWarnings.Reset();
+		bIgnoreErrorsBypassArmed = false;
+
+		if (IgnoreErrorsPostPIEHandle.IsValid())
+		{
+			FEditorDelegates::PostPIEStarted.Remove(IgnoreErrorsPostPIEHandle);
+			IgnoreErrorsPostPIEHandle.Reset();
+		}
+		if (IgnoreErrorsEndPIEHandle.IsValid())
+		{
+			FEditorDelegates::EndPIE.Remove(IgnoreErrorsEndPIEHandle);
+			IgnoreErrorsEndPIEHandle.Reset();
+		}
+		if (!bFromTimeoutTicker && IgnoreErrorsTimeoutHandle.IsValid())
+		{
+			FTSTicker::GetCoreTicker().RemoveTicker(IgnoreErrorsTimeoutHandle);
+		}
+		IgnoreErrorsTimeoutHandle.Reset();
+	}
+
+	static void ArmIgnoreBlueprintErrorsForNextPIELaunch(const TArray<UBlueprint*>& Blueprints)
+	{
+		SuppressedBlueprintWarnings.Reset(Blueprints.Num());
+		for (UBlueprint* Blueprint : Blueprints)
+		{
+			Blueprint->bDisplayCompilePIEWarning = false;
+			SuppressedBlueprintWarnings.Add(Blueprint);
+		}
+		bIgnoreErrorsBypassArmed = true;
+
+		IgnoreErrorsPostPIEHandle = FEditorDelegates::PostPIEStarted.AddLambda(
+			[](bool) { RestoreIgnoreBlueprintErrorsState(); });
+		IgnoreErrorsEndPIEHandle = FEditorDelegates::EndPIE.AddLambda(
+			[](bool) { RestoreIgnoreBlueprintErrorsState(); });
+
+		const double Deadline = FPlatformTime::Seconds() + 30.0;
+		IgnoreErrorsTimeoutHandle = FTSTicker::GetCoreTicker().AddTicker(
+			FTickerDelegate::CreateLambda([Deadline](float)
+			{
+				if (FPlatformTime::Seconds() < Deadline)
+				{
+					return true;
+				}
+				RestoreIgnoreBlueprintErrorsState(true);
+				return false;
+			}));
+	}
+
+	// The server decides *whether* a caller may bypass the Blueprint-error
+	// prompt (standing config opt-in, or a live approval prompt answered by
+	// the user) and names the source here. The bridge cannot re-derive user
+	// consent, so it records the source and refuses anything it does not
+	// recognize rather than pretending to re-check it.
+	static bool IsRecognizedBypassAuthorization(const FString& Source)
+	{
+		return Source == TEXT("user_approval") || Source == TEXT("config");
+	}
+
 	static ULevelEditorPlaySettings* GetPlaySettingsForRW()
 	{
 		return GetMutableDefault<ULevelEditorPlaySettings>();
@@ -169,6 +250,103 @@ TSharedPtr<FJsonValue> FEditorHandlers::PieControl(const TSharedPtr<FJsonObject>
 				return MCPError(FString::Printf(TEXT("AssetRegistry still loading after %.1fs; PIE start aborted. Pass assetRegistryTimeoutSeconds to extend the wait, or retry later."), TimeoutSec));
 			}
 			Result->SetBoolField(TEXT("waitedForAssetRegistry"), true);
+		}
+
+		bool bIgnoreBlueprintErrors = false;
+		Params->TryGetBoolField(TEXT("ignoreBlueprintErrors"), bIgnoreBlueprintErrors);
+		if (bIgnoreBlueprintErrors)
+		{
+			if (bIgnoreErrorsBypassArmed)
+			{
+				return MCPError(TEXT("A Blueprint-error bypass PIE launch is already pending"));
+			}
+
+			FString AuthorizationSource;
+			Params->TryGetStringField(TEXT("authorizationSource"), AuthorizationSource);
+			if (!IsRecognizedBypassAuthorization(AuthorizationSource))
+			{
+				return MCPError(TEXT("Blueprint-error bypass requires authorizationSource=user_approval (an approval prompt the user accepted) or authorizationSource=config (a standing ue-mcp.pie.allowIgnoreBlueprintErrors opt-in). Call editor(play_in_editor_ignore_blueprint_errors) rather than pie_control directly."));
+			}
+
+			TArray<UBlueprint*> BlueprintsToSuppress;
+			TArray<TSharedPtr<FJsonValue>> ErroredBlueprints;
+			TArray<TSharedPtr<FJsonValue>> MustCompileBlueprints;
+			for (TObjectIterator<UBlueprint> It; It; ++It)
+			{
+				UBlueprint* Blueprint = *It;
+				if (!IsValid(Blueprint))
+				{
+					continue;
+				}
+
+				// PIE recompiles every non-data Blueprint that IsPossiblyDirty()
+				// reports, which covers BS_Unknown as well as BS_Dirty. Those
+				// compiles can produce brand new errors after this handler has
+				// already decided what to suppress, so refuse them instead of
+				// arming a bypass that would not cover the result.
+				const bool bWillCompileBecauseDirty =
+					!FBlueprintEditorUtils::IsDataOnlyBlueprint(Blueprint)
+					&& Blueprint->IsPossiblyDirty();
+				const bool bErroredLevelBlueprint =
+					FBlueprintEditorUtils::IsLevelScriptBlueprint(Blueprint)
+					&& Blueprint->Status == BS_Error;
+				if (bWillCompileBecauseDirty || bErroredLevelBlueprint)
+				{
+					MustCompileBlueprints.Add(MakeShared<FJsonValueString>(Blueprint->GetPathName()));
+				}
+				else if (Blueprint->Status == BS_Error && Blueprint->bDisplayCompilePIEWarning)
+				{
+					ErroredBlueprints.Add(MakeShared<FJsonValueString>(Blueprint->GetPathName()));
+					BlueprintsToSuppress.Add(Blueprint);
+				}
+			}
+
+			if (!MustCompileBlueprints.IsEmpty())
+			{
+				TSharedPtr<FJsonObject> Blocked = MakeShared<FJsonObject>();
+				Blocked->SetBoolField(TEXT("success"), false);
+				Blocked->SetBoolField(TEXT("blocked"), true);
+				Blocked->SetStringField(TEXT("code"), TEXT("blueprints_require_compile"));
+				Blocked->SetStringField(
+					TEXT("error"),
+					TEXT("Blueprint-error bypass only applies to already-compiled, saved Blueprint errors. Compile and save the listed dirty or errored Level Blueprints first."));
+				Blocked->SetArrayField(TEXT("blueprints"), MustCompileBlueprints);
+				return MCPResult(Blocked);
+			}
+
+			// Nothing errored: this is an ordinary PIE start. Arming anyway
+			// would hold the single-bypass slot for 30s and claim a launch ran
+			// on broken Blueprints when none exist.
+			const bool bArmed = !BlueprintsToSuppress.IsEmpty();
+			if (bArmed)
+			{
+				ArmIgnoreBlueprintErrorsForNextPIELaunch(BlueprintsToSuppress);
+				UE_LOG(LogMCPBridge, Warning,
+					TEXT("PIE starting with the Blueprint compiler-error prompt suppressed for %d Blueprint(s) (authorization: %s). PIE may run stale or invalid Blueprint bytecode."),
+					BlueprintsToSuppress.Num(), *AuthorizationSource);
+				for (const UBlueprint* Blueprint : BlueprintsToSuppress)
+				{
+					UE_LOG(LogMCPBridge, Warning, TEXT("  suppressed Blueprint error: %s"), *Blueprint->GetPathName());
+				}
+			}
+
+			Result->SetBoolField(TEXT("ignoredBlueprintErrors"), bArmed);
+			Result->SetNumberField(TEXT("ignoredBlueprintErrorCount"), BlueprintsToSuppress.Num());
+			Result->SetStringField(TEXT("authorizationSource"), AuthorizationSource);
+			Result->SetArrayField(TEXT("loadedErroredBlueprints"), ErroredBlueprints);
+			Result->SetStringField(
+				TEXT("warning"),
+				bArmed
+					? TEXT("PIE may run stale or invalid Blueprint bytecode. Suppressed warning flags are restored after this PIE launch is processed.")
+					: TEXT("No loaded Blueprint was in an error state, so nothing was suppressed. This was an ordinary PIE start."));
+		}
+		else if (bIgnoreErrorsBypassArmed)
+		{
+			// An earlier bypass never reached PIE (the launch was refused
+			// somewhere else) and its watchdog has not fired yet. Restore the
+			// warning flags now so this ordinary start cannot silently inherit
+			// a suppression nobody authorized it to use.
+			RestoreIgnoreBlueprintErrorsState();
 		}
 
 		FRequestPlaySessionParams SessionParams;

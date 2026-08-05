@@ -8,6 +8,12 @@ import { searchTools } from "../tool-search.js";
 import { Vec3, Rotator } from "../schemas.js";
 import { FunctionArgs, normalizeFunctionArgs, normalizePythonArgs } from "../function-args.js";
 
+/** Where a caller declares a standing opt-in to the Blueprint-error bypass.
+ *  Rides the normal global < project < env < local config cascade, so a
+ *  developer can enable it in the untracked ue-mcp.local.yml without
+ *  committing the relaxed behavior for the whole team. */
+const IGNORE_BLUEPRINT_ERRORS_CONFIG_KEY = "ue-mcp.pie.allowIgnoreBlueprintErrors";
+
 export const editorTool: ToolDef = categoryTool(
   "editor",
   "Editor commands, Python execution, PIE, undo/redo, hot reload, viewport, performance, sequencer, build pipeline, logs, editor control.",
@@ -197,6 +203,66 @@ export const editorTool: ToolDef = categoryTool(
     get_property: bp("Read UObject property. Params: objectPath, propertyName", "get_property"),
     describe_object: bp("Describe a UObject and optionally list/read properties. Params: objectPath, includeProperties?, includeValues?, propertyNames?", "describe_object"),
     play_in_editor: bp("PIE control. Params: pieAction (start|stop|status), waitForAssetRegistry? (start only; default true - block until the AssetRegistry initial scan completes before requesting PIE, otherwise PIE silently no-ops on cold editor starts), assetRegistryTimeoutSeconds? (default 180) (#406)", "pie_control", (p) => ({ action: p.pieAction ?? "status", waitForAssetRegistry: p.waitForAssetRegistry, assetRegistryTimeoutSeconds: p.assetRegistryTimeoutSeconds })),
+    play_in_editor_ignore_blueprint_errors: {
+      description: `Start PIE for one launch with the editor's unresolved-Blueprint-error prompt suppressed. PIE then runs whatever bytecode those Blueprints last compiled to, so the launch is authorized per call: set ${IGNORE_BLUEPRINT_ERRORS_CONFIG_KEY} to true in your ue-mcp config to pre-authorize it, otherwise the user answers an MCP approval prompt. The bridge refuses the launch when a Blueprint would have to be recompiled first (dirty non-data Blueprints, errored Level Blueprints) and lists every errored Blueprint it suppressed in loadedErroredBlueprints. Params: waitForAssetRegistry? (default true), assetRegistryTimeoutSeconds? (default 180).`,
+      handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
+        const preauthorized = ctx.project.config.pie?.allowIgnoreBlueprintErrors === true;
+        let authorizationSource = "config";
+
+        if (!preauthorized) {
+          authorizationSource = "user_approval";
+          if (!ctx.elicit) {
+            return {
+              success: false,
+              blocked: true,
+              code: "approval_required",
+              message: `This action needs a user approval prompt, and the connected MCP client did not advertise the elicitation capability. Set ${IGNORE_BLUEPRINT_ERRORS_CONFIG_KEY} to true in ue-mcp.local.yml to pre-authorize it instead.`,
+            };
+          }
+
+          let approval;
+          try {
+            approval = await ctx.elicit({
+              message: [
+                "Start Play In Editor while bypassing unresolved Blueprint compiler-error dialogs?",
+                "",
+                "PIE may run stale or invalid Blueprint bytecode. Runtime behavior and validation results may be unreliable until those Blueprint errors are fixed.",
+                "",
+                "Approve only for this PIE launch.",
+              ].join("\n"),
+              requestedSchema: {
+                type: "object",
+                properties: {},
+              },
+            });
+          } catch (error) {
+            return {
+              success: false,
+              blocked: true,
+              code: "approval_prompt_failed",
+              message: error instanceof Error ? error.message : String(error),
+            };
+          }
+
+          if (approval.action !== "accept") {
+            return {
+              success: false,
+              blocked: true,
+              code: approval.action === "decline" ? "user_declined" : "user_cancelled",
+              message: "PIE was not started because bypass approval was not granted.",
+            };
+          }
+        }
+
+        return ctx.bridge.call("pie_control", {
+          action: "start",
+          ignoreBlueprintErrors: true,
+          authorizationSource,
+          waitForAssetRegistry: p.waitForAssetRegistry,
+          assetRegistryTimeoutSeconds: p.assetRegistryTimeoutSeconds,
+        });
+      },
+    },
     get_runtime_value: bp("Read PIE actor property. Params: actorLabel, propertyName (supports dotted paths: component.field or component.struct.field for nested reads on component subobjects, #344/#381)", "get_runtime_value"),
     get_pie_pawn: bp("Resolve the controlled pawn in the active PIE world. Params: playerIndex? (default 0). Returns actorLabel/class/location/rotation (#228/#229)", "get_pie_pawn", (p) => ({ playerIndex: p.playerIndex })),
     list_pie_instances: bp("List the running PIE worlds with their instance id, net mode (standalone|listenServer|dedicatedServer|client), player count and whether they own a game viewport. In a multiplayer PIE session every other runtime action resolves the primary world (the server) unless you pass pieInstance, so this is how you discover that a client exists and what id addresses it. Params: none (#778)", "list_pie_instances"),
