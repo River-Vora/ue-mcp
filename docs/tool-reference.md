@@ -2,7 +2,7 @@
 
 This page lists ue-mcp's own category tools and actions. For the official Unreal 5.8 tools that ue-mcp wraps (surfaced inside these same categories), see [Native Tools](native-tools.md).
 
-UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->761+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
+UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->762+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
 
 !!! tip "First call in any session"
     Start with `project(action="get_status")` to check the connection, then `level(action="get_outliner")` or `asset(action="list")` to explore.
@@ -653,7 +653,6 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | Action | Description |
 |--------|-------------|
 | `start_editor` | Launch Unreal Editor and BLOCK until it is fully ready (not merely until the socket answers), rendering a startup progress bar in the terminal. Returns the phase timeline it waited through. Do NOT poll get_engine_state or get_status afterwards: this call already waited, and a ready editor is the only way it returns success. Params: `timeout? (seconds, default 300)` |
-| `get_engine_state` | What the engine is REALLY doing, read from outside the game thread: startup phase from the editor's own log, process table (PID, command line, responding), the plugin's status snapshot (slow-task name and percent, active modal dialog, game-thread stall), and native dialog windows. Call this ONCE when something is already wrong (handlers timing out, an editor that will not come up). Never call it in a wait loop: start_editor blocks until ready on its own, and polling this during startup burns tokens re-reading state that is already tracked. Params: `probeWindows? (default true; scans native windows, costs ~2s)` |
 | `get_engine_state` | What the engine is REALLY doing, read from outside the game thread: startup phase from the editor's own log, process table (PID, command line, responding), the plugin's status snapshot (slow-task name and percent, active modal dialog, game-thread stall), and native dialog windows. Call this ONCE when something is already wrong (handlers timing out, an editor that will not come up). Never call it in a wait loop: start_editor blocks until ready on its own, and polling this during startup burns tokens re-reading state that is already tracked. Params: `probeWindows? (default true; scans native windows, costs ~2s)` |
 | `stop_editor` | Close Unreal Editor gracefully (asks the editor to quit itself via the bridge; never an OS kill) |
 | `restart_editor` | Stop then start the editor |
