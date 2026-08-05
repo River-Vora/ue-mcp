@@ -636,6 +636,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `set_root` | Replace WBP root with an existing widget by name (#365). Params: `assetPath, widgetName` |
 | `wrap_root` | Wrap the current root in a new panel widget (UMG 'Wrap With'). Params: `assetPath, wrapperClass (must be a UPanelWidget subclass), wrapperName? (#365)` |
 | `list_classes` | List available widget classes |
+| `extract_subtree` | Lift an authored designer subtree out of one WidgetBlueprint into a standalone one, using UMG's own clipboard serializer so hierarchy, child order, editable properties, panel slot data and named-slot content survive. The selected widget becomes the destination root. dryRun defaults to true and only returns the name mapping - pass dryRun=false to actually write the asset. The destination must be absent or empty; an exact-shape replay returns existed. The source is never compiled or saved. Params: `sourceAssetPath, sourceWidgetName, destinationAssetPath, destinationParentClass?, destinationRootName?, dryRun?` |
 | `list_runtime` | (#160) List live UUserWidget instances in the PIE world. Params: `classFilter?, namePrefix?, viewportOnly?` |
 | `get_runtime` | (#160) Inspect a live PIE widget tree with text/visibility/brush/percent plus style values: renderOpacity (all), colorAndOpacity (TextBlock/Image), Border brushColor/contentColorAndOpacity (#592). Params: `widgetName? \| className?, childName?, maxDepth?` |
 | `get_runtime_delegates` | (#161) Read delegate binding state on a live PIE widget. Params: `widgetName, className?` |
