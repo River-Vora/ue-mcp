@@ -2360,6 +2360,21 @@ namespace
 		if (Hit(TEXT("geometrycollections")) || Hit(TEXT("geometry_collections"))) { OutUsage = MATUSAGE_GeometryCollections; return true; }
 		return false;
 	}
+
+	// UMaterial::SetMaterialUsage became a one-argument virtual in UE 5.8. The
+	// only form before that takes a bNeedsRecompile out param, and the 5.8
+	// build keeps it as a deprecated inline shim that forwards and ignores the
+	// param. Calling the one-argument form on 5.7 is a hard compile error
+	// (C2660), so pick the form the engine in hand actually declares.
+	static bool ApplyMaterialUsage(UMaterial* Material, EMaterialUsage Usage)
+	{
+#if UE_MCP_HAS_5_8_API
+		return Material->SetMaterialUsage(Usage);
+#else
+		bool bNeedsRecompile = false;
+		return Material->SetMaterialUsage(bNeedsRecompile, Usage);
+#endif
+	}
 }
 
 // #617 read/write a MaterialExpressionCustom's HLSL Code, named inputs, and
@@ -2500,7 +2515,7 @@ TSharedPtr<FJsonValue> FMaterialHandlers::SetMaterialUsage(const TSharedPtr<FJso
 		}
 		// The bNeedsRecompile out param is gone in the virtual implementation;
 		// the shim that kept it always ignored the value anyway.
-		Material->SetMaterialUsage(Usage);
+		ApplyMaterialUsage(Material, Usage);
 		Applied.Add(U);
 	}
 
@@ -2598,7 +2613,7 @@ TSharedPtr<FJsonValue> FMaterialHandlers::CreateMaterialSimple(const TSharedPtr<
 				EMaterialUsage U;
 				if (ParseMaterialUsage(S, U))
 				{
-					Material->SetMaterialUsage(U);
+					ApplyMaterialUsage(Material, U);
 				}
 			}
 		}
