@@ -1,34 +1,150 @@
 import WebSocket from "ws";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createRequire } from "node:module";
 import { McpError, ErrorCode } from "./errors.js";
 import { debug, warn } from "./log.js";
 import { DEFAULT_BRIDGE_PORT, deriveProjectPort } from "./port.js";
+import { isPidAlive } from "./editor-target.js";
+
+/**
+ * The wire protocol this client speaks. Must match
+ * UEMCP_BRIDGE_PROTOCOL_VERSION in the plugin's MCPHandlerRegistration.h.
+ *
+ * The plugin is compiled by the user, and `attach` is deliberately
+ * non-destructive, so an npm upgrade routinely leaves a new client talking to
+ * an arbitrarily old binary. Comparing these two numbers is how that gets
+ * named instead of surfacing as an unexplained "Unknown method".
+ */
+export const CLIENT_PROTOCOL_VERSION = 2;
+
+/** Answer to get_bridge_capabilities, or what we infer when there is none. */
+export interface BridgeCapabilities {
+  protocolVersion: number;
+  handlerApiVersion?: number;
+  /** Compile timestamp of the loaded plugin binary. The stale-DLL tell. */
+  builtAt?: string;
+  engineVersion?: string;
+  projectName?: string;
+  instanceId?: string;
+  pid?: number;
+  port?: number;
+  startedAt?: string;
+  features?: string[];
+  actions?: string[];
+  actionCount?: number;
+  /** True when the bridge did not answer the handshake at all. */
+  legacy: boolean;
+}
+
+/** What a bridge that predates the handshake looks like. */
+const LEGACY_CAPABILITIES: BridgeCapabilities = { protocolVersion: 1, legacy: true };
+
+let cachedClientVersion: string | null = null;
+function clientPackageVersion(): string {
+  if (cachedClientVersion) return cachedClientVersion;
+  try {
+    const require = createRequire(import.meta.url);
+    cachedClientVersion = (require("../package.json") as { version: string }).version;
+  } catch {
+    cachedClientVersion = "unknown";
+  }
+  return cachedClientVersion;
+}
+
+/**
+ * Describe a client/plugin protocol mismatch in terms the reader can act on,
+ * naming both versions. Returns null when the two agree.
+ */
+export function describeProtocolMismatch(
+  capabilities: BridgeCapabilities | null,
+  method?: string,
+): string | null {
+  if (!capabilities) return null;
+  const theirs = capabilities.protocolVersion;
+  const ours = CLIENT_PROTOCOL_VERSION;
+  if (theirs === ours) return null;
+
+  const built = capabilities.builtAt ? ` The loaded plugin binary was built ${capabilities.builtAt}.` : "";
+  const missing =
+    method && capabilities.actions && !capabilities.actions.includes(method)
+      ? ` '${method}' is not among the ${capabilities.actionCount ?? capabilities.actions.length} actions the running plugin registered.`
+      : "";
+
+  if (theirs < ours) {
+    return (
+      `The Unreal bridge plugin speaks protocol version ${theirs}, this ue-mcp client (v${clientPackageVersion()}) speaks version ${ours}.` +
+      `${missing}${built}` +
+      ` Rebuild the plugin against the current package: run 'npx ue-mcp update' in the project, then rebuild the editor binaries.`
+    );
+  }
+  return (
+    `The Unreal bridge plugin speaks protocol version ${theirs}, this ue-mcp client (v${clientPackageVersion()}) speaks only version ${ours}.` +
+    `${built}` +
+    ` Update the npm package to match the plugin: 'npm install ue-mcp@latest'.`
+  );
+}
+
+/** The record the running bridge publishes for this project. */
+export interface BridgeLockfile {
+  port: number;
+  pid?: number;
+  startedAt?: string;
+  /** Identifies the server object that wrote this, across pid recycling. */
+  instanceId?: string;
+  status?: string;
+  apiVersion?: number;
+  handlerApiVersion?: number;
+}
+
+/** What the bridge leaves behind when the editor started but the bridge did not. */
+export interface BridgeErrorRecord {
+  status?: string;
+  pid?: number;
+  failedAt?: string;
+  firstPortTried?: number;
+  lastPortTried?: number;
+  errorCode?: number;
+  detail?: string;
+}
+
+function readJsonFile<T>(file: string): T | null {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8")) as T;
+  } catch {
+    return null;
+  }
+}
 
 // #492: per-project port lockfile published by the bridge plugin. When the
 // default port (9877) is taken by another editor, the plugin walks up and
 // publishes the actual bound port here. The client reads this before
 // falling back to the default port so a second editor finds the right one.
-export function readBridgeLockfile(
-  uprojectPath: string | null,
-): { port: number; pid: number; startedAt?: string; apiVersion?: number } | null {
+export function readBridgeLockfile(uprojectPath: string | null): BridgeLockfile | null {
   if (!uprojectPath) return null;
-  const lockfile = path.join(
-    path.dirname(uprojectPath),
-    "Saved",
-    "UE_MCP_Bridge",
-    "port.json",
+  const parsed = readJsonFile<BridgeLockfile>(
+    path.join(path.dirname(uprojectPath), "Saved", "UE_MCP_Bridge", "port.json"),
   );
-  try {
-    const raw = fs.readFileSync(lockfile, "utf8");
-    const parsed = JSON.parse(raw);
-    if (typeof parsed?.port === "number" && parsed.port > 0 && parsed.port < 65536) {
-      return parsed;
-    }
-  } catch {
-    // Missing or unreadable - fall back to default.
+  if (!parsed || typeof parsed.port !== "number" || parsed.port <= 0 || parsed.port >= 65536) {
+    return null;
   }
-  return null;
+  return parsed;
+}
+
+/**
+ * #821: read the record the bridge writes when the editor came up but the
+ * bridge could not bind. Without it, "editor alive, bridge dead" was
+ * indistinguishable from "no editor", and the client said the wrong thing.
+ */
+export function readBridgeErrorRecord(uprojectPath: string | null): BridgeErrorRecord | null {
+  if (!uprojectPath) return null;
+  const parsed = readJsonFile<BridgeErrorRecord>(
+    path.join(path.dirname(uprojectPath), "Saved", "UE_MCP_Bridge", "bridge-error.json"),
+  );
+  if (!parsed || parsed.status !== "bind-failed") return null;
+  // A record from an editor that has since exited describes nothing current.
+  if (typeof parsed.pid === "number" && parsed.pid > 0 && !isPidAlive(parsed.pid)) return null;
+  return parsed;
 }
 
 export interface BridgeResponse {
@@ -41,6 +157,8 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  /** Kept so an "unknown method" answer can name the method it was about. */
+  method: string;
 }
 
 /**
@@ -94,6 +212,8 @@ export interface BridgeTarget {
 /** Minimal interface for tool handlers — enables mocking in tests. */
 export interface IBridge {
   readonly isConnected: boolean;
+  /** #821: what the connected bridge reported at handshake, when there is one. */
+  readonly capabilities?: BridgeCapabilities | null;
   call(method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<unknown>;
   connect(timeoutMs?: number): Promise<void>;
   /**
@@ -113,6 +233,12 @@ export class EditorBridge implements IBridge {
   private reconnectTimer: ReturnType<typeof setInterval> | null = null;
   private connectInFlight: Promise<void> | null = null;
   private idCounter = 0;
+
+  /**
+   * #821: what the bridge said it was, answered on connect. Null before the
+   * first connection. `legacy` marks a plugin old enough not to answer at all.
+   */
+  public capabilities: BridgeCapabilities | null = null;
 
   // How this.port was decided. Precedence for the *preferred* port (the one
   // used when no editor lockfile is present) is explicit > env > config >
@@ -301,10 +427,19 @@ export class EditorBridge implements IBridge {
     const url = `ws://${this.host}:${this.port}`;
     const generation = this.targetGeneration;
 
+    // #821: an editor whose bridge failed to bind is running and unreachable at
+    // the same time. It leaves a record saying so, and quoting it here is the
+    // difference between "start the editor" and "the editor is up, its bridge
+    // is not".
+    const explainFailure = (base: string): string => {
+      const failed = readBridgeErrorRecord(this.projectPathForLockfile);
+      return failed?.detail ? `${base}. ${failed.detail}` : base;
+    };
+
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         ws.terminate();
-        reject(new McpError(ErrorCode.BRIDGE_TIMEOUT, `Connection to editor bridge timed out (${url})`));
+        reject(new McpError(ErrorCode.BRIDGE_TIMEOUT, explainFailure(`Connection to editor bridge timed out (${url})`)));
       }, timeoutMs);
 
       const ws = new WebSocket(url);
@@ -325,7 +460,12 @@ export class EditorBridge implements IBridge {
         }
         this.ws = ws;
         this.setupListeners(ws);
-        resolve();
+        // #821: ask what we are talking to before anything else does. The
+        // answer is cheap, it never touches the game thread, and without it a
+        // client running against an older plugin can only report the symptom.
+        // Bounded by the caller's own connect budget: a bridge that will not
+        // answer this is not one worth waiting past that for.
+        this.handshake(ws, timeoutMs).then(() => resolve(), () => resolve());
       });
 
       ws.on("error", (err) => {
@@ -333,7 +473,7 @@ export class EditorBridge implements IBridge {
         reject(
           new McpError(
             ErrorCode.NOT_CONNECTED,
-            `Failed to connect to editor bridge at ${url}: ${err.message}`,
+            explainFailure(`Failed to connect to editor bridge at ${url}: ${err.message}`),
           ),
         );
       });
@@ -392,7 +532,7 @@ export class EditorBridge implements IBridge {
         ));
       }, timeout);
 
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, method });
       ws.send(JSON.stringify(request), (err) => {
         if (!err) return;
 
@@ -430,6 +570,83 @@ export class EditorBridge implements IBridge {
     if (!ws) return;
     if (opts?.graceful) ws.close();
     else ws.terminate();
+  }
+
+  /**
+   * Ask the bridge what it is. Deliberately not routed through call(): a slow
+   * or absent answer here must not terminate the socket the way a timed-out
+   * call does, and a bridge old enough to have no answer is a normal outcome
+   * rather than a failure.
+   */
+  private handshake(ws: WebSocket, timeoutMs = 5000): Promise<BridgeCapabilities> {
+    return new Promise((resolve) => {
+      const id = `cap-${++this.idCounter}`;
+      let settled = false;
+
+      const detach = (): void => {
+        clearTimeout(timer);
+        ws.off("message", onMessage);
+        ws.off("close", onClose);
+      };
+
+      // The socket went away before the bridge answered. Settle now rather
+      // than sitting out the rest of the connect budget on a dead socket, and
+      // record nothing: a dropped connection says nothing about which protocol
+      // version the plugin speaks, so claiming it is a legacy one here would
+      // put a "rebuild your plugin" warning in front of a network fault.
+      const onClose = (): void => {
+        if (settled) return;
+        settled = true;
+        detach();
+        this.capabilities = null;
+        resolve({ ...LEGACY_CAPABILITIES });
+      };
+
+      const finish = (capabilities: BridgeCapabilities): void => {
+        if (settled) return;
+        settled = true;
+        detach();
+        this.capabilities = capabilities;
+
+        const mismatch = describeProtocolMismatch(capabilities);
+        if (mismatch) {
+          warn("bridge", mismatch);
+        } else {
+          debug("bridge", `bridge protocol ${capabilities.protocolVersion}, ${capabilities.actionCount ?? "?"} actions, built ${capabilities.builtAt ?? "unknown"}`);
+        }
+        resolve(capabilities);
+      };
+
+      const onMessage = (data: WebSocket.RawData): void => {
+        let msg: BridgeResponse;
+        try {
+          msg = JSON.parse(data.toString()) as BridgeResponse;
+        } catch {
+          return;
+        }
+        if (msg.id !== id) return;
+        if (msg.error || !msg.result) {
+          // -32601 from a bridge that has never heard of the handshake. That
+          // silence is itself the answer: it predates the protocol version.
+          finish({ ...LEGACY_CAPABILITIES });
+          return;
+        }
+        const result = msg.result as Partial<BridgeCapabilities>;
+        finish({
+          ...result,
+          protocolVersion: typeof result.protocolVersion === "number" ? result.protocolVersion : 1,
+          legacy: false,
+        });
+      };
+
+      const timer = setTimeout(() => finish({ ...LEGACY_CAPABILITIES }), timeoutMs);
+
+      ws.on("message", onMessage);
+      ws.on("close", onClose);
+      ws.send(JSON.stringify({ id, method: "get_bridge_capabilities", params: {} }), (err) => {
+        if (err) onClose();
+      });
+    });
   }
 
   /** Record a call the client gave up on, capping the history. */
@@ -478,7 +695,16 @@ export class EditorBridge implements IBridge {
         clearTimeout(pending.timer);
 
         if (msg.error) {
-          pending.reject(new McpError(ErrorCode.BRIDGE_ERROR, `Bridge error: ${msg.error.message}`));
+          // #821: -32601 against an older plugin used to read as a typo. Say
+          // which side is behind, and name both versions.
+          const mismatch =
+            msg.error.code === -32601 ? describeProtocolMismatch(this.capabilities, pending.method) : null;
+          pending.reject(
+            new McpError(
+              ErrorCode.BRIDGE_ERROR,
+              mismatch ? `Bridge error: ${msg.error.message}. ${mismatch}` : `Bridge error: ${msg.error.message}`,
+            ),
+          );
         } else {
           pending.resolve(msg.result);
         }
@@ -487,14 +713,23 @@ export class EditorBridge implements IBridge {
       }
     });
 
-    ws.on("close", () => {
+    ws.on("close", (code: number, reasonRaw: Buffer) => {
       // A socket we already replaced (retarget, reconnect) closes after its
       // successor is live. Without this guard its late close event would null
       // out the new connection and fail the calls riding on it.
       if (this.ws !== ws) return;
+
+      // The bridge closes with a status code and a reason when it refuses a
+      // frame: 1009 for a message over its size bound, 1002 for a frame stream
+      // that stopped making sense. Repeating both verbatim is the difference
+      // between "something broke" and a caller knowing it sent too much.
+      const reason = reasonRaw?.toString("utf8") ?? "";
+      const detail = reason
+        ? `Bridge connection closed by the editor (code ${code}): ${reason}`
+        : `Bridge connection lost (close code ${code})`;
       for (const [, pending] of this.pending) {
         clearTimeout(pending.timer);
-        pending.reject(new McpError(ErrorCode.CONNECTION_LOST, "Bridge connection lost"));
+        pending.reject(new McpError(ErrorCode.CONNECTION_LOST, detail));
       }
       this.pending.clear();
       this.ws = null;
