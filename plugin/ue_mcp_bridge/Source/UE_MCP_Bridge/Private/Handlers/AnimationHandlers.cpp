@@ -1042,33 +1042,45 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AddAnimNotify(const TSharedPtr<FJsonO
 		}
 	}
 
-	if (NewNotify)
+	// notifyProperties writes onto the spawned notify OBJECT, so it only has
+	// somewhere to land when notifyClass resolved. Reporting success while
+	// quietly dropping the requested values is the failure mode this guards.
+	const TSharedPtr<FJsonObject>* NotifyProperties = nullptr;
+	if (Params->TryGetObjectField(TEXT("notifyProperties"), NotifyProperties)
+		&& NotifyProperties && (*NotifyProperties).IsValid() && (*NotifyProperties)->Values.Num() > 0)
 	{
-		const TSharedPtr<FJsonObject>* NotifyProperties = nullptr;
-		if (Params->TryGetObjectField(TEXT("notifyProperties"), NotifyProperties) && NotifyProperties)
+		if (!NewNotify)
 		{
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Entry : (*NotifyProperties)->Values)
+			if (NotifyClassName.IsEmpty())
 			{
-				FProperty* Property = NewNotify->GetClass()->FindPropertyByName(FName(*Entry.Key));
-				if (!Property)
-				{
-					return MCPError(FString::Printf(
-						TEXT("Notify class '%s' has no property '%s'"),
-						*NewNotify->GetClass()->GetName(),
-						*Entry.Key));
-				}
-				FString PropertyError;
-				if (!MCPJsonProperty::SetJsonOnProperty(
-					Property,
-					Property->ContainerPtrToValuePtr<void>(NewNotify),
-					Entry.Value,
-					PropertyError))
-				{
-					return MCPError(FString::Printf(
-						TEXT("Failed to set notify property '%s': %s"),
-						*Entry.Key,
-						*PropertyError));
-				}
+				return MCPError(TEXT("'notifyProperties' requires 'notifyClass': a bare notify event has no notify object to write properties onto"));
+			}
+			return MCPError(FString::Printf(
+				TEXT("notifyClass '%s' did not resolve to a UAnimNotify subclass, so 'notifyProperties' could not be applied"),
+				*NotifyClassName));
+		}
+
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Entry : (*NotifyProperties)->Values)
+		{
+			FProperty* Property = NewNotify->GetClass()->FindPropertyByName(FName(*Entry.Key));
+			if (!Property)
+			{
+				return MCPError(FString::Printf(
+					TEXT("Notify class '%s' has no property '%s'"),
+					*NewNotify->GetClass()->GetName(),
+					*Entry.Key));
+			}
+			FString PropertyError;
+			if (!MCPJsonProperty::SetJsonOnProperty(
+				Property,
+				Property->ContainerPtrToValuePtr<void>(NewNotify),
+				Entry.Value,
+				PropertyError))
+			{
+				return MCPError(FString::Printf(
+					TEXT("Failed to set notify property '%s': %s"),
+					*Entry.Key,
+					*PropertyError));
 			}
 		}
 	}
