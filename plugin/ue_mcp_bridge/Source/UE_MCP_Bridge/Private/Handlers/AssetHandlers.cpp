@@ -1957,35 +1957,11 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateDataAsset(const TSharedPtr<FJsonObj
 	FString ClassName;
 	if (auto Err = RequireStringAlt(Params, TEXT("className"), TEXT("class"), ClassName)) return Err;
 
-	// Resolve the DataAsset subclass by name or path
-	UClass* DataClass = nullptr;
-	if (ClassName.StartsWith(TEXT("/")))
-	{
-		DataClass = LoadClass<UObject>(nullptr, *ClassName);
-		if (!DataClass) DataClass = LoadObject<UClass>(nullptr, *ClassName);
-	}
-	if (!DataClass)
-	{
-		FString Trimmed = ClassName;
-		Trimmed.RemoveFromEnd(TEXT("_C"));
-		// Attempt find in any package (fallback: scan all loaded UClass objects)
-		for (TObjectIterator<UClass> It; It; ++It)
-		{
-			if (It->GetName() == Trimmed || It->GetName() == ClassName)
-			{
-				DataClass = *It;
-				break;
-			}
-		}
-	}
-	if (!DataClass)
-	{
-		return MCPError(FString::Printf(TEXT("Class not found: %s (pass full /Script/Module.ClassName or a loaded class name)"), *ClassName));
-	}
-	if (!DataClass->IsChildOf(UDataAsset::StaticClass()))
-	{
-		return MCPError(FString::Printf(TEXT("Class %s is not a UDataAsset subclass"), *ClassName));
-	}
+	// #823: shared resolution, so the prefixed C++ spelling ("UMyConfig",
+	// "/Script/MyGame.UMyConfig") resolves to the class UE registered as
+	// "MyConfig" instead of reporting the class missing.
+	UClass* DataClass = MCPResolveClass(ClassName);
+	if (auto Err = MCPCheckClassUsable(ClassName, DataClass, UDataAsset::StaticClass())) return Err;
 
 	const FString FullPath = FString::Printf(TEXT("%s/%s.%s"), *PackagePath, *Name, *Name);
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
@@ -2059,39 +2035,14 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateAssetByClass(const TSharedPtr<FJson
 	FString ClassName;
 	if (auto Err = RequireStringAlt(Params, TEXT("className"), TEXT("class"), ClassName)) return Err;
 
-	// Resolve the class by path or (loaded) name - same resolution as create_data_asset.
-	UClass* AssetClass = nullptr;
-	if (ClassName.StartsWith(TEXT("/")))
-	{
-		AssetClass = LoadClass<UObject>(nullptr, *ClassName);
-		if (!AssetClass) AssetClass = LoadObject<UClass>(nullptr, *ClassName);
-	}
-	if (!AssetClass)
-	{
-		FString Trimmed = ClassName;
-		Trimmed.RemoveFromEnd(TEXT("_C"));
-		for (TObjectIterator<UClass> It; It; ++It)
-		{
-			if (It->GetName() == Trimmed || It->GetName() == ClassName)
-			{
-				AssetClass = *It;
-				break;
-			}
-		}
-	}
-	if (!AssetClass)
-	{
-		return MCPError(FString::Printf(TEXT("Class not found: %s (pass full /Script/Module.ClassName or a loaded class name)"), *ClassName));
-	}
-
+	// #823: shared resolution - same as create_data_asset, prefix tolerant.
+	UClass* AssetClass = MCPResolveClass(ClassName);
 	// Guard classes that cannot be standalone assets or need a specialized flow.
-	if (AssetClass->HasAnyClassFlags(CLASS_Abstract))
-	{
-		return MCPError(FString::Printf(TEXT("Class %s is abstract and cannot be instantiated as an asset"), *ClassName));
-	}
+	if (auto Err = MCPCheckClassUsable(ClassName, AssetClass)) return Err;
 	if (AssetClass->IsChildOf(AActor::StaticClass()) || AssetClass->IsChildOf(UActorComponent::StaticClass()))
 	{
-		return MCPError(FString::Printf(TEXT("Class %s is an actor/component, not an asset - use level(place_actor) / level(add_component_to_actor)"), *ClassName));
+		return MCPClassUnusableError(ClassName, AssetClass, TEXT("not_an_asset"),
+			TEXT("it is an actor or component class, not an asset. Use level(place_actor) or level(add_component_to_actor)."));
 	}
 
 	const FString FullPath = FString::Printf(TEXT("%s/%s.%s"), *PackagePath, *Name, *Name);
