@@ -39,4 +39,11 @@ describe("widget inspect_runtime_instances", () => {
     expect(widgetTool.schema.maxInstances.safeParse(501).success).toBe(false);
     expect(widgetTool.schema.maxNodesPerInstance.safeParse(0).success).toBe(false);
   });
+
+  it("keeps the editor world out of the runtime world scope", () => {
+    for (const scope of ["pie", "game", "auto"]) {
+      expect(widgetTool.schema.world.safeParse(scope).success).toBe(true);
+    }
+    expect(widgetTool.schema.world.safeParse("editor").success).toBe(false);
+  });
 });
