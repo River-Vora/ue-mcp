@@ -388,9 +388,12 @@ namespace MCPPropertyText
 		FString Text;
 		Prop->ExportText_Direct(Text, ValueAddr, ValueAddr, Owner, PPF_None);
 
+		// The probe imports with no owner on purpose. This runs inside a READ,
+		// and an owner is what lets the importer construct instanced subobjects
+		// under the real asset: a question about the text must not touch it.
 		FDefaultConstructedPropertyElement Probe(Prop);
 		FString Error;
-		if (!ImportTextIntoProperty(Prop, Probe.GetObjAddress(), Text, Owner, Error)) return false;
+		if (!ImportTextIntoProperty(Prop, Probe.GetObjAddress(), Text, nullptr, Error)) return false;
 		return CountMapPairs(Prop, Probe.GetObjAddress()) == CountMapPairs(Prop, ValueAddr);
 	}
 }
