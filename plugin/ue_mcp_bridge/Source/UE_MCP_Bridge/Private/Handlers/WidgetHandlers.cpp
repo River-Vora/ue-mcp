@@ -1296,7 +1296,10 @@ namespace WidgetRuntime_Internal
 		Obj->SetStringField(TEXT("class"), Widget->GetClass()->GetName());
 		if (Ctx.bIncludeLayout)
 		{
-			Obj->SetStringField(TEXT("path"), WidgetPath);
+			// Named widgetPath, not path: everywhere else in this category
+			// "path" is the asset path, and one name meaning two things inside
+			// the same tool is what #798 was filed about.
+			Obj->SetStringField(TEXT("widgetPath"), WidgetPath);
 		}
 		Obj->SetStringField(TEXT("visibility"), VisibilityToString(Widget->GetVisibility()));
 		Obj->SetBoolField(TEXT("isVisible"), Widget->IsVisible());

@@ -35,7 +35,7 @@ With `includeLayout`, every node adds:
 - authored clipping mode and a derived effective clipping rectangle;
 - parent bounds and whether the child extends beyond them;
 - viewport rectangle and whether the node falls outside it;
-- `path`, the stable identifier used to match nodes between captures;
+- `widgetPath`, the stable identifier used to match nodes between captures;
 - `diagnostics`, a list of `{code, severity, message}` for suspicious layout
   relationships.
 
