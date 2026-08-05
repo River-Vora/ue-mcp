@@ -7,6 +7,12 @@
 
 Locate the widget with `widgetName` (exact instance name) or `className` (first match). `widget(action="list_runtime")` lists the live instances.
 
+This is one interaction per call, and it calls the widget's own setter rather
+than synthesizing an input event. For a timed sequence of interactions, or for
+real key and axis events at the input layer, use `pie(inject_input*)` from the
+[PIE Studio](pie-record-replay.md) plugin. See [Widgets](widgets.md) for where
+that line sits.
+
 ## Supported child widgets
 
 | Widget class | `value` | Delegates broadcast |

@@ -22,6 +22,28 @@ of confusion:
   before PIE starts returns an error rather than quietly answering with an
   Editor Utility Widget.
 
+## Where the runtime actions stop
+
+The runtime actions here are point-in-time: one read of the current state, or
+one write plus the delegate broadcast that a real interaction would fire. That
+is the line this project keeps. Core does authoring and point-in-time
+inspection; recording, replaying, sampling over a window, and synthesizing
+input events belong to the [PIE Studio](pie-record-replay.md) plugin.
+
+So reach for PIE Studio instead when you want to:
+
+- capture a widget's state every frame over a window rather than once, which is
+  `pie(observe_arm)` and `pie(observe_read)`;
+- drive a scripted sequence of interactions with timing, which is
+  `pie(inject_input_tape)`;
+- synthesize a real key, button or axis event at the input layer rather than
+  calling a widget's own setter, which is `pie(inject_input)`;
+- record a session and replay it with drift comparison.
+
+The same split already governs the `editor` category: `stage_game_input` sets
+the input mode because that is one call, while the injection itself lives in
+`pie(inject_input*)`.
+
 ## Runtime pages
 
 | Page | Use it when |
