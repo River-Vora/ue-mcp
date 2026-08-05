@@ -117,9 +117,13 @@ TSharedPtr<FJsonValue> FWidgetHandlers::InspectRuntimeInstances(const TSharedPtr
 	}
 
 	const bool bViewportOnly = OptionalBool(Params, TEXT("viewportOnly"), false);
-	const bool bIncludeSubtree = OptionalBool(Params, TEXT("includeSubtree"), false);
 	const FString ChildName = OptionalString(Params, TEXT("childName"));
 	const FString ChildClassFilter = OptionalString(Params, TEXT("childClassFilter"));
+	// A child filter only ever selects subtree nodes, so passing one without
+	// includeSubtree used to return the root node alone and look like "no child
+	// matched". Treat either filter as an implicit request for the subtree.
+	const bool bIncludeSubtree = OptionalBool(Params, TEXT("includeSubtree"), false)
+		|| !ChildName.IsEmpty() || !ChildClassFilter.IsEmpty();
 	const int32 MaxInstances = FMath::Clamp(OptionalInt(Params, TEXT("maxInstances"), 100), 1, 500);
 	const int32 MaxNodesPerInstance = FMath::Clamp(OptionalInt(Params, TEXT("maxNodesPerInstance"), 250), 1, 2000);
 	const TArray<FString> PropertyNames = ReadStringArray(Params, TEXT("propertyNames"));
@@ -207,6 +211,7 @@ TSharedPtr<FJsonValue> FWidgetHandlers::InspectRuntimeInstances(const TSharedPtr
 	Result->SetStringField(TEXT("netMode"), DescribePIENetMode(World));
 	const int32 PIEInstance = ResolvePIEInstance(World);
 	if (PIEInstance != INDEX_NONE) Result->SetNumberField(TEXT("pieInstance"), PIEInstance);
+	Result->SetBoolField(TEXT("includeSubtree"), bIncludeSubtree);
 	Result->SetArrayField(TEXT("instances"), InstanceResults);
 	Result->SetNumberField(TEXT("matchCount"), TotalMatchCount);
 	Result->SetBoolField(TEXT("truncated"), TotalMatchCount > Matches.Num());
