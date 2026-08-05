@@ -43,14 +43,22 @@ namespace WidgetRuntimeState
 		return FString::Join(Segments, TEXT("/"));
 	}
 
-	TSharedPtr<FJsonObject> SerializeWidgetNode(UWidget* Widget, const TArray<FString>& PropertyNames)
+	/** A widget queued for serialization, with its hierarchy path resolved once. */
+	struct FInspectNode
 	{
+		UWidget* Widget = nullptr;
+		FString HierarchyPath;
+	};
+
+	TSharedPtr<FJsonObject> SerializeWidgetNode(const FInspectNode& Target, const TArray<FString>& PropertyNames)
+	{
+		UWidget* Widget = Target.Widget;
 		TSharedPtr<FJsonObject> Node = MakeShared<FJsonObject>();
 		Node->SetStringField(TEXT("name"), Widget->GetName());
 		Node->SetStringField(TEXT("class"), Widget->GetClass()->GetPathName());
 		Node->SetStringField(TEXT("path"), Widget->GetPathName());
 		Node->SetStringField(TEXT("outerPath"), GetPathNameSafe(Widget->GetOuter()));
-		Node->SetStringField(TEXT("hierarchyPath"), BuildHierarchyPath(Widget));
+		Node->SetStringField(TEXT("hierarchyPath"), Target.HierarchyPath);
 
 		TSharedPtr<FJsonObject> Properties = MakeShared<FJsonObject>();
 		TArray<TSharedPtr<FJsonValue>> MissingProperties;
@@ -173,21 +181,26 @@ TSharedPtr<FJsonValue> FWidgetHandlers::InspectRuntimeInstances(const TSharedPtr
 			Instance->SetObjectField(TEXT("owningPlayer"), Owner);
 		}
 
-		TArray<TSharedPtr<FJsonObject>> Nodes;
-		Nodes.Add(SerializeWidgetNode(Match, PropertyNames));
+		TArray<FInspectNode> Nodes;
+		Nodes.Add({ Match, BuildHierarchyPath(Match) });
 		if (bIncludeSubtree && Match->WidgetTree)
 		{
 			Match->WidgetTree->ForEachWidget([&](UWidget* Child)
 			{
-				if (Child && MatchesChildFilter(Child, ChildName, ChildClassFilter))
+				if (Child && Child != Match && MatchesChildFilter(Child, ChildName, ChildClassFilter))
 				{
-					Nodes.Add(SerializeWidgetNode(Child, PropertyNames));
+					Nodes.Add({ Child, BuildHierarchyPath(Child) });
 				}
 			});
 		}
-		Nodes.Sort([](const TSharedPtr<FJsonObject>& A, const TSharedPtr<FJsonObject>& B)
+		// Nested user widgets repeat their designer names, so hierarchy paths
+		// tie, and TArray::Sort is not stable: without a unique tie-break two
+		// calls in one session could return the same nodes in a different order
+		// and a diff of the two would report changes that never happened.
+		Nodes.Sort([](const FInspectNode& A, const FInspectNode& B)
 		{
-			return A->GetStringField(TEXT("hierarchyPath")) < B->GetStringField(TEXT("hierarchyPath"));
+			if (A.HierarchyPath != B.HierarchyPath) return A.HierarchyPath < B.HierarchyPath;
+			return A.Widget->GetPathName() < B.Widget->GetPathName();
 		});
 
 		const int32 TotalNodeCount = Nodes.Num();
@@ -196,9 +209,9 @@ TSharedPtr<FJsonValue> FWidgetHandlers::InspectRuntimeInstances(const TSharedPtr
 			Nodes.SetNum(MaxNodesPerInstance);
 		}
 		TArray<TSharedPtr<FJsonValue>> NodeValues;
-		for (const TSharedPtr<FJsonObject>& Node : Nodes)
+		for (const FInspectNode& Node : Nodes)
 		{
-			NodeValues.Add(MakeShared<FJsonValueObject>(Node));
+			NodeValues.Add(MakeShared<FJsonValueObject>(SerializeWidgetNode(Node, PropertyNames)));
 		}
 		Instance->SetArrayField(TEXT("nodes"), NodeValues);
 		Instance->SetNumberField(TEXT("nodeCount"), TotalNodeCount);
