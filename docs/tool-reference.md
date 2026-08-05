@@ -2,7 +2,7 @@
 
 This page lists ue-mcp's own category tools and actions. For the official Unreal 5.8 tools that ue-mcp wraps (surfaced inside these same categories), see [Native Tools](native-tools.md).
 
-UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->759+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
+UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->761+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
 
 !!! tip "First call in any session"
     Start with `project(action="get_status")` to check the connection, then `level(action="get_outliner")` or `asset(action="list")` to explore.
@@ -380,7 +380,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `set_blend_sample` | Move an existing BlendSpace sample or swap its animation. Params: `assetPath, sampleIndex, position? {x,y} (or flat x,y), animation? (#272)` |
 | `list` | List anim assets. Params: `directory?, recursive?` |
 | `create_montage` | Create montage. Params: `animSequencePath, name?, packagePath?` |
-| `author_montages_batch` | Batch-author montages with slot/blend configuration, sections, custom notify classes/properties, per-item errors, idempotency, saving, and rollback metadata. Params: `items[]` |
+| `author_montages_batch` | Batch-author montages in one call: idempotent create, slot name, blend/rate/length properties, sections and notifies, then save. Every item reports success plus the failing stage (validate\|create\|slot\|properties\|sections\|notifies\|save) and error, so one bad item does not hide the rest. Newly created montages come back as a delete_asset_batch rollback. Each montage still holds the single segment create_montage builds. Params: `items[] (each: name, animSequencePath, packagePath?, onConflict?, slotName?, trackIndex?, rateScale?, blendIn?, blendOut?, sequenceLength?, sections? [{sectionName, startTime?, linkedSection?}], notifies? [{notifyName, triggerTime, notifyClass?, properties?}])` |
 | `create_anim_blueprint` | Create AnimBP. Params: `skeletonPath, name?, packagePath?, parentClass?` |
 | `create_blendspace` | Create blendspace (2D). Params: `skeletonPath, name?, packagePath?, axisHorizontal?, axisVertical?` |
 | `create_blendspace_1d` | Create BlendSpace1D. Params: `skeletonPath, name?, packagePath?, axisName? (default Speed), axisMin?, axisMax?, gridNum? (#459)` |
