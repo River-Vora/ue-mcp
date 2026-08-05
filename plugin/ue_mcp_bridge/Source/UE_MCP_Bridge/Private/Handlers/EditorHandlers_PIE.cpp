@@ -3,10 +3,6 @@
 // translation-unit partition, not a new class. Handler registration
 // stays in EditorHandlers.cpp::RegisterHandlers.
 
-#include "Editor.h"
-#include "Engine/Engine.h"
-#include "Misc/OutputDeviceRedirector.h"
-
 #include "EditorHandlers.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
@@ -15,9 +11,11 @@
 #include "HandlerJsonProperty.h"
 #include "JsonSerializer.h"
 #include "Containers/Ticker.h"
+#include "Editor.h"
 #include "Editor/EditorEngine.h"
 #include "Engine/Blueprint.h"
 #include "Engine/World.h"
+#include "Engine/Engine.h"
 #include "EngineUtils.h"
 #include "Engine/GameInstance.h"
 #include "Engine/LocalPlayer.h"
@@ -35,13 +33,10 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "Misc/FileHelper.h"
-#include "Misc/Paths.h"
 #include "Settings/LevelEditorPlaySettings.h"
 
 namespace
 {
-	static const TCHAR* IgnoreBlueprintErrorsMarker = TEXT("UE_MCP_ALLOW_IGNORE_BLUEPRINT_ERRORS=true");
 	static FDelegateHandle IgnoreErrorsPostPIEHandle;
 	static FDelegateHandle IgnoreErrorsEndPIEHandle;
 	static FTSTicker::FDelegateHandle IgnoreErrorsTimeoutHandle;
@@ -110,38 +105,14 @@ namespace
 			}));
 	}
 
-	static FString FindIgnoreBlueprintErrorsInstructionFile()
+	// The server decides *whether* a caller may bypass the Blueprint-error
+	// prompt (standing config opt-in, or a live approval prompt answered by
+	// the user) and names the source here. The bridge cannot re-derive user
+	// consent, so it records the source and refuses anything it does not
+	// recognize rather than pretending to re-check it.
+	static bool IsRecognizedBypassAuthorization(const FString& Source)
 	{
-		FString Directory = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
-		FPaths::NormalizeDirectoryName(Directory);
-		const TCHAR* Candidates[] = {
-			TEXT("AGENTS.md"),
-			TEXT("CLAUDE.md"),
-			TEXT(".codex/instructions.md"),
-		};
-
-		while (!Directory.IsEmpty())
-		{
-			for (const TCHAR* RelativePath : Candidates)
-			{
-				const FString Candidate = FPaths::Combine(Directory, RelativePath);
-				FString Contents;
-				if (FFileHelper::LoadFileToString(Contents, *Candidate)
-					&& Contents.Contains(IgnoreBlueprintErrorsMarker, ESearchCase::CaseSensitive))
-				{
-					return Candidate;
-				}
-			}
-
-			const FString Parent = FPaths::GetPath(Directory);
-			if (Parent.IsEmpty() || Parent == Directory)
-			{
-				break;
-			}
-			Directory = Parent;
-		}
-
-		return FString();
+		return Source == TEXT("user_approval") || Source == TEXT("config");
 	}
 
 	static ULevelEditorPlaySettings* GetPlaySettingsForRW()
@@ -291,20 +262,9 @@ TSharedPtr<FJsonValue> FEditorHandlers::PieControl(const TSharedPtr<FJsonObject>
 
 			FString AuthorizationSource;
 			Params->TryGetStringField(TEXT("authorizationSource"), AuthorizationSource);
-			FString AuthorizationFile;
-			if (AuthorizationSource == TEXT("instructions_file"))
+			if (!IsRecognizedBypassAuthorization(AuthorizationSource))
 			{
-				AuthorizationFile = FindIgnoreBlueprintErrorsInstructionFile();
-				if (AuthorizationFile.IsEmpty())
-				{
-					return MCPError(FString::Printf(
-						TEXT("Blueprint-error bypass is not authorized. Add the exact marker %s to AGENTS.md, CLAUDE.md, or .codex/instructions.md at/above the project directory, or use the MCP approval-gated editor action."),
-						IgnoreBlueprintErrorsMarker));
-				}
-			}
-			else if (AuthorizationSource != TEXT("user_approval"))
-			{
-				return MCPError(TEXT("Blueprint-error bypass requires authorizationSource=user_approval from the MCP approval gate or a verified instructions_file marker"));
+				return MCPError(TEXT("Blueprint-error bypass requires authorizationSource=user_approval (an approval prompt the user accepted) or authorizationSource=config (a standing ue-mcp.pie.allowIgnoreBlueprintErrors opt-in). Call editor(play_in_editor_ignore_blueprint_errors) rather than pie_control directly."));
 			}
 
 			TArray<UBlueprint*> BlueprintsToSuppress;
@@ -353,10 +313,6 @@ TSharedPtr<FJsonValue> FEditorHandlers::PieControl(const TSharedPtr<FJsonObject>
 			Result->SetBoolField(TEXT("ignoredBlueprintErrors"), true);
 			Result->SetNumberField(TEXT("ignoredBlueprintErrorCount"), BlueprintsToSuppress.Num());
 			Result->SetStringField(TEXT("authorizationSource"), AuthorizationSource);
-			if (!AuthorizationFile.IsEmpty())
-			{
-				Result->SetStringField(TEXT("authorizationFile"), AuthorizationFile);
-			}
 			Result->SetArrayField(TEXT("loadedErroredBlueprints"), ErroredBlueprints);
 			Result->SetStringField(
 				TEXT("warning"),

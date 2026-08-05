@@ -1,40 +1,15 @@
 import { z } from "zod";
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { categoryTool, bp, directive, type ToolDef, type ToolContext } from "../types.js";
 import { startEditor, stopEditor, restartEditor, buildProject } from "../editor-control.js";
 import { pushWorkaround, workaroundCount } from "../workaround-tracker.js";
 import { searchTools } from "../tool-search.js";
 import { Vec3, Rotator } from "../schemas.js";
 
-const IGNORE_BLUEPRINT_ERRORS_MARKER = "UE_MCP_ALLOW_IGNORE_BLUEPRINT_ERRORS=true";
-const INSTRUCTION_FILE_CANDIDATES = [
-  "AGENTS.md",
-  "CLAUDE.md",
-  path.join(".codex", "instructions.md"),
-] as const;
-
-function findIgnoreBlueprintErrorsAuthorization(projectDir: string | null): string | null {
-  if (!projectDir) return null;
-
-  let current = path.resolve(projectDir);
-  while (true) {
-    for (const relativePath of INSTRUCTION_FILE_CANDIDATES) {
-      const candidate = path.join(current, relativePath);
-      try {
-        if (fs.readFileSync(candidate, "utf8").includes(IGNORE_BLUEPRINT_ERRORS_MARKER)) {
-          return candidate;
-        }
-      } catch {
-        // Missing and unreadable instruction files are not authorization.
-      }
-    }
-
-    const parent = path.dirname(current);
-    if (parent === current) return null;
-    current = parent;
-  }
-}
+/** Where a caller declares a standing opt-in to the Blueprint-error bypass.
+ *  Rides the normal global < project < env < local config cascade, so a
+ *  developer can enable it in the untracked ue-mcp.local.yml without
+ *  committing the relaxed behavior for the whole team. */
+const IGNORE_BLUEPRINT_ERRORS_CONFIG_KEY = "ue-mcp.pie.allowIgnoreBlueprintErrors";
 
 export const editorTool: ToolDef = categoryTool(
   "editor",
@@ -187,19 +162,19 @@ export const editorTool: ToolDef = categoryTool(
     describe_object: bp("Describe a UObject and optionally list/read properties. Params: objectPath, includeProperties?, includeValues?, propertyNames?", "describe_object"),
     play_in_editor: bp("PIE control. Params: pieAction (start|stop|status), waitForAssetRegistry? (start only; default true - block until the AssetRegistry initial scan completes before requesting PIE, otherwise PIE silently no-ops on cold editor starts), assetRegistryTimeoutSeconds? (default 180) (#406)", "pie_control", (p) => ({ action: p.pieAction ?? "status", waitForAssetRegistry: p.waitForAssetRegistry, assetRegistryTimeoutSeconds: p.assetRegistryTimeoutSeconds })),
     play_in_editor_ignore_blueprint_errors: {
-      description: `Start PIE while suppressing unresolved Blueprint compiler-error dialogs for this launch only. This can run stale or invalid Blueprint bytecode, so it requires either an MCP user-approval prompt or the exact marker ${IGNORE_BLUEPRINT_ERRORS_MARKER} in AGENTS.md, CLAUDE.md, or .codex/instructions.md at/above the project directory. Params: waitForAssetRegistry? (default true), assetRegistryTimeoutSeconds? (default 180).`,
+      description: `Start PIE for one launch with the editor's unresolved-Blueprint-error prompt suppressed. PIE then runs whatever bytecode those Blueprints last compiled to, so the launch is authorized per call: set ${IGNORE_BLUEPRINT_ERRORS_CONFIG_KEY} to true in your ue-mcp config to pre-authorize it, otherwise the user answers an MCP approval prompt. The bridge refuses the launch when a Blueprint would have to be recompiled first (dirty non-data Blueprints, errored Level Blueprints) and lists every errored Blueprint it suppressed in loadedErroredBlueprints. Params: waitForAssetRegistry? (default true), assetRegistryTimeoutSeconds? (default 180).`,
       handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
-        const authorizationFile = findIgnoreBlueprintErrorsAuthorization(ctx.project.projectDir);
-        let authorizationSource = "instructions_file";
+        const preauthorized = ctx.project.config.pie?.allowIgnoreBlueprintErrors === true;
+        let authorizationSource = "config";
 
-        if (!authorizationFile) {
+        if (!preauthorized) {
           authorizationSource = "user_approval";
           if (!ctx.elicit) {
             return {
               success: false,
               blocked: true,
               code: "approval_required",
-              message: `This action requires a user approval prompt, or ${IGNORE_BLUEPRINT_ERRORS_MARKER} in a recognized instruction file. The connected MCP client does not support elicitation.`,
+              message: `This action needs a user approval prompt, and the connected MCP client did not advertise the elicitation capability. Set ${IGNORE_BLUEPRINT_ERRORS_CONFIG_KEY} to true in ue-mcp.local.yml to pre-authorize it instead.`,
             };
           }
 
@@ -241,7 +216,6 @@ export const editorTool: ToolDef = categoryTool(
           action: "start",
           ignoreBlueprintErrors: true,
           authorizationSource,
-          authorizationFile,
           waitForAssetRegistry: p.waitForAssetRegistry,
           assetRegistryTimeoutSeconds: p.assetRegistryTimeoutSeconds,
         });

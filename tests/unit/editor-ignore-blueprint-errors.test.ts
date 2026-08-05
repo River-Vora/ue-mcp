@@ -1,17 +1,13 @@
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { editorTool } from "../../src/tools/editor.js";
 import type { ElicitFn, ToolContext } from "../../src/types.js";
+import type { UeMcpConfig } from "../../src/project.js";
 
-const tempDirs: string[] = [];
-
-function makeContext(projectDir: string, elicit?: ElicitFn) {
+function makeContext(config: UeMcpConfig, elicit?: ElicitFn) {
   const call = vi.fn().mockResolvedValue({ success: true, action: "start" });
   const ctx = {
     bridge: { call },
-    project: { projectDir },
+    project: { projectDir: "C:/Projects/Demo", config },
     elicit,
   } as unknown as ToolContext;
   return { ctx, call };
@@ -23,24 +19,9 @@ async function invoke(ctx: ToolContext) {
   }) as Promise<Record<string, unknown>>;
 }
 
-function makeProjectDir(): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ue-mcp-ignore-bp-errors-"));
-  tempDirs.push(root);
-  const projectDir = path.join(root, "Project");
-  fs.mkdirSync(projectDir);
-  return projectDir;
-}
-
-afterEach(() => {
-  vi.restoreAllMocks();
-  for (const dir of tempDirs.splice(0)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 describe("editor(play_in_editor_ignore_blueprint_errors)", () => {
-  it("refuses when neither an instruction marker nor elicitation is available", async () => {
-    const { ctx, call } = makeContext(makeProjectDir());
+  it("refuses when neither the config opt-in nor elicitation is available", async () => {
+    const { ctx, call } = makeContext({});
 
     const result = await invoke(ctx);
 
@@ -51,7 +32,7 @@ describe("editor(play_in_editor_ignore_blueprint_errors)", () => {
 
   it("does not start PIE when the user declines", async () => {
     const elicit = vi.fn<ElicitFn>().mockResolvedValue({ action: "decline" });
-    const { ctx, call } = makeContext(makeProjectDir(), elicit);
+    const { ctx, call } = makeContext({}, elicit);
 
     const result = await invoke(ctx);
 
@@ -60,9 +41,31 @@ describe("editor(play_in_editor_ignore_blueprint_errors)", () => {
     expect(call).not.toHaveBeenCalled();
   });
 
+  it("does not start PIE when the approval prompt is cancelled", async () => {
+    const elicit = vi.fn<ElicitFn>().mockResolvedValue({ action: "cancel" });
+    const { ctx, call } = makeContext({}, elicit);
+
+    const result = await invoke(ctx);
+
+    expect(result.blocked).toBe(true);
+    expect(result.code).toBe("user_cancelled");
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it("does not start PIE when the approval prompt itself fails", async () => {
+    const elicit = vi.fn<ElicitFn>().mockRejectedValue(new Error("client closed the prompt"));
+    const { ctx, call } = makeContext({}, elicit);
+
+    const result = await invoke(ctx);
+
+    expect(result.blocked).toBe(true);
+    expect(result.code).toBe("approval_prompt_failed");
+    expect(call).not.toHaveBeenCalled();
+  });
+
   it("starts the native guarded path after explicit user approval", async () => {
     const elicit = vi.fn<ElicitFn>().mockResolvedValue({ action: "accept" });
-    const { ctx, call } = makeContext(makeProjectDir(), elicit);
+    const { ctx, call } = makeContext({}, elicit);
 
     await invoke(ctx);
 
@@ -73,24 +76,40 @@ describe("editor(play_in_editor_ignore_blueprint_errors)", () => {
     }));
   });
 
-  it("accepts the exact marker in an ancestor AGENTS.md without prompting", async () => {
-    const projectDir = makeProjectDir();
-    const root = path.dirname(projectDir);
-    fs.writeFileSync(
-      path.join(root, "AGENTS.md"),
-      "UE_MCP_ALLOW_IGNORE_BLUEPRINT_ERRORS=true\n",
-      "utf8",
-    );
+  it("accepts the standing config opt-in without prompting", async () => {
     const elicit = vi.fn<ElicitFn>();
-    const { ctx, call } = makeContext(projectDir, elicit);
+    const { ctx, call } = makeContext({ pie: { allowIgnoreBlueprintErrors: true } }, elicit);
 
     await invoke(ctx);
 
     expect(elicit).not.toHaveBeenCalled();
     expect(call).toHaveBeenCalledWith("pie_control", expect.objectContaining({
+      action: "start",
       ignoreBlueprintErrors: true,
-      authorizationSource: "instructions_file",
-      authorizationFile: path.join(root, "AGENTS.md"),
+      authorizationSource: "config",
     }));
+  });
+
+  it("still prompts when the config opt-in is present but false", async () => {
+    const elicit = vi.fn<ElicitFn>().mockResolvedValue({ action: "decline" });
+    const { ctx, call } = makeContext({ pie: { allowIgnoreBlueprintErrors: false } }, elicit);
+
+    const result = await invoke(ctx);
+
+    expect(elicit).toHaveBeenCalledTimes(1);
+    expect(result.code).toBe("user_declined");
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it("never sends the bypass flag on the plain play_in_editor action", async () => {
+    const { ctx, call } = makeContext({ pie: { allowIgnoreBlueprintErrors: true } });
+
+    await editorTool.handler(ctx, { action: "play_in_editor", pieAction: "start" });
+
+    expect(call).toHaveBeenCalledWith(
+      "pie_control",
+      expect.not.objectContaining({ ignoreBlueprintErrors: true }),
+      undefined,
+    );
   });
 });
