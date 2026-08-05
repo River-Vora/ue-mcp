@@ -695,16 +695,11 @@ namespace
 			return false;
 		}
 
-		UPackage* Package = Montage->GetOutermost();
-		const FString Filename = FPackageName::LongPackageNameToFilename(
-			Package->GetName(),
-			FPackageName::GetAssetPackageExtension());
-		FSavePackageArgs SaveArgs;
-		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-		SaveArgs.SaveFlags = SAVE_NoError;
-		if (!UPackage::SavePackage(Package, Montage, *Filename, SaveArgs))
+		if (!SaveAssetPackage(Montage))
 		{
-			OutError = FString::Printf(TEXT("Failed to save authored montage package '%s'"), *Package->GetName());
+			OutError = FString::Printf(
+				TEXT("Failed to save authored montage package '%s'"),
+				*Montage->GetOutermost()->GetName());
 			return false;
 		}
 		return true;
