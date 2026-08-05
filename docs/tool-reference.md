@@ -630,8 +630,8 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `run_utility_widget` | Open editor utility widget. Params: `assetPath` |
 | `create_utility_blueprint` | Create editor utility blueprint. Params: `name, packagePath?` |
 | `run_utility_blueprint` | Run editor utility blueprint. Params: `assetPath` |
-| `add_widget` | Add widget to widget tree. Params: `assetPath, widgetClass, widgetName?, parentWidgetName?` |
-| `remove_widget` | Remove widget from tree. Params: `assetPath, widgetName` |
+| `add_widget` | Add widget to widget tree. Idempotent by assetPath + widgetName: passing widgetName makes a retry safe, and the result carries requestedWidgetName/persistedWidgetName/renamed plus compileStatus. Params: `assetPath, widgetClass, widgetName?, parentWidgetName?` |
+| `remove_widget` | Remove widget from tree. Idempotent, and clears the widget's Widget Blueprint GUID metadata so later compiles stop reporting a deleted variable (#799). Params: `assetPath, widgetName` |
 | `move_widget` | Reparent widget. Params: `assetPath, widgetName, newParentWidgetName` |
 | `set_root` | Replace WBP root with an existing widget by name (#365). Params: `assetPath, widgetName` |
 | `wrap_root` | Wrap the current root in a new panel widget (UMG 'Wrap With'). Params: `assetPath, wrapperClass (must be a UPanelWidget subclass), wrapperName? (#365)` |
