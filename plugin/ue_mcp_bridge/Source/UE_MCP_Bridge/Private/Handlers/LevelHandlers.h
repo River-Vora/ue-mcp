@@ -80,6 +80,10 @@ private:
 	// #205: actor attach/detach + mobility
 	static TSharedPtr<FJsonValue> AttachActor(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> DetachActor(const TSharedPtr<FJsonObject>& Params);
+	// Attach an exact named/root SceneComponent to an exact named/root parent
+	// SceneComponent, optionally at a validated socket.
+	static TSharedPtr<FJsonValue> AttachComponent(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> DetachComponent(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetActorMobility(const TSharedPtr<FJsonObject>& Params);
 	// #204: edit-level current sub-level
 	static TSharedPtr<FJsonValue> GetCurrentEditLevel(const TSharedPtr<FJsonObject>& Params);
