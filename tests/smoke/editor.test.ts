@@ -103,3 +103,37 @@ describe("editor — open_asset safety (#17)", () => {
     expect(typeof result.success).toBe("boolean");
   });
 });
+
+describe("editor — live object access (#802)", () => {
+  it("find_object resolves an exact path", async () => {
+    const r = await callBridge(bridge, "find_object", { objectPath: "/Engine/BasicShapes/Cube.Cube" });
+    expect(r.ok, r.error).toBe(true);
+    const result = r.result as Record<string, unknown>;
+    expect(result.success).toBe(true);
+    expect(result.found).toBe(true);
+    expect((result.object as Record<string, unknown>).class).toBe("StaticMesh");
+  });
+
+  it("find_object reports a missing path instead of failing the call", async () => {
+    const r = await callBridge(bridge, "find_object", { objectPath: "/Game/NoSuchPackage.NoSuchObject" });
+    expect(r.ok, r.error).toBe(true);
+    const result = r.result as Record<string, unknown>;
+    expect(result.success).toBe(true);
+    expect(result.found).toBe(false);
+  });
+
+  it("find_object searches live instances by class", async () => {
+    const r = await callBridge(bridge, "find_object", { className: "WorldSettings", world: "editor", limit: 5 });
+    expect(r.ok, r.error).toBe(true);
+    const result = r.result as Record<string, unknown>;
+    expect(result.success).toBe(true);
+    expect(result.totalMatches as number).toBeGreaterThan(0);
+  });
+
+  it("find_object needs a filter", async () => {
+    const r = await callBridge(bridge, "find_object", {});
+    expect(r.ok, r.error).toBe(true);
+    const result = r.result as Record<string, unknown>;
+    expect(result.success).toBe(false);
+  });
+});

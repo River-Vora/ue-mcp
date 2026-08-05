@@ -33,6 +33,7 @@
 #include "Subsystems/EngineSubsystem.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Subsystems/WorldSubsystem.h"
+#include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/GCObjectScopeGuard.h"
 
@@ -855,6 +856,205 @@ TSharedPtr<FJsonValue> FEditorHandlers::SetMovementMode(const TSharedPtr<FJsonOb
 	{
 		Result->SetStringField(TEXT("modeNote"),
 			TEXT("This is the mode as of this call. CharacterMovement re-evaluates on the next tick and can leave it (e.g. Swimming outside a water volume falls back to Falling) - sample it again after a tick to confirm it held."));
+	}
+	return MCPResult(Result);
+}
+
+namespace
+{
+	/** Resolve a class from a short name, a /Script path, or a Blueprint asset
+	 *  path. A Blueprint path names the asset, not the class it generates, so
+	 *  "/Game/UI/WBP_Hud" is retried as "/Game/UI/WBP_Hud.WBP_Hud_C". */
+	UClass* ResolveClassSpec(const FString& Spec)
+	{
+		if (Spec.IsEmpty()) return nullptr;
+		if (Spec.Contains(TEXT("/")))
+		{
+			if (UClass* Direct = LoadObject<UClass>(nullptr, *Spec)) return Direct;
+			if (!Spec.EndsWith(TEXT("_C")))
+			{
+				FString Path = Spec;
+				if (!Path.Contains(TEXT(".")))
+				{
+					FString Leaf;
+					Path.Split(TEXT("/"), nullptr, &Leaf, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+					Path = Path + TEXT(".") + Leaf;
+				}
+				if (UClass* Generated = LoadObject<UClass>(nullptr, *(Path + TEXT("_C")))) return Generated;
+			}
+			return nullptr;
+		}
+		if (UClass* ByName = FindFirstObject<UClass>(*Spec, EFindFirstObjectOptions::None)) return ByName;
+		return FindClassByShortName(Spec);
+	}
+
+	/** World kind as a short string, so a caller can tell an editor-world hit
+	 *  from a PIE-world one without parsing the UEDPIE prefix out of the path. */
+	FString DescribeWorldType(const UWorld* World)
+	{
+		if (!World) return FString();
+		switch (World->WorldType)
+		{
+			case EWorldType::Editor:        return TEXT("editor");
+			case EWorldType::PIE:           return TEXT("pie");
+			case EWorldType::Game:          return TEXT("game");
+			case EWorldType::EditorPreview: return TEXT("editorPreview");
+			case EWorldType::GamePreview:   return TEXT("gamePreview");
+			case EWorldType::Inactive:      return TEXT("inactive");
+			default:                        return TEXT("none");
+		}
+	}
+
+	TSharedPtr<FJsonObject> DescribeLiveObject(UObject* Obj)
+	{
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("objectPath"), Obj->GetPathName());
+		Entry->SetStringField(TEXT("name"), Obj->GetName());
+		Entry->SetStringField(TEXT("class"), Obj->GetClass()->GetName());
+		Entry->SetStringField(TEXT("classPath"), Obj->GetClass()->GetPathName());
+		Entry->SetStringField(TEXT("outerPath"), Obj->GetOuter() ? Obj->GetOuter()->GetPathName() : FString());
+		Entry->SetBoolField(TEXT("isDefaultObject"), Obj->HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject));
+		if (UWorld* OwningWorld = Obj->GetTypedOuter<UWorld>())
+		{
+			Entry->SetStringField(TEXT("world"), OwningWorld->GetPathName());
+			Entry->SetStringField(TEXT("worldType"), DescribeWorldType(OwningWorld));
+		}
+		if (AActor* Actor = Cast<AActor>(Obj))
+		{
+			Entry->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
+		}
+		return Entry;
+	}
+}
+
+// #802: find a live UObject and report the path that addresses it.
+// invoke_object_function and get_object_properties both accept an objectPath,
+// but nothing produced one. An instance that only exists at runtime (an editor
+// utility widget just spawned, a UMG widget, a component subobject) has a path
+// no caller can guess, so every session that needed one called
+// unreal.find_object from Python to get it.
+TSharedPtr<FJsonValue> FEditorHandlers::FindLiveObjects(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString ObjectPath = OptionalString(Params, TEXT("objectPath"));
+	const FString ClassSpec = OptionalString(Params, TEXT("className"));
+	const FString NameContains = OptionalString(Params, TEXT("nameContains"));
+	const FString OuterPath = OptionalString(Params, TEXT("outerPath"));
+	const bool bIncludeDefaults = OptionalBool(Params, TEXT("includeDefaults"), false);
+	const bool bExactClass = OptionalBool(Params, TEXT("exactClass"), false);
+	const int32 Limit = FMath::Clamp(OptionalInt(Params, TEXT("limit"), 50), 1, 1000);
+
+	// An exact path is a lookup, not a search: report whether it resolves
+	// rather than failing the call, because "is this instance still there" is
+	// half of what the path is asked about.
+	if (!ObjectPath.IsEmpty())
+	{
+		// FindObject first: in PIE the live instance already exists, and loading
+		// would resolve the editor-world asset of the same name instead.
+		UObject* Found = FindObject<UObject>(nullptr, *ObjectPath);
+		if (!Found) Found = LoadObject<UObject>(nullptr, *ObjectPath);
+
+		auto Result = MCPSuccess();
+		Result->SetStringField(TEXT("objectPath"), ObjectPath);
+		Result->SetBoolField(TEXT("found"), Found != nullptr);
+		if (!Found)
+		{
+			Result->SetStringField(TEXT("note"), TEXT("No object at that path. Search for it with className and/or nameContains instead."));
+			return MCPResult(Result);
+		}
+		// A pending-kill object still answers to its path, and calling into it
+		// is the crash the caller is walking towards. Report it here.
+		Result->SetBoolField(TEXT("isValid"), IsValid(Found));
+		Result->SetObjectField(TEXT("object"), DescribeLiveObject(Found));
+		return MCPResult(Result);
+	}
+
+	if (ClassSpec.IsEmpty() && NameContains.IsEmpty())
+	{
+		return MCPError(TEXT("Provide 'objectPath' to resolve one object, or 'className' and/or 'nameContains' to search."));
+	}
+
+	UClass* FilterClass = nullptr;
+	if (!ClassSpec.IsEmpty())
+	{
+		FilterClass = ResolveClassSpec(ClassSpec);
+		if (!FilterClass)
+		{
+			return MCPError(FString::Printf(
+				TEXT("Class not found: %s. Use a short name (StaticMeshActor), a /Script path (/Script/Engine.StaticMeshActor), a generated class name (WBP_Hud_C) or a Blueprint asset path. A Blueprint class only exists once its asset is loaded."),
+				*ClassSpec));
+		}
+	}
+
+	// world defaults to every world. A scope is a filter here, and defaulting it
+	// would hide the editor-world instance an agent is looking for whenever PIE
+	// happens to be running.
+	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("any"));
+	UWorld* ScopeWorld = nullptr;
+	const bool bScopeToWorld = !WorldScope.Equals(TEXT("any"), ESearchCase::IgnoreCase);
+	if (bScopeToWorld)
+	{
+		ScopeWorld = ResolveWorldFromParams(Params, TEXT("editor"));
+		if (!ScopeWorld)
+		{
+			return MCPError(FString::Printf(TEXT("No world for scope '%s'. Use world=any to search every world."), *WorldScope));
+		}
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Matches;
+	int32 TotalMatches = 0;
+	auto Consider = [&](UObject* Obj)
+	{
+		if (!IsValid(Obj)) return;
+		if (!bIncludeDefaults && Obj->HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject)) return;
+		if (!NameContains.IsEmpty() && !Obj->GetName().Contains(NameContains)) return;
+		if (!OuterPath.IsEmpty())
+		{
+			bool bUnderOuter = false;
+			for (UObject* Outer = Obj->GetOuter(); Outer; Outer = Outer->GetOuter())
+			{
+				if (Outer->GetPathName() == OuterPath) { bUnderOuter = true; break; }
+			}
+			if (!bUnderOuter) return;
+		}
+		if (bScopeToWorld && Obj->GetTypedOuter<UWorld>() != ScopeWorld) return;
+
+		++TotalMatches;
+		if (Matches.Num() < Limit)
+		{
+			Matches.Add(MakeShared<FJsonValueObject>(DescribeLiveObject(Obj)));
+		}
+	};
+
+	if (FilterClass)
+	{
+		// Hash lookup rather than a full object scan: a loaded editor holds
+		// millions of live UObjects and a class filter is the common case.
+		TArray<UObject*> Candidates;
+		GetObjectsOfClass(FilterClass, Candidates, !bExactClass,
+			bIncludeDefaults ? RF_NoFlags : RF_ClassDefaultObject);
+		for (UObject* Obj : Candidates) Consider(Obj);
+	}
+	else
+	{
+		for (TObjectIterator<UObject> It; It; ++It) Consider(*It);
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetArrayField(TEXT("matches"), Matches);
+	Result->SetNumberField(TEXT("count"), Matches.Num());
+	Result->SetNumberField(TEXT("totalMatches"), TotalMatches);
+	Result->SetBoolField(TEXT("truncated"), TotalMatches > Matches.Num());
+	if (FilterClass)
+	{
+		Result->SetStringField(TEXT("resolvedClass"), FilterClass->GetPathName());
+	}
+	if (ScopeWorld)
+	{
+		Result->SetStringField(TEXT("world"), ScopeWorld->GetPathName());
+	}
+	if (TotalMatches == 0)
+	{
+		Result->SetStringField(TEXT("note"), TEXT("Nothing matched. A Blueprint class only exists once its asset is loaded, and an instance only exists once something spawns it. Pass includeDefaults=true to include class default objects."));
 	}
 	return MCPResult(Result);
 }
