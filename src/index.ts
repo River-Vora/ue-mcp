@@ -8,9 +8,18 @@ import { attach, attachSummary } from "./deployer.js";
 import { SERVER_INSTRUCTIONS, SERVER_INSTRUCTIONS_LEAN, SERVER_INSTRUCTIONS_MICRO, multiEditorInstructions } from "./instructions.js";
 import { resolveContextStrategy, applyLeanContext, buildMicroGateway } from "./lean-context.js";
 import {
+  routeEditorCall,
+  effectiveTaskName,
+  refuseUntargetedInRegistry,
+  editorAttribution,
+  type RoutedCall,
+} from "./editor-gate.js";
+import {
   isDirectiveResponse,
   injectEditorTarget,
   removeEditorTarget,
+  injectMigrateTarget,
+  removeMigrateTarget,
   stripEditorTarget,
   sessionContext,
   EDITOR_TARGET_PARAM,
@@ -34,6 +43,7 @@ import type { FlowContext } from "./flow/context.js";
 import type { FlowConfig, PluginEntry } from "./flow/schema.js";
 import { loadPlugins, type PluginRecord } from "./plugin/loader.js";
 import { withAssetLocks, resolveLockingConfig } from "./locking.js";
+import { collapsingEnvWarnings } from "./session-env.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import yaml from "js-yaml";
@@ -165,6 +175,12 @@ async function main() {
     } catch (e) {
       console.error(`[ue-mcp] Failed to initialize project '${arg}': ${e instanceof Error ? e.message : e}`);
     }
+  }
+
+  // Say which environment variables are deciding for every editor at once.
+  // Silent at one editor: there is nothing to flatten and nothing to say.
+  for (const line of collapsingEnvWarnings(sessions.list().map((s) => s.name))) {
+    console.error(`[ue-mcp] ${line}`);
   }
 
   // No project argument, or every argument failed: keep one project-less
@@ -432,34 +448,39 @@ async function main() {
       if (signature) {
         const outcome = injectEditorTarget(tool, names);
         if (!outcome.injected && outcome.reason) console.error(`[ue-mcp] ${outcome.reason}`);
+        // asset(migrate) also takes a DESTINATION editor: it is the one action
+        // whose output lands in a project other than the one it runs in (6.5).
+        const destination = injectMigrateTarget(tool, names);
+        if (!destination.injected && destination.reason) console.error(`[ue-mcp] ${destination.reason}`);
       } else {
         removeEditorTarget(tool);
+        removeMigrateTarget(tool);
       }
       const registration = registeredTools.get(tool.name);
       if (registration) registration.update({ paramsSchema: tool.schema });
     }
   };
 
-  /**
-   * Route one call to the editor it addressed. `editor` is only a routing
-   * instruction on a tool that had the parameter injected; on any other tool
-   * it is the tool's own parameter and is left alone.
-   */
   const routeCall = (
     tool: ToolDef,
     params: Record<string, unknown>,
-  ): { session: EditorSession; params: Record<string, unknown> } => {
-    if (!tool.injectedEditorParam) return { session: sessions.active, params };
-    // The micro gateway carries every real parameter inside `args`, so a
-    // target arrives there rather than at the top level. Read both, and strip
-    // both, so the routing instruction cannot reach a bridge call either way.
-    const nested = params.args && typeof params.args === "object"
-      ? (params.args as Record<string, unknown>)
-      : undefined;
-    const target = params[EDITOR_TARGET_PARAM] ?? nested?.[EDITOR_TARGET_PARAM];
-    const stripped = stripEditorTarget(params);
-    if (nested) stripped.args = stripEditorTarget(nested);
-    return { session: sessions.resolve(target), params: stripped };
+  ): RoutedCall => routeEditorCall(tool, params, sessions);
+
+  /**
+   * Refuse an untargeted change while more than one editor is registered
+   * (#817, plan 5.2). Returns null at one editor without classifying anything,
+   * so the single-editor path is the path it always was.
+   */
+  const gateUntargeted = (taskName: string, targeted: boolean): string | null =>
+    refuseUntargetedInRegistry(sessions, taskName, targeted);
+
+  /** The serving editor, appended to a response only beyond one editor (5.3). */
+  const attribution = (session: EditorSession): TextBlock[] => {
+    const line = editorAttribution(
+      { name: session.name, projectPath: session.project.projectPath },
+      sessions.size,
+    );
+    return line ? [{ type: "text" as const, text: line }] : [];
   };
 
   // ── Register category tools - dispatched through the task registry ──
@@ -470,7 +491,7 @@ async function main() {
     }
 
     const registration = server.tool(tool.name, tool.description, shape, async (rawParams, extra) => {
-      let routed: { session: EditorSession; params: Record<string, unknown> };
+      let routed: RoutedCall;
       try {
         routed = routeCall(tool, rawParams);
       } catch (e) {
@@ -484,6 +505,19 @@ async function main() {
       const params = routed.params;
       const action = params.action as string;
       const taskName = `${tool.name}.${action}`;
+
+      // Nothing below this line runs at one editor: the gate returns null
+      // without classifying, so a single-editor server dispatches exactly as
+      // it did before targeting existed.
+      const untargeted = gateUntargeted(effectiveTaskName(tool, params), routed.targeted);
+      if (untargeted) {
+        return {
+          content: withUpgradeNotice([
+            { type: "text" as const, text: `Error [INVALID_PARAMS]: ${untargeted}` },
+          ]),
+          isError: true,
+        };
+      }
       const { action: _, ...taskParams } = params;
       const flowCtx: FlowContext = {
         bridge: session.guarded,
@@ -536,6 +570,7 @@ async function main() {
             content: withUpgradeNotice([
               { type: "text" as const, text: `Error [TASK_FAILED]: ${msg}` },
               ...machineErrorBlock(result.error),
+              ...attribution(session),
             ]),
             isError: true,
           };
@@ -560,11 +595,14 @@ async function main() {
             });
           }
           blocks.push({ type: "text" as const, text: stringify(result.data.result) });
-          return { content: withUpgradeNotice(blocks) };
+          return { content: withUpgradeNotice([...blocks, ...attribution(session)]) };
         }
 
         return {
-          content: withUpgradeNotice([{ type: "text" as const, text: stringify(result.data) }]),
+          content: withUpgradeNotice([
+            { type: "text" as const, text: stringify(result.data) },
+            ...attribution(session),
+          ]),
         };
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -573,6 +611,7 @@ async function main() {
           content: withUpgradeNotice([
             { type: "text" as const, text: `Error [${code}]: ${msg}` },
             ...machineErrorBlock(e),
+            ...attribution(session),
           ]),
           isError: true,
         };
@@ -628,9 +667,22 @@ async function main() {
       const params = stripEditorTarget(rawParams);
       if (nested) params.params = stripEditorTarget(nested);
 
+      // A flow is whatever its steps are, so an untargeted run is gated like
+      // any other change. `plan` and `list` read and are not.
+      const untargeted = gateUntargeted(
+        `${flowTool.name}.${String(params.action ?? "")}`,
+        typeof target === "string" && target.trim() !== "",
+      );
+      if (untargeted) {
+        return {
+          content: withUpgradeNotice([{ type: "text" as const, text: `Error: ${untargeted}` }]),
+          isError: true,
+        };
+      }
+
       const result = await flowTool.handler(sessionContext(ctx, session), params);
       const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-      return { content: withUpgradeNotice([{ type: "text" as const, text }]) };
+      return { content: withUpgradeNotice([{ type: "text" as const, text }, ...attribution(session)]) };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return { content: withUpgradeNotice([{ type: "text" as const, text: `Error: ${msg}` }]), isError: true };
