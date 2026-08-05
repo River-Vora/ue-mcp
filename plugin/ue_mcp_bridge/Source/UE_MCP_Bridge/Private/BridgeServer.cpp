@@ -1545,6 +1545,18 @@ EMCPFrameDecode FMCPBridgeServer::DecodeWebSocketFrame(TArray<uint8>& Buffer, FM
 	}
 
 	const bool bMasked = (SecondByte & 0x80) != 0;
+	if (!bMasked)
+	{
+		// RFC 6455 section 5.1: a client must mask every frame it sends, and a
+		// server that receives an unmasked one must fail the connection. The bit
+		// was read here and then only used to decide whether to skip four bytes,
+		// so an unmasked frame was accepted and its payload taken from wherever
+		// the mask key would have been. Nothing after that point is trustworthy:
+		// the very next frame boundary is already in the wrong place.
+		OutError = TEXT("client frame arrived unmasked, which RFC 6455 requires clients never to send");
+		return EMCPFrameDecode::ProtocolError;
+	}
+
 	uint64 PayloadLen = (uint64)(SecondByte & 0x7F);
 	int64 HeaderLen = 2;
 
