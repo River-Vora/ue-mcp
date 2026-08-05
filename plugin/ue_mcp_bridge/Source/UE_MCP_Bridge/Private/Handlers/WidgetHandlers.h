@@ -47,6 +47,15 @@ private:
 	static TSharedPtr<FJsonValue> AddWidgetToViewport(const TSharedPtr<FJsonObject>& Params);
 	// #559: fire a UFUNCTION / button click on a live PIE UUserWidget.
 	static TSharedPtr<FJsonValue> InvokeRuntimeWidgetFunction(const TSharedPtr<FJsonObject>& Params);
+	// #812: drive an interactive child of a live PIE widget (button, checkbox,
+	// slider, spin box, text entry, combo box) and broadcast the delegate the
+	// real interaction fires. Returns an error value on failure, otherwise an
+	// unset pointer with the interaction record written into OutInfo.
+	// Implemented in WidgetHandlers_Interaction.cpp.
+	static TSharedPtr<FJsonValue> SimulateRuntimeChildInteraction(
+		class UWidget* Target,
+		const TSharedPtr<FJsonObject>& Params,
+		const TSharedPtr<FJsonObject>& OutInfo);
 
 	// Helper: recursively search for a widget by name in the tree
 	static class UWidget* FindWidgetByNameRecursive(class UWidget* Root, const FString& WidgetName);

@@ -1322,10 +1322,10 @@ TSharedPtr<FJsonValue> FWidgetHandlers::AddWidgetToViewport(const TSharedPtr<FJs
 }
 
 // ─────────────────────────────────────────────────────────────
-// #559  Fire a UFUNCTION or button click on a live PIE UUserWidget.
+// #559  Fire a UFUNCTION or a child-widget interaction on a live PIE UUserWidget.
 //   Params: widgetName|className (locate the UserWidget), functionName
-//   (a parameterless UFUNCTION on the widget), OR childName + "OnClicked"
-//   to simulate a button click on a child UButton.
+//   (a parameterless UFUNCTION on the widget), OR childName (+ optional value,
+//   functionName, commitMethod) to drive an interactive child widget (#812).
 // ─────────────────────────────────────────────────────────────
 TSharedPtr<FJsonValue> FWidgetHandlers::InvokeRuntimeWidgetFunction(const TSharedPtr<FJsonObject>& Params)
 {
@@ -1362,8 +1362,12 @@ TSharedPtr<FJsonValue> FWidgetHandlers::InvokeRuntimeWidgetFunction(const TShare
 	const FString ChildName = OptionalString(Params, TEXT("childName"));
 	const FString FunctionName = OptionalString(Params, TEXT("functionName"));
 
-	// Button-click path: childName names a UButton, broadcast OnClicked.
-	if (!ChildName.IsEmpty() && (FunctionName.IsEmpty() || FunctionName.Equals(TEXT("OnClicked"), ESearchCase::IgnoreCase)))
+	// Child-interaction path: childName names an interactive child widget. The
+	// simulation lives in WidgetHandlers_Interaction.cpp and covers buttons,
+	// checkboxes, sliders, spin boxes, text entry and combo boxes (#812).
+	// functionName, when given here, selects which of the child's delegates to
+	// fire rather than naming a UFUNCTION on the parent.
+	if (!ChildName.IsEmpty())
 	{
 		UWidget* Target = nullptr;
 		if (Found->WidgetTree)
@@ -1377,16 +1381,15 @@ TSharedPtr<FJsonValue> FWidgetHandlers::InvokeRuntimeWidgetFunction(const TShare
 		{
 			return MCPError(FString::Printf(TEXT("Child widget '%s' not found inside '%s'"), *ChildName, *Found->GetName()));
 		}
-		if (UButton* Button = Cast<UButton>(Target))
+
+		auto Result = MCPSuccess();
+		Result->SetStringField(TEXT("widget"), Found->GetName());
+		Result->SetStringField(TEXT("child"), ChildName);
+		if (TSharedPtr<FJsonValue> Err = SimulateRuntimeChildInteraction(Target, Params, Result))
 		{
-			Button->OnClicked.Broadcast();
-			auto Result = MCPSuccess();
-			Result->SetStringField(TEXT("widget"), Found->GetName());
-			Result->SetStringField(TEXT("child"), ChildName);
-			Result->SetStringField(TEXT("invoked"), TEXT("OnClicked"));
-			return MCPResult(Result);
+			return Err;
 		}
-		return MCPError(FString::Printf(TEXT("Child '%s' is a %s, not a UButton (only OnClicked is supported for click simulation)"), *ChildName, *Target->GetClass()->GetName()));
+		return MCPResult(Result);
 	}
 
 	// UFUNCTION path: call a parameterless function on the UserWidget.
