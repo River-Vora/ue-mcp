@@ -38,16 +38,24 @@ namespace
 		TArray<FPreparedPropertyWrite> Properties;
 	};
 
+	// Mirrors IsProtectedAssetPath in AssetHandlers.cpp, which is file-local to
+	// that translation unit. Keep the two rule sets identical: a write path that
+	// enforces a weaker rule than its neighbours is how engine content gets
+	// mutated through the bridge.
 	bool IsProtectedBulkAssetPath(const FString& Path)
 	{
 		FString Normalized = Path;
 		Normalized.TrimStartAndEndInline();
+		if (Normalized.IsEmpty()) return false;
 		if (!Normalized.StartsWith(TEXT("/"))) Normalized = TEXT("/") + Normalized;
 		const FString Lower = Normalized.ToLower();
-		return Lower.StartsWith(TEXT("/engine/"))
-			|| Lower.StartsWith(TEXT("/script/"))
-			|| Lower.StartsWith(TEXT("/memory/"))
-			|| Lower.StartsWith(TEXT("/temp/"));
+		if (Lower.StartsWith(TEXT("/engine/"))) return true;
+		if (Lower.StartsWith(TEXT("/script/"))) return true;
+		if (Lower.StartsWith(TEXT("/memory/"))) return true;
+		if (Lower.StartsWith(TEXT("/temp/"))) return true;
+		// Verse runtime objects surface as /Script/CoreUObject.* etc.
+		if (Lower.Contains(TEXT("/script/"))) return true;
+		return false;
 	}
 
 	TSharedPtr<FJsonObject> MakePropertyReadback(
