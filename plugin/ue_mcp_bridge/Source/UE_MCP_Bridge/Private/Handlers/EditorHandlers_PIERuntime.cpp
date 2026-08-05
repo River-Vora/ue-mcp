@@ -33,6 +33,7 @@
 #include "Subsystems/EngineSubsystem.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Subsystems/WorldSubsystem.h"
+#include "UObject/Script.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/GCObjectScopeGuard.h"
 
@@ -251,7 +252,14 @@ namespace
 		// down the world and collects garbage, and CallTarget is read again
 		// below to export out params.
 		FGCObjectScopeGuard TargetGuard(CallTarget);
-		CallTarget->ProcessEvent(Func, ParamBuf.GetData());
+		// #806: an actor whose world never initialised for play (every editor
+		// world) silently skips ProcessEvent unless the function is marked
+		// CallInEditor, leaving the zeroed frame to be exported as the result.
+		// The guard opens that gate for the duration of this call only.
+		{
+			FEditorScriptExecutionGuard ScriptGuard;
+			CallTarget->ProcessEvent(Func, ParamBuf.GetData());
+		}
 		// NOTE: UObject* out-params live in ParamBuf, which is raw bytes and
 		// invisible to GC. Guarding them after the fact cannot help - by then a
 		// collection has already happened - so out-param objects are validated

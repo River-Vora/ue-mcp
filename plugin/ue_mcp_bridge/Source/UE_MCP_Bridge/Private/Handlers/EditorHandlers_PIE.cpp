@@ -25,6 +25,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
 #include "Modules/ModuleManager.h"
+#include "UObject/Script.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/UnrealType.h"
@@ -562,7 +563,13 @@ namespace
 					{
 						It->InitializeValue_InContainer(Frame);
 					}
-					CurObject->ProcessEvent(Fn, Frame);
+					{
+						// #806: without this guard an actor getter called against
+						// the editor world is skipped and the zeroed frame reads
+						// back as a real value.
+						FEditorScriptExecutionGuard ScriptGuard;
+						CurObject->ProcessEvent(Fn, Frame);
+					}
 					FProperty* RetProp = Fn->GetReturnProperty();
 					if (RetProp)
 					{
@@ -957,7 +964,18 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 	// ProcessEvent can run arbitrary game code, including code that tears down
 	// the world and collects garbage, and CallTarget is read again below.
 	FGCObjectScopeGuard CallTargetGuard(CallTarget);
-	CallTarget->ProcessEvent(Func, ParamBuf.GetData());
+	// #806: AActor::ProcessEvent refuses to run script in a world whose actors
+	// were never initialised for play, which is every editor world, unless the
+	// function is marked CallInEditor. The refusal is silent: the parameter
+	// frame stays zero-initialised and those zeros are then exported as if they
+	// were the answer, so K2_GetActorLocation on a placed actor reported
+	// (X=0,Y=0,Z=0) with success. FEditorScriptExecutionGuard opens the same
+	// gate the editor itself uses for CallInEditor functions, for this call
+	// only, so the placed instance actually runs the function.
+	{
+		FEditorScriptExecutionGuard ScriptGuard;
+		CallTarget->ProcessEvent(Func, ParamBuf.GetData());
+	}
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
