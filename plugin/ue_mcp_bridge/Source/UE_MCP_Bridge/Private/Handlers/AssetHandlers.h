@@ -107,6 +107,9 @@ private:
 	// Append prevalidated JSON values to a reflected TArray without replacing
 	// existing entries. Supports native and user-defined struct elements.
 	static TSharedPtr<FJsonValue> AppendAssetArrayElements(const TSharedPtr<FJsonObject>& Params);
+	// Batch counterpart to SetAssetProperty. Preflights every asset/property
+	// before mutating any package and emits a replayable rollback payload.
+	static TSharedPtr<FJsonValue> BulkSetAssetProperties(const TSharedPtr<FJsonObject>& Params);
 	// #421: batch texture settings by canonical type (Normal/Grayscale/BaseColor/HDR).
 	static TSharedPtr<FJsonValue> SetTextureSettingsByType(const TSharedPtr<FJsonObject>& Params);
 	// #421: one-call factory for an Interchange pipeline asset with the

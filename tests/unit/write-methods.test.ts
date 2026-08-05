@@ -25,6 +25,18 @@ describe("classifyWrite", () => {
     expect(r.contentPaths).toEqual(["/Game/A", "/Game/B"]);
   });
 
+  it("extracts every asset from bulk property descriptors", () => {
+    const r = classifyWrite("bulk_set_asset_properties", {
+      items: [
+        { assetPath: "/Game/A", properties: { Enabled: true } },
+        { assetPath: "/Game/B", properties: { "Config.Weight": 2 } },
+        { assetPath: "/Game/A", properties: { Count: 3 } },
+      ],
+    });
+    expect(r.writes).toBe(true);
+    expect(r.contentPaths).toEqual(["/Game/A", "/Game/B"]);
+  });
+
   it("handles the bulk-rename descriptor shape", () => {
     const r = classifyWrite("bulk_rename_assets", {
       renames: [
