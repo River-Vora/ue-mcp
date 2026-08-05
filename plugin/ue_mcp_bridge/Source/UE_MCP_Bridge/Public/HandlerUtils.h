@@ -13,11 +13,23 @@
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 
+// Engine API tiers. One macro per supported minor version, so a gate reads the
+// same everywhere and nobody writes a second scheme. The supported range is
+// UE 5.4 through 5.8; 5.4 is the floor, which is why UE_MCP_HAS_5_4_API is
+// true for every engine the plugin builds against and exists only so a gate
+// can name the floor explicitly instead of leaving it implied.
+#define UE_MCP_HAS_5_4_API ((ENGINE_MAJOR_VERSION > 5) || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4))
+
 // True on UE 5.5+ (and any future 6.x). Used to gate APIs introduced in 5.5
 // that don't exist in 5.4: StateTreeEditingSubsystem, FExpressionInputIterator,
 // AActor::Get/SetNetUpdateFrequency, UWidgetBlueprint::WidgetVariableNameToGuidMap,
 // UPCGEditorGraphNodeBase, UIKRetargeterController::AssignIKRigToAllOps, etc.
 #define UE_MCP_HAS_5_5_API ((ENGINE_MAJOR_VERSION > 5) || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5))
+
+// True on UE 5.6+ (and any future 6.x). The tier between 5.5 and 5.7, kept so
+// an API that arrived in 5.6 is gated by name rather than by an open-coded
+// ENGINE_MINOR_VERSION test.
+#define UE_MCP_HAS_5_6_API ((ENGINE_MAJOR_VERSION > 5) || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6))
 
 // True on UE 5.7+. Gates EFindObjectFlags (the bool bExactClass overloads are
 // deprecated there) and UPoseSearchDatabase's non-templated
@@ -27,7 +39,10 @@
 // True on UE 5.8+. Gates EGetObjectsFlags and
 // FStringTable::ImportStringsFromCSVFile; the bool / ImportStrings forms they
 // replace are deprecated in 5.8 and warn on every user build, but do not exist
-// before it.
+// before it. Also gates the one-argument UMaterial::SetMaterialUsage (5.7 has
+// only the bNeedsRecompile form) and FCoreDelegates::ApplicationHeartbeat
+// (added in 5.8; the status module carries its own copy of this macro because
+// it must not depend on this one).
 #define UE_MCP_HAS_5_8_API ((ENGINE_MAJOR_VERSION > 5) || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 8))
 
 // ── Quick result builders ────────────────────────────────────────────────────
