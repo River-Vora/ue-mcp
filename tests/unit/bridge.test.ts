@@ -253,4 +253,31 @@ describe("bridge capability handshake", () => {
     const { describeProtocolMismatch, CLIENT_PROTOCOL_VERSION } = await import("../../src/bridge.js");
     expect(describeProtocolMismatch({ protocolVersion: CLIENT_PROTOCOL_VERSION, legacy: false })).toBeNull();
   });
+
+  it("settles at once when the socket dies before the handshake is answered", async () => {
+    // A bridge that accepts the upgrade and then drops the socket without
+    // answering. Waiting out the whole connect budget for a reply that cannot
+    // arrive puts that delay in front of the caller's first call, and calling
+    // it a legacy plugin would blame the wrong thing for a network fault.
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    server.on("connection", (socket) => socket.terminate());
+    await once(server, "listening");
+    const { port } = server.address() as AddressInfo;
+
+    const { EditorBridge } = await import("../../src/bridge.js");
+    const bridge = new EditorBridge("127.0.0.1", port);
+
+    try {
+      const startedAt = Date.now();
+      await bridge.connect(5000).catch(() => undefined);
+      expect(Date.now() - startedAt).toBeLessThan(2000);
+      expect(bridge.capabilities).toBeNull();
+      expect(bridge.isConnected).toBe(false);
+    } finally {
+      bridge.disconnect();
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+    }
+  });
 });

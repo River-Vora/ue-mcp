@@ -553,11 +553,29 @@ export class EditorBridge implements IBridge {
       const id = `cap-${++this.idCounter}`;
       let settled = false;
 
+      const detach = (): void => {
+        clearTimeout(timer);
+        ws.off("message", onMessage);
+        ws.off("close", onClose);
+      };
+
+      // The socket went away before the bridge answered. Settle now rather
+      // than sitting out the rest of the connect budget on a dead socket, and
+      // record nothing: a dropped connection says nothing about which protocol
+      // version the plugin speaks, so claiming it is a legacy one here would
+      // put a "rebuild your plugin" warning in front of a network fault.
+      const onClose = (): void => {
+        if (settled) return;
+        settled = true;
+        detach();
+        this.capabilities = null;
+        resolve({ ...LEGACY_CAPABILITIES });
+      };
+
       const finish = (capabilities: BridgeCapabilities): void => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
-        ws.off("message", onMessage);
+        detach();
         this.capabilities = capabilities;
 
         const mismatch = describeProtocolMismatch(capabilities);
@@ -594,8 +612,9 @@ export class EditorBridge implements IBridge {
       const timer = setTimeout(() => finish({ ...LEGACY_CAPABILITIES }), timeoutMs);
 
       ws.on("message", onMessage);
+      ws.on("close", onClose);
       ws.send(JSON.stringify({ id, method: "get_bridge_capabilities", params: {} }), (err) => {
-        if (err) finish({ ...LEGACY_CAPABILITIES });
+        if (err) onClose();
       });
     });
   }
