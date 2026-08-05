@@ -23,6 +23,12 @@ private:
 	static TSharedPtr<FJsonValue> DeleteAssetBatch(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> BulkRename(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreateDataAsset(const TSharedPtr<FJsonObject>& Params);
+	// Bounded batch create-or-update of UDataAsset instances. Lives in
+	// AssetHandlers_BulkUpsert.cpp.
+	static TSharedPtr<FJsonValue> BulkUpsertDataAssets(const TSharedPtr<FJsonObject>& Params);
+	// Inverse of BulkUpsertDataAssets, driven by the rollback descriptor that
+	// call emits. Not a first-class action.
+	static TSharedPtr<FJsonValue> BulkRestoreDataAssets(const TSharedPtr<FJsonObject>& Params);
 	// #726: create an asset of any concrete UObject class via its registered
 	// factory (or NewObject fallback), not just UDataAsset subclasses.
 	static TSharedPtr<FJsonValue> CreateAssetByClass(const TSharedPtr<FJsonObject>& Params);

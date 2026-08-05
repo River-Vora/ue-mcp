@@ -171,6 +171,12 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("delete_asset_batch"), &DeleteAssetBatch);
 	Registry.RegisterHandler(TEXT("bulk_rename_assets"), &BulkRename);
 	Registry.RegisterHandler(TEXT("create_data_asset"), &CreateDataAsset);
+	// Bounded batch upsert plus its rollback inverse. A 500-item batch that
+	// preflights every item on a transient copy before touching a package can
+	// legitimately outrun the default game-thread budget, so both carry an
+	// explicit timeout.
+	Registry.RegisterHandlerWithTimeout(TEXT("bulk_upsert_data_assets"), &BulkUpsertDataAssets, 120.0f);
+	Registry.RegisterHandlerWithTimeout(TEXT("bulk_restore_data_assets"), &BulkRestoreDataAssets, 120.0f);
 	// #726: generic create-any-concrete-UObject-class asset (physical materials,
 	// curves, settings objects) - not restricted to UDataAsset subclasses.
 	Registry.RegisterHandler(TEXT("create_asset_by_class"), &CreateAssetByClass);

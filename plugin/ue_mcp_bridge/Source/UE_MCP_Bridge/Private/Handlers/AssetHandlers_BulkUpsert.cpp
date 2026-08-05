@@ -1,7 +1,19 @@
+// Split from AssetHandlers.cpp. The two handlers below are still members of
+// FAssetHandlers - this file is a translation-unit partition, not a new class.
+// Handler registration stays in AssetHandlers.cpp::RegisterHandlers.
+//
+// Bounded batch create-or-update for UDataAsset instances. Authoring a set of
+// data assets one create_data_asset call at a time costs a bridge round trip
+// per asset and gives no way to validate the whole set before any of it lands.
+// This handler preflights every descriptor against a transient copy first, so
+// a bad class, property path, or value rejects the batch before a package is
+// touched, and then reports per-item status for what it did.
+
+#include "AssetHandlers.h"
+
 #include "HandlerJsonProperty.h"
 #include "HandlerUtils.h"
 #include "JsonSerializer.h"
-#include "MCPHandlerRegistration.h"
 
 #include "AssetToolsModule.h"
 #include "EditorAssetLibrary.h"
@@ -16,7 +28,6 @@
 namespace
 {
 constexpr int32 MaxBulkUpsertItems = 500;
-constexpr float BulkUpsertTimeoutSeconds = 120.0f;
 
 struct FPreparedProperty
 {
@@ -307,8 +318,9 @@ TSharedPtr<FJsonObject> BuildItemResult(
 	ItemResult->SetNumberField(TEXT("changedPropertyCount"), ChangedPropertyCount);
 	return ItemResult;
 }
+} // namespace
 
-TSharedPtr<FJsonValue> BulkRestoreDataAssets(const TSharedPtr<FJsonObject>& Params)
+TSharedPtr<FJsonValue> FAssetHandlers::BulkRestoreDataAssets(const TSharedPtr<FJsonObject>& Params)
 {
 	bool bSave = true;
 	Params->TryGetBoolField(TEXT("save"), bSave);
@@ -424,7 +436,7 @@ TSharedPtr<FJsonValue> BulkRestoreDataAssets(const TSharedPtr<FJsonObject>& Para
 	return MCPResult(Result);
 }
 
-TSharedPtr<FJsonValue> BulkUpsertDataAssets(const TSharedPtr<FJsonObject>& Params)
+TSharedPtr<FJsonValue> FAssetHandlers::BulkUpsertDataAssets(const TSharedPtr<FJsonObject>& Params)
 {
 	const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
 	if (!Params->TryGetArrayField(TEXT("items"), Items) || !Items)
@@ -749,26 +761,4 @@ TSharedPtr<FJsonValue> BulkUpsertDataAssets(const TSharedPtr<FJsonObject>& Param
 		MCPSetRollback(Result, TEXT("bulk_restore_data_assets"), RollbackPayload);
 	}
 	return MCPResult(Result);
-}
-
-struct FRegisterBulkDataAssetHandlers
-{
-	FRegisterBulkDataAssetHandlers()
-	{
-		UEMCP::RegisterExternalHandlerWithTimeout(
-			TEXT("bulk_upsert_data_assets"),
-			&BulkUpsertDataAssets,
-			BulkUpsertTimeoutSeconds);
-		UEMCP::RegisterExternalHandlerWithTimeout(
-			TEXT("asset.bulk_upsert_data_assets"),
-			&BulkUpsertDataAssets,
-			BulkUpsertTimeoutSeconds);
-		UEMCP::RegisterExternalHandlerWithTimeout(
-			TEXT("bulk_restore_data_assets"),
-			&BulkRestoreDataAssets,
-			BulkUpsertTimeoutSeconds);
-	}
-};
-
-FRegisterBulkDataAssetHandlers RegisterBulkDataAssetHandlers;
 }
