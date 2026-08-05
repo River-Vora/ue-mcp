@@ -78,7 +78,7 @@ describe("asset — write (with cleanup)", () => {
     expect(r.method).toBe("save_asset");
   });
 
-  it("bulk_set_asset_properties rejects an invalid batch before mutation", async () => {
+  it("bulk_set_asset_properties rejects an invalid batch before mutation and reports every item", async () => {
     const r = await callBridge(bridge, "bulk_set_asset_properties", {
       items: [
         { assetPath: "/Game/DoesNotExist_BulkPropertySmoke", properties: { Value: 1 } },
@@ -88,9 +88,48 @@ describe("asset — write (with cleanup)", () => {
     });
     expect(r.method).toBe("bulk_set_asset_properties");
     expect(r.ok, r.error).toBe(true);
-    const result = r.result as { success?: boolean; error?: string };
+    const result = r.result as {
+      success?: boolean;
+      error?: string;
+      preflightPassed?: boolean;
+      preflightFailedCount?: number;
+      updatedAssetCount?: number;
+      items?: Array<{ assetPath?: string; ok?: boolean; status?: string; error?: string }>;
+    };
     expect(result.success).toBe(false);
     expect(result.error).toContain("Preflight failed");
+    expect(result.preflightPassed).toBe(false);
+    expect(result.preflightFailedCount).toBe(2);
+    expect(result.updatedAssetCount).toBe(0);
+    // Both bad items are accounted for individually, not collapsed into the
+    // first failure.
+    expect(result.items).toHaveLength(2);
+    expect(result.items?.map((i) => i.assetPath)).toEqual([
+      "/Game/DoesNotExist_BulkPropertySmoke",
+      "/Game/AlsoDoesNotExist_BulkPropertySmoke",
+    ]);
+    for (const item of result.items ?? []) {
+      expect(item.ok).toBe(false);
+      expect(item.status).toBe("not_found");
+      expect(item.error).toContain("could not load asset");
+    }
+  });
+
+  it("bulk_set_asset_properties reports a protected mount per item rather than aborting", async () => {
+    const r = await callBridge(bridge, "bulk_set_asset_properties", {
+      items: [{ assetPath: "/Engine/EngineMaterials/DefaultMaterial", properties: { TwoSided: true } }],
+      continueOnError: true,
+      dryRun: true,
+    });
+    expect(r.method).toBe("bulk_set_asset_properties");
+    expect(r.ok, r.error).toBe(true);
+    const result = r.result as {
+      updatedAssetCount?: number;
+      items?: Array<{ status?: string; error?: string }>;
+    };
+    expect(result.updatedAssetCount).toBe(0);
+    expect(result.items).toHaveLength(1);
+    expect(result.items?.[0]?.status).toBe("protected");
   });
 
   it("create_folder + delete_folder round-trip", async () => {

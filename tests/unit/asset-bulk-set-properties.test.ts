@@ -30,11 +30,26 @@ describe("asset.bulk_set_properties", () => {
       items: [{ assetPath: "/Game/A", properties: { Value: 3 } }],
       save: false,
       dryRun: true,
+      continueOnError: true,
       unrelated: "ignored",
     })).toEqual({
       items: [{ assetPath: "/Game/A", properties: { Value: 3 } }],
       save: false,
       dryRun: true,
+      continueOnError: true,
     });
+  });
+
+  it("exposes continueOnError so a partial batch is reachable", () => {
+    expect(assetTool.schema.continueOnError.safeParse(true).success).toBe(true);
+    expect(assetTool.schema.continueOnError.safeParse("yes").success).toBe(false);
+    // Omitting it must stay valid: the default is the all-or-nothing batch.
+    expect(assetTool.schema.continueOnError.safeParse(undefined).success).toBe(true);
+  });
+
+  it("documents the per-item reporting contract in the action description", () => {
+    const description = assetTool.actions.bulk_set_properties.description ?? "";
+    expect(description).toContain("continueOnError");
+    expect(description).toMatch(/per-item|its own ok/);
   });
 });
