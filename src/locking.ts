@@ -96,6 +96,14 @@ export function classifyAction(taskName: string, params: Record<string, unknown>
       else if (looksLikeAssetPath(rr?.assetPath)) paths.add(rr.assetPath as string);
     }
   }
+  // Batch mesh material assignment: the mesh is written, the material is only
+  // read, so only assetPath is locked.
+  if (Array.isArray(params.assignments)) {
+    for (const a of params.assignments) {
+      const entry = a as Record<string, unknown>;
+      if (looksLikeAssetPath(entry?.assetPath)) paths.add(entry.assetPath as string);
+    }
+  }
   return { mutates: true, paths: [...paths] };
 }
 

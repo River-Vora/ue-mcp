@@ -66,6 +66,16 @@ const EXPLICIT: Record<string, Extractor> = {
   },
   // Batch delete.
   delete_asset_batch: (p) => strArray(p.assetPaths),
+  // Batch mesh material assignment: the mesh being written is each entry's
+  // assetPath. materialPath is only read, so it is not checked out.
+  set_mesh_materials_batch: (p) => {
+    const out: string[] = [];
+    for (const a of (Array.isArray(p.assignments) ? p.assignments : []) as Record<string, unknown>[]) {
+      const assetPath = str(a.assetPath);
+      if (assetPath) out.push(assetPath);
+    }
+    return out;
+  },
 };
 
 /**
