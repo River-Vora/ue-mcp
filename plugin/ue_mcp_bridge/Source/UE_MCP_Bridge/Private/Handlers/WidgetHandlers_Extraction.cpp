@@ -3,6 +3,7 @@
 #include "AssetToolsModule.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetTree.h"
+#include "Components/NamedSlotInterface.h"
 #include "Components/PanelWidget.h"
 #include "EditorAssetLibrary.h"
 #include "HandlerUtils.h"
@@ -186,6 +187,30 @@ bool DestinationMatchesPlan(UWidgetBlueprint* Destination, const TArray<FExtract
 		}
 	}
 	return true;
+}
+
+/** True when Candidate sits in a named slot of one of the other widgets in Set. */
+bool IsNamedSlotContentOfAny(UWidget* Candidate, const TSet<UWidget*>& Set)
+{
+	if (!Candidate)
+	{
+		return false;
+	}
+	for (UWidget* Host : Set)
+	{
+		if (!Host || Host == Candidate)
+		{
+			continue;
+		}
+		if (INamedSlotInterface* NamedSlotHost = Cast<INamedSlotInterface>(Host))
+		{
+			if (NamedSlotHost->ContainsContent(Candidate))
+			{
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 UClass* ResolveDestinationParentClass(const FString& RequestedClass)
@@ -399,22 +424,35 @@ TSharedPtr<FJsonValue> FWidgetHandlers::ExtractWidgetSubtree(const TSharedPtr<FJ
 	}
 	if (!ImportedRoot)
 	{
+		// Fall back to topology when the importer had to rename the root away
+		// from its source name. GetParent() only reports a UPanelWidget
+		// parent, so content sitting in a named slot also reports no parent
+		// and would otherwise look like a second root: ask the named-slot
+		// hosts in the imported set before treating a widget as unparented.
 		for (UWidget* Imported : ImportedWidgets)
 		{
 			if (!Imported)
 			{
 				continue;
 			}
-			UWidget* ImportedParent = Imported->GetParent();
-			if (!ImportedParent || !ImportedWidgets.Contains(ImportedParent))
+			if (UWidget* ImportedParent = Imported->GetParent())
 			{
-				if (ImportedRoot)
+				if (ImportedWidgets.Contains(ImportedParent))
 				{
-					ImportedRoot = nullptr;
-					break;
+					continue;
 				}
-				ImportedRoot = Imported;
 			}
+			else if (IsNamedSlotContentOfAny(Imported, ImportedWidgets))
+			{
+				continue;
+			}
+
+			if (ImportedRoot)
+			{
+				ImportedRoot = nullptr;
+				break;
+			}
+			ImportedRoot = Imported;
 		}
 	}
 	if (!ImportedRoot)
