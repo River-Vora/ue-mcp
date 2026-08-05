@@ -392,6 +392,8 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 	// the shape set_property accepts. Only those: everything else round-trips
 	// as text and doubling the payload would cost more than it buys.
 	TSharedPtr<FJsonObject> StructuredValues = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> OversizedValues;
+	const int32 MaxStructuredPairs = 500;
 	TArray<TSharedPtr<FJsonValue>> Missing;
 	TSet<FString> Emitted;
 	int32 Count = 0;
@@ -430,7 +432,19 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 		Props->SetStringField(P->GetName(), S);
 		if (MCPPropertyText::ContainsMap(P))
 		{
-			StructuredValues->SetField(P->GetName(), FMCPJsonSerializer::SerializeValue(PropValueAddr, P));
+			// Bounded for the same reason the text form is truncated: a map with
+			// thousands of pairs builds a payload big enough to drop the bridge.
+			// Past the cap the property is named rather than serialized, so the
+			// caller reads it on its own with get_property.
+			const int32 Pairs = MCPPropertyText::CountMapPairs(P, PropValueAddr);
+			if (Pairs <= MaxStructuredPairs)
+			{
+				StructuredValues->SetField(P->GetName(), FMCPJsonSerializer::SerializeValue(PropValueAddr, P));
+			}
+			else
+			{
+				OversizedValues.Add(MakeShared<FJsonValueString>(P->GetName()));
+			}
 		}
 		Emitted.Add(P->GetName().ToLower());
 		++Count;
@@ -455,6 +469,10 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 	if (StructuredValues->Values.Num() > 0)
 	{
 		Result->SetObjectField(TEXT("values"), StructuredValues);
+	}
+	if (OversizedValues.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("valuesOmitted"), OversizedValues);
 	}
 	Result->SetArrayField(TEXT("missingProperties"), Missing);
 	if (Skipped > 0)
