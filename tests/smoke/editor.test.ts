@@ -45,6 +45,26 @@ describe("editor — read / query", () => {
 });
 
 describe("editor — safe commands", () => {
+  it("invoke_object_functions runs an ordered UObject call sequence", async () => {
+    const subsystem = {
+      target: "subsystem",
+      subsystemClass: "/Script/UnrealEd.EditorAssetSubsystem",
+    };
+    const r = await callBridge(bridge, "invoke_object_functions", {
+      world: "editor",
+      calls: [
+        { ...subsystem, functionName: "DoesAssetExist", args: { AssetPath: "/Engine/BasicShapes/Cube.Cube" } },
+        { ...subsystem, functionName: "DoesDirectoryExist", args: { DirectoryPath: "/Engine/BasicShapes" } },
+      ],
+    });
+    expect(r.ok, r.error).toBe(true);
+    const result = r.result as Record<string, unknown>;
+    expect(result.success).toBe(true);
+    expect(result.completedCalls).toBe(2);
+    expect(result.requestedCalls).toBe(2);
+    expect(result.results).toHaveLength(2);
+  });
+
   it("execute_python (simple)", async () => {
     const r = await callBridge(bridge, "execute_python", { code: "result = 1 + 1" });
     expect(r.ok, r.error).toBe(true);

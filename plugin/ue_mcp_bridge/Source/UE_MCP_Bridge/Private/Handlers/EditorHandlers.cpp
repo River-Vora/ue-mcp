@@ -191,6 +191,7 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("list_dirty_packages"), &ListDirtyPackages);
 	Registry.RegisterHandler(TEXT("list_pie_instances"), &ListPIEInstances);
 	Registry.RegisterHandler(TEXT("invoke_object_function"), &InvokeObjectFunction);
+	Registry.RegisterHandlerWithTimeout(TEXT("invoke_object_functions"), &InvokeObjectFunctions, 300.0f);
 	Registry.RegisterHandler(TEXT("get_object_properties"), &GetObjectProperties);
 	Registry.RegisterHandler(TEXT("read_bone_transforms"), &ReadBoneTransforms);
 	Registry.RegisterHandler(TEXT("teleport_runtime_actor"), &TeleportRuntimeActor);

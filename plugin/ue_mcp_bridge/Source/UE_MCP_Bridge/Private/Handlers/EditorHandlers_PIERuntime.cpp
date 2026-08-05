@@ -85,9 +85,11 @@ namespace
 			// loading would resolve the editor-world asset instead.
 			UObject* Found = FindObject<UObject>(nullptr, *ObjectPath);
 			if (!Found) Found = LoadObject<UObject>(nullptr, *ObjectPath);
-			if (!Found)
+			if (!IsValid(Found))
 			{
-				OutError = FString::Printf(TEXT("Object not found: %s"), *ObjectPath);
+				OutError = Found
+					? FString::Printf(TEXT("Object is no longer valid: %s"), *ObjectPath)
+					: FString::Printf(TEXT("Object not found: %s"), *ObjectPath);
 				return nullptr;
 			}
 			OutDescription = Found->GetPathName();
@@ -360,6 +362,124 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeObjectFunction(const TSharedPtr<FJ
 		Result->SetStringField(TEXT("netMode"), DescribePIENetMode(World));
 	}
 	return CallFunctionWithJsonArgs(Target, FunctionName, Params, Result);
+}
+
+// Run an ordered UObject call sequence in one handler dispatch. ProcessEvent is
+// synchronous, so the editor tick loop cannot fire timers between entries.
+// This is sequencing, not a transaction: a later failure does not roll back
+// calls that already completed.
+TSharedPtr<FJsonValue> FEditorHandlers::InvokeObjectFunctions(const TSharedPtr<FJsonObject>& Params)
+{
+	const TArray<TSharedPtr<FJsonValue>>* Calls = nullptr;
+	if (!Params->TryGetArrayField(TEXT("calls"), Calls) || !Calls || Calls->IsEmpty())
+	{
+		return MCPError(TEXT("Missing required non-empty array parameter 'calls'"));
+	}
+	if (Calls->Num() > 64)
+	{
+		return MCPError(TEXT("'calls' accepts at most 64 entries"));
+	}
+
+	// Reject malformed entries before running any user code. Runtime failures
+	// still stop the sequence without rolling back earlier successful calls.
+	for (int32 Index = 0; Index < Calls->Num(); ++Index)
+	{
+		const TSharedPtr<FJsonObject>* CallParams = nullptr;
+		if (!(*Calls)[Index].IsValid() || !(*Calls)[Index]->TryGetObject(CallParams) || !CallParams || !CallParams->IsValid())
+		{
+			return MCPError(FString::Printf(TEXT("calls[%d] must be an object"), Index));
+		}
+		FString FunctionName;
+		if (!(*CallParams)->TryGetStringField(TEXT("functionName"), FunctionName) || FunctionName.IsEmpty())
+		{
+			return MCPError(FString::Printf(TEXT("calls[%d] requires non-empty 'functionName'"), Index));
+		}
+		const FString ObjectPath = OptionalString(*CallParams, TEXT("objectPath"));
+		const FString Target = OptionalString(*CallParams, TEXT("target")).ToLower();
+		if (ObjectPath.IsEmpty() && Target.IsEmpty())
+		{
+			return MCPError(FString::Printf(TEXT("calls[%d] requires 'objectPath' or 'target'"), Index));
+		}
+		if (ObjectPath.IsEmpty()
+			&& Target != TEXT("gameinstance") && Target != TEXT("gamemode") && Target != TEXT("gamestate")
+			&& Target != TEXT("playercontroller") && Target != TEXT("playerpawn") && Target != TEXT("subsystem"))
+		{
+			return MCPError(FString::Printf(TEXT("calls[%d] has unknown target '%s'"), Index, *Target));
+		}
+		if (ObjectPath.IsEmpty() && Target == TEXT("subsystem") && OptionalString(*CallParams, TEXT("subsystemClass")).IsEmpty())
+		{
+			return MCPError(FString::Printf(TEXT("calls[%d] target=subsystem requires 'subsystemClass'"), Index));
+		}
+	}
+
+	UWorld* World = ResolveWorldFromParams(Params, TEXT("auto"));
+	FGCObjectScopeGuard WorldGuard(World);
+	auto Result = MCPSuccess();
+	TArray<TSharedPtr<FJsonValue>> Results;
+	Results.Reserve(Calls->Num());
+
+	for (int32 Index = 0; Index < Calls->Num(); ++Index)
+	{
+		if (World && !IsValid(World))
+		{
+			const FString Error = TEXT("Selected world was destroyed by an earlier call");
+			Results.Add(MCPError(Error));
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Call %d failed: %s"), Index, *Error));
+			Result->SetNumberField(TEXT("failedIndex"), Index);
+			break;
+		}
+
+		const TSharedPtr<FJsonObject>* CallParams = nullptr;
+		(*Calls)[Index]->TryGetObject(CallParams);
+		const FString FunctionName = OptionalString(*CallParams, TEXT("functionName"));
+
+		FString Description, Error;
+		UObject* Target = ResolveRuntimeObject(*CallParams, World, Description, Error);
+		if (!Target)
+		{
+			Results.Add(MCPError(Error));
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Call %d failed: %s"), Index, *Error));
+			Result->SetNumberField(TEXT("failedIndex"), Index);
+			break;
+		}
+
+		auto CallResultObject = MCPSuccess();
+		CallResultObject->SetStringField(TEXT("objectPath"), Description);
+		CallResultObject->SetStringField(TEXT("objectClass"), Target->GetClass()->GetName());
+		if (World)
+		{
+			CallResultObject->SetStringField(TEXT("world"), World->GetPathName());
+			CallResultObject->SetStringField(TEXT("netMode"), DescribePIENetMode(World));
+		}
+		TSharedPtr<FJsonValue> CallResult = CallFunctionWithJsonArgs(Target, FunctionName, *CallParams, CallResultObject);
+		Results.Add(CallResult);
+
+		const TSharedPtr<FJsonObject>* CallResultPtr = nullptr;
+		bool bCallSucceeded = false;
+		if (CallResult.IsValid() && CallResult->TryGetObject(CallResultPtr) && CallResultPtr && CallResultPtr->IsValid())
+		{
+			(*CallResultPtr)->TryGetBoolField(TEXT("success"), bCallSucceeded);
+		}
+		if (!bCallSucceeded)
+		{
+			FString CallError = TEXT("Unknown call failure");
+			if (CallResultPtr && CallResultPtr->IsValid())
+			{
+				(*CallResultPtr)->TryGetStringField(TEXT("error"), CallError);
+			}
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), FString::Printf(TEXT("Call %d failed: %s"), Index, *CallError));
+			Result->SetNumberField(TEXT("failedIndex"), Index);
+			break;
+		}
+	}
+
+	Result->SetArrayField(TEXT("results"), Results);
+	Result->SetNumberField(TEXT("completedCalls"), Results.Num() - (Result->GetBoolField(TEXT("success")) ? 0 : 1));
+	Result->SetNumberField(TEXT("requestedCalls"), Calls->Num());
+	return MCPResult(Result);
 }
 
 // #739: read reflected properties off any UObject, same resolution rules as
