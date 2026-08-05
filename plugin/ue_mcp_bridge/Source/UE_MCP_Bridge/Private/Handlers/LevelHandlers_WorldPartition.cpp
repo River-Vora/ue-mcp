@@ -72,10 +72,12 @@ namespace
 			Guid = Instance.GetGuid();
 			NativeClass = Instance.GetActorNativeClass();
 			// A Blueprint actor reports its base class path; a native actor has
-			// none, so fall back to the native class path.
+			// none, so fall back to the native class path. The single-argument
+			// top-level-path constructor is used rather than passing an empty
+			// subpath, whose wide-string overload is deprecated in 5.6+.
 			Class = Instance.GetBaseClass().IsNull()
 				? FSoftObjectPath(Instance.GetActorNativeClass())
-				: FSoftObjectPath(Instance.GetBaseClass(), {});
+				: FSoftObjectPath(Instance.GetBaseClass());
 			Name = Instance.GetActorName();
 			Label = Instance.GetActorLabel();
 			Bounds = Instance.GetEditorBounds();
