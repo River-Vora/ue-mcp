@@ -822,11 +822,38 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 	// #654: also match internal UObject name and full path so unlabeled actors
 	// (e.g. AI controllers spawned at runtime, which have no editor label) can
 	// be targeted, not just editor-labelled placed actors.
+	// #806: the lookup walks the placed instances of the resolved world in a
+	// fixed label -> name -> path order, and a miss is an error. There is no
+	// class-default fallback here and there must never be one: a default object
+	// answers every call with default state, which reads as success.
+	// Describe the world that was actually resolved, not the requested scope:
+	// world="auto" resolves to PIE when a session is running.
+	const FString WorldLabel = World->IsPlayInEditor() ? TEXT("PIE") : TEXT("editor");
 	AActor* Target = FindActorByLabelNameOrPath(World, ActorLabel);
 	if (!Target)
 	{
-		return MCPError(FString::Printf(TEXT("Actor not found in %s world (matched by label, name, or path): %s"), WorldScope == TEXT("pie") ? TEXT("PIE") : TEXT("editor"), *ActorLabel));
+		return MCPError(MCPDescribeActorLookupMiss(World, ActorLabel, WorldLabel));
 	}
+	// Defensive: the lookup iterates placed actors, so neither of these can fire
+	// today. They exist so that a future change which lets an archetype or an
+	// actor from another world through fails loudly instead of quietly
+	// answering from default state, which is the failure this issue reported.
+	if (Target->HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject))
+	{
+		return MCPError(FString::Printf(
+			TEXT("'%s' resolved to a class default object, not a placed actor. Refusing the call: a default object would answer from default state and report success."),
+			*ActorLabel));
+	}
+	if (Target->GetWorld() != World)
+	{
+		return MCPError(FString::Printf(
+			TEXT("'%s' resolved to an actor outside the %s world. Refusing the call."),
+			*ActorLabel, *WorldLabel));
+	}
+	// Read now: the call below can destroy the actor, and the response says
+	// which instance ran it.
+	const FString ResolvedActorLabel = Target->GetActorLabel();
+	const FString ResolvedActorPath = Target->GetPathName();
 
 	// #382: optional `component` redirects the call target to a named subobject
 	// (e.g. invoke `Server_Deconstruct` on the actor's BuildModeComponent).
@@ -928,8 +955,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 				}
 				return MCPError(FString::Printf(
 					TEXT("actorArgs[%s]: actor '%s' not found in %s world"),
-					*P->GetName(), *ActorArgLabel,
-					WorldScope == TEXT("pie") ? TEXT("PIE") : TEXT("editor")));
+					*P->GetName(), *ActorArgLabel, *WorldLabel));
 			}
 			if (!RefActor->IsA(OP->PropertyClass))
 			{
@@ -979,6 +1005,12 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	// #806: report the instance that ran the call. The reported defect was a
+	// call that looked successful while answering from somewhere other than the
+	// placed actor, and there was nothing in the response to see that with.
+	Result->SetStringField(TEXT("resolvedActorLabel"), ResolvedActorLabel);
+	Result->SetStringField(TEXT("resolvedActorPath"), ResolvedActorPath);
+	Result->SetStringField(TEXT("world"), WorldLabel);
 	if (!ComponentName.IsEmpty()) Result->SetStringField(TEXT("component"), ComponentName);
 	Result->SetStringField(TEXT("functionName"), FunctionName);
 

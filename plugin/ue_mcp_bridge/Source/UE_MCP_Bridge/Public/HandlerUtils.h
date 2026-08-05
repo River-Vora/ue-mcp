@@ -169,17 +169,60 @@ inline AActor* FindActorByLabelOrPath(UWorld* World, const FString& Label, const
 	return nullptr;
 }
 
-/** Three-way actor lookup: label, internal name, or full path. Used by
- *  EditorHandlers_PIE invoke_function which accepts any of the three. */
+/** Three-way actor lookup against the placed instances in a world: label
+ *  first, then internal object name, then full path. Used by
+ *  EditorHandlers_PIE invoke_function which accepts any of the three.
+ *
+ *  #806: the priority is fixed rather than "first actor that matches any of
+ *  the three", because a token can be one actor's label and another actor's
+ *  internal name at the same time, and which one won then depended on level
+ *  iteration order. The label is what the outliner shows and what callers
+ *  pass, so it decides outright; name and path only resolve the misses. */
 inline AActor* FindActorByLabelNameOrPath(UWorld* World, const FString& Token)
 {
 	if (!World || Token.IsEmpty()) return nullptr;
+	AActor* NameMatch = nullptr;
+	AActor* PathMatch = nullptr;
 	for (TActorIterator<AActor> It(World); It; ++It)
 	{
 		AActor* A = *It;
-		if (A->GetName() == Token || A->GetActorLabel() == Token || A->GetPathName() == Token) return A;
+		if (!IsValid(A)) continue;
+		if (A->GetActorLabel() == Token) return A;
+		if (!NameMatch && A->GetName() == Token) NameMatch = A;
+		if (!PathMatch && A->GetPathName() == Token) PathMatch = A;
 	}
-	return nullptr;
+	return NameMatch ? NameMatch : PathMatch;
+}
+
+/** Build the "no such actor" message for a failed label/name/path lookup.
+ *  Names what was searched and offers the labels that contain the token, so a
+ *  caller that guessed a label sees the real one instead of a bare miss. */
+inline FString MCPDescribeActorLookupMiss(UWorld* World, const FString& Token, const FString& WorldLabel)
+{
+	int32 ActorCount = 0;
+	TArray<FString> Near;
+	if (World)
+	{
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			AActor* A = *It;
+			if (!IsValid(A)) continue;
+			++ActorCount;
+			if (Near.Num() < 8 && A->GetActorLabel().Contains(Token))
+			{
+				Near.Add(A->GetActorLabel());
+			}
+		}
+	}
+	FString Msg = FString::Printf(
+		TEXT("Actor '%s' not found in the %s world. Searched every placed actor by editor label, then by internal object name, then by full object path (%d actors)."),
+		*Token, *WorldLabel, ActorCount);
+	if (Near.Num() > 0)
+	{
+		Msg += FString::Printf(TEXT(" Labels containing that text: [%s]."), *FString::Join(Near, TEXT(", ")));
+	}
+	Msg += TEXT(" List the real labels with level(get_outliner).");
+	return Msg;
 }
 
 /** Spawn-by-label idempotency check. If World already has an actor with the
