@@ -105,6 +105,16 @@ FindActorByLabelNameOrPath(World, Token)      // PIE invoke: any of three
 // Blueprint CDO load + cast with structured error
 LoadBlueprintCDO<TActor>(Path, OutError)
 
+// Class name resolution - one shared path for every string-to-UClass lookup.
+// Tolerates the C++ type prefix in both directions (UMyConfig <-> MyConfig),
+// object paths, Module.Class shorthand, and Blueprint generated classes.
+MCPResolveClass(Spec, bAllowLoad?)             // UClass* or nullptr
+MCPResolveClassOfType(Spec, Base, bAllowLoad?) // constrained to a base class
+FindClassByShortName(Name)                     // thin wrapper over MCPResolveClass
+MCPClassNotFoundError(Spec, ParamName?)        // lists tried spellings + suggestions
+MCPCheckClassUsable(Spec, Class, Base?, bConcrete?) // abstract / deprecated /
+                                               // wrong_base reported separately
+
 // Parameter extraction (Vec3 / Rotator / Color / Transform helpers)
 RequireString, OptionalString, OptionalNumber, OptionalInt, OptionalBool
 OptionalVec3, RequireVec3, OptionalRotator, RequireRotator, OptionalTransform

@@ -71,8 +71,8 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `move` | Move asset. Params: `sourcePath, destinationPath` |
 | `delete` | Delete asset. On failure returns reason (open_in_editor / has_referencers / in_memory_referenced / package_read_only / package_dirty / unknown) plus referencers, inMemoryReferencers, packageReadOnly, packageDirty diagnostics (#601). Pass force=true to auto-close any open asset editors before deleting (#278). Params: `assetPath, force?` |
 | `delete_batch` | Batch-delete assets. Per-path status (deleted/absent/failed) plus reason+referencers on failed entries (#278). Params: `assetPaths[], force?` |
-| `create_data_asset` | Create UDataAsset instance of custom class. Params: `name, className (/Script/Module.ClassName or loaded name), packagePath?, properties? (key/value map)` |
-| `create_asset_by_class` | Create an asset of ANY concrete UObject class (not just UDataAsset) - physical-material subclasses, curves, settings objects. Params: `name, className (/Script/Module.ClassName or loaded name), packagePath?, properties? (key/value map), onConflict? (skip\|replace\|rename)` |
+| `create_data_asset` | Create UDataAsset instance of custom class. `className` accepts the C++ spelling with or without the A/U/F/E prefix (`UMyConfig` and `MyConfig` both resolve), a `/Script/Module.ClassName` path, or a loaded class name; a failed lookup lists the spellings tried and the closest matches (#823). Params: `name, className, packagePath?, properties? (key/value map)` |
+| `create_asset_by_class` | Create an asset of ANY concrete UObject class (not just UDataAsset) - physical-material subclasses, curves, settings objects. `className` accepts the C++ spelling with or without the A/U/F/E prefix, a `/Script/Module.ClassName` path, or a loaded class name (#823). Params: `name, className, packagePath?, properties? (key/value map), onConflict? (skip\|replace\|rename)` |
 | `save` | Save one asset, or every dirty asset under /Game when assetPath is omitted. force=true saves regardless of the dirty flag - several edits (OFPA level actors, some subsystem property writes) never mark their package dirty, so a dirty-only save skipped them and still reported success. Returns the package name plus on-disk file path, size and mtime so the write can be verified rather than trusted (#768). Params: `assetPath?, force?` |
 | `save_all_dirty` | Flush every dirty package to disk in one call. Reports the packages it attempted, which ones reached disk (with file path, size and mtime) and which are still dirty afterwards, because a bare savedAll boolean has come back true while packages were never written (#768). Params: `saveMapPackages? (default true), saveContentPackages? (default true)` |
 | `set_mesh_material` | Assign material to static mesh slot. Params: `assetPath, materialPath, slotIndex?` |
@@ -736,10 +736,10 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 
 | Action | Description |
 |--------|-------------|
-| `reflect_class` | Reflect UClass. Params: `className, includeInherited?` |
+| `reflect_class` | Reflect UClass. `className` accepts the C++ spelling with or without the A/U/F/E prefix (`UMyConfig` and `MyConfig` both resolve), a `/Script/Module.ClassName` path, or a Blueprint class path; a failed lookup lists the spellings tried and the closest matches (#823). Params: `className, includeInherited?` |
 | `reflect_struct` | Reflect UScriptStruct. Params: `structName` |
 | `reflect_enum` | Reflect UEnum by full path, short name, or short name without the E prefix. Resolves native enums in any loaded module and loads unloaded Blueprint (UserDefinedEnum) assets via the asset registry. Returns enumPath, userDefined, and per-value name/value/displayName/tooltip; a failed lookup lists close matches (#762). Params: `enumName` |
-| `list_classes` | List classes. Params: `parentFilter?, limit?` |
+| `list_classes` | List classes. `parentFilter` resolves with or without the C++ A/U/F/E prefix (#823). Params: `parentFilter?, limit?` |
 | `list_tags` | List gameplay tags. Params: `filter?` |
 | `create_tag` | Create gameplay tag. Params: `tag, comment?` |
 | `create_enum` | Create UUserDefinedEnum asset, optionally seeded with entries. Params: `name, packagePath?, entries?: (string\|{name, displayName?})[], onConflict? (#274)` |
