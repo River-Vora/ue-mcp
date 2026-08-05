@@ -128,15 +128,6 @@ export function readBridgeLockfile(uprojectPath: string | null): BridgeLockfile 
   if (!parsed || typeof parsed.port !== "number" || parsed.port <= 0 || parsed.port >= 65536) {
     return null;
   }
-
-  // #821: the pid was written and never read. A record left by an editor that
-  // crashed sent the client at a port nothing is listening on, and the
-  // resulting failure named the wrong problem. A recycled pid can still read
-  // as alive, which the connect attempt then settles.
-  if (typeof parsed.pid === "number" && parsed.pid > 0 && !isPidAlive(parsed.pid)) {
-    debug("bridge", `ignoring stale bridge lockfile: process ${parsed.pid} is gone`);
-    return null;
-  }
   return parsed;
 }
 
