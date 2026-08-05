@@ -8,7 +8,12 @@
 #include "HAL/Runnable.h"
 #include "HAL/RunnableThread.h"
 #include "HAL/ThreadSafeBool.h"
+#include "HAL/ThreadSafeCounter.h"
+#include "HAL/CriticalSection.h"
 #include "Containers/Queue.h"
+#include "Containers/Set.h"
+#include "Misc/Guid.h"
+#include "Misc/DateTime.h"
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -16,8 +21,104 @@
 #include "Windows/HideWindowsPlatformTypes.h"
 #endif
 
+// One name for the platform socket handle so the connection code is written
+// once instead of twice behind #if blocks that can silently drift apart.
+#if PLATFORM_WINDOWS
+typedef SOCKET FMCPSocketHandle;
+#define MCP_INVALID_SOCKET INVALID_SOCKET
+#else
+typedef int32 FMCPSocketHandle;
+#define MCP_INVALID_SOCKET (-1)
+#endif
+
+/** WebSocket opcodes the bridge understands (RFC 6455 section 5.2). */
+enum class EMCPWebSocketOpcode : uint8
+{
+	Continuation = 0x0,
+	Text         = 0x1,
+	Binary       = 0x2,
+	Close        = 0x8,
+	Ping         = 0x9,
+	Pong         = 0xA,
+};
+
+/** Outcome of trying to decode one frame off the front of a receive buffer. */
+enum class EMCPFrameDecode : uint8
+{
+	/** The buffer holds a partial frame. Read more and try again. */
+	NeedMoreData,
+	/** OutFrame is filled in and the frame's bytes were consumed. */
+	Decoded,
+	/** The stream is no longer trustworthy. Close the connection. */
+	ProtocolError,
+};
+
+/** One decoded WebSocket frame. A message may span several of these. */
+struct FMCPWebSocketFrame
+{
+	EMCPWebSocketOpcode Opcode = EMCPWebSocketOpcode::Text;
+	bool bFinal = true;
+	TArray<uint8> Payload;
+};
+
+/**
+ * Sole owner of one accepted client socket.
+ *
+ * The accept loop creates the handle and hands it to a connection thread; from
+ * that moment this object is the only thing allowed to close it, and it does so
+ * exactly once. The close call used to be copied down every early return in the
+ * connection path, which is how a new return ends up leaking a socket and a
+ * reconnect ends up closing one twice.
+ */
+class FMCPClientSocket
+{
+public:
+	explicit FMCPClientSocket(FMCPSocketHandle InHandle);
+	~FMCPClientSocket();
+
+	FMCPClientSocket(const FMCPClientSocket&) = delete;
+	FMCPClientSocket& operator=(const FMCPClientSocket&) = delete;
+
+	FMCPSocketHandle Get() const { return Handle; }
+	bool IsValid() const { return Handle != MCP_INVALID_SOCKET; }
+
+	/** Close now. Idempotent, so the destructor is a no-op afterwards. */
+	void Close();
+
+private:
+	FMCPSocketHandle Handle;
+};
+
+class FMCPBridgeServer;
+
+/**
+ * Releases the connection record the accept loop made before it spawned this
+ * thread.
+ *
+ * The accept loop registers, so a shutdown racing an accept can never conclude
+ * that nothing is running. This object is declared after the socket guard and
+ * therefore destroyed before it, so the handle leaves the live set while it is
+ * still open: half-closing a handle number the operating system has already
+ * handed to someone else is worse than not waking it at all.
+ */
+class FMCPConnectionRelease
+{
+public:
+	FMCPConnectionRelease(FMCPBridgeServer& InServer, FMCPSocketHandle InHandle);
+	~FMCPConnectionRelease();
+
+	FMCPConnectionRelease(const FMCPConnectionRelease&) = delete;
+	FMCPConnectionRelease& operator=(const FMCPConnectionRelease&) = delete;
+
+private:
+	FMCPBridgeServer& Server;
+	FMCPSocketHandle Handle;
+};
+
 class FMCPBridgeServer : public FRunnable
 {
+	friend class FMCPConnectionRelease;
+
 public:
 	FMCPBridgeServer(int32 Port = 9877);
 	~FMCPBridgeServer();
@@ -35,9 +136,17 @@ public:
 	void Shutdown();
 
 	// #492: per-project port lockfile so multiple editors can coexist.
+	// #821: the record names the instance that wrote it, is published by
+	// rename so a reader never sees a half-written file, and is only ever
+	// removed by the instance whose id it carries.
 	static FString GetPortLockfilePath();
-	static void WritePortLockfile(int32 PortValue);
-	static void DeletePortLockfile();
+	static FString GetBridgeErrorFilePath();
+	void WritePortLockfile(int32 PortValue);
+	void DeletePortLockfileIfOwned();
+
+	/** Leave an on-disk trace for "editor alive, bridge dead". Written to its
+	 *  own path so a failed start can never overwrite a live editor's record. */
+	void WriteBindFailureRecord(int32 FirstPort, int32 LastPort, int32 ErrorCode);
 
 	// Deterministic per-worktree base port. Derived from a hash of the project
 	// root path so every checkout gets a stable, launch-order-independent port
@@ -58,6 +167,14 @@ public:
 
 	// Process a JSON-RPC message
 	FString ProcessMessage(const FString& Message);
+
+	/**
+	 * #821: what this bridge is and what it can do, answered without the game
+	 * thread. Protocol version, handler ABI version, the binary's compile
+	 * timestamp, this instance's identity, and the action list the running
+	 * binary actually registered.
+	 */
+	TSharedPtr<FJsonObject> BuildCapabilitiesPayload();
 
 private:
 	// Server port
@@ -80,21 +197,72 @@ private:
 	FString CreateJsonRpcError(const TSharedPtr<FJsonObject>& Request, int32 ErrorCode, const FString& ErrorMessage);
 
 	// WebSocket connection handling
-#if PLATFORM_WINDOWS
-	void HandleWebSocketConnection(SOCKET ClientSocketFD);
-	FString PerformWebSocketHandshake(SOCKET ClientSocketFD);
-	void ProcessWebSocketMessages(SOCKET ClientSocketFD);
-	FString ReadHttpRequest(SOCKET SocketFD);
-#else
-	void HandleWebSocketConnection(int32 ClientSocketFD);
-	FString PerformWebSocketHandshake(int32 ClientSocketFD);
-	void ProcessWebSocketMessages(int32 ClientSocketFD);
-	FString ReadHttpRequest(int32 SocketFD);
-#endif
+	void HandleWebSocketConnection(FMCPSocketHandle ClientSocketFD);
+	void ProcessWebSocketMessages(FMCPSocketHandle ClientSocketFD, TArray<uint8>& InitialBytes);
+
+	/**
+	 * Validate the upgrade request and build the 101 response, or return an
+	 * empty string having already told the client why it was refused.
+	 * OutPipelinedBytes receives anything the client sent behind the request.
+	 */
+	FString PerformWebSocketHandshake(FMCPSocketHandle ClientSocketFD, TArray<uint8>& OutPipelinedBytes);
+
+	/** Read the upgrade request through its blank line, not just one recv. */
+	static bool ReadHttpRequest(FMCPSocketHandle SocketFD, FString& OutRequest, TArray<uint8>& OutPipelinedBytes);
+
+	/** Case-insensitive, line-scoped header lookup. */
+	static bool FindHeaderValue(const FString& Request, const FString& HeaderName, FString& OutValue);
+
+	/** Refuse an upgrade with an HTTP status the caller can read. */
+	static void SendHttpError(FMCPSocketHandle SocketFD, int32 StatusCode, const FString& StatusText, const FString& Detail);
+
 	FString CreateWebSocketAcceptKey(const FString& ClientKey);
 	TArray<uint8> CreateWebSocketFrame(const FString& Message);
-	FString ParseWebSocketFrame(const TArray<uint8>& Data);
 
-	// Server socket (will use platform-specific implementation)
-	void* ServerSocket;
+	/**
+	 * Decode at most one frame from the front of Buffer.
+	 *
+	 * On Decoded the frame's bytes (header, mask and payload) are consumed from
+	 * Buffer and whatever follows is left in place, so a read that delivered two
+	 * pipelined requests yields both instead of dropping the second. On
+	 * NeedMoreData nothing is consumed and the caller reads again.
+	 *
+	 * On ProtocolError OutCloseCode carries the status the peer should be closed
+	 * with: 1002 for framing the bridge cannot follow, 1009 when the frame is
+	 * merely too large. The caller sends that code, so the client can tell a
+	 * size refusal from a broken stream.
+	 */
+	static EMCPFrameDecode DecodeWebSocketFrame(TArray<uint8>& Buffer, FMCPWebSocketFrame& OutFrame, FString& OutError, uint16& OutCloseCode);
+
+	/** Frame a control opcode (close, ping, pong) with its payload. */
+	static TArray<uint8> CreateControlFrame(EMCPWebSocketOpcode Opcode, const TArray<uint8>& Payload);
+
+	/** Send a close frame carrying a status code and a human-readable reason. */
+	static void SendCloseFrame(FMCPSocketHandle SocketFD, uint16 StatusCode, const FString& Reason);
+
+	/** Write every byte or report failure. Partial sends are not success. */
+	static bool SendAll(FMCPSocketHandle SocketFD, const uint8* Data, int32 NumBytes);
+
+	// #821: connection threads capture `this` and outlive the accept loop, so
+	// shutdown has to be able to find them, wake them, and wait for them. The
+	// module frees this object the moment Shutdown returns.
+	void RegisterConnection(FMCPSocketHandle Handle);
+	void UnregisterConnection(FMCPSocketHandle Handle);
+
+	/** Half-close every live client socket so a blocked recv returns now
+	 *  rather than at the end of its next one-second select. */
+	void WakeAllConnections();
+
+	/** Block until no connection thread is running. False on timeout. */
+	bool WaitForConnectionsToFinish(double TimeoutSeconds);
+
+	FCriticalSection ConnectionsMutex;
+	TSet<FMCPSocketHandle> LiveConnections;
+	FThreadSafeCounter ActiveConnectionCount;
+
+	// #821: identity for this server object, so a record on disk can say which
+	// process wrote it and only that process can take it away. A pid alone is
+	// not enough; pids are recycled.
+	FGuid InstanceId;
+	FDateTime StartedAtUtc;
 };

@@ -26,6 +26,10 @@
         lsof -i :9877
         ```
 
+5. **The editor is up but the bridge is not.** If the bridge could not bind any port, it writes `<project>/Saved/UE_MCP_Bridge/bridge-error.json` with the range it tried and the socket error, and the client quotes that detail in the connection error rather than reporting no editor. Read the file directly if you are looking without the client.
+
+6. **A stale record.** `<project>/Saved/UE_MCP_Bridge/port.json` names the pid and the instance that wrote it, and only that instance removes it. An editor that was killed rather than closed leaves it behind; see [stop_editor or restart_editor says no port is published](#stop_editor-or-restart_editor-says-no-port-is-published).
+
 ### Handlers time out, or the editor never finishes starting
 
 **Symptoms:** every call returns `Handler execution timed out`, `start_editor` waits out its timeout, or `get_status` says `disconnected` while an editor is plainly open.
@@ -112,6 +116,14 @@ Nothing is wrong on the ue-mcp side and there is nothing to fix in your setup: o
 The MCP server auto-reconnects every 15 seconds. If the editor is restarted, the connection will restore automatically.
 
 If the connection is flapping (connecting then immediately disconnecting), check the editor's Output Log for errors in the `LogMCPBridge` category.
+
+The bridge closes with a WebSocket status code and a reason, and the client repeats both. The ones worth recognising:
+
+| Code | Meaning |
+|------|---------|
+| `1001` | The editor is shutting down |
+| `1002` | The frame stream stopped parsing. The reason names what was wrong |
+| `1009` | A message, a frame, or the unparsed receive buffer exceeded the 64 MiB bound. The reason names the size and the limit |
 
 ### stop_editor or restart_editor says no port is published
 
@@ -256,6 +268,8 @@ Fix: rebuild the plugin, then restart the editor so the new binary loads.
 ```bash
 ue-mcp update --build
 ```
+
+To confirm which binary is actually loaded, read `bridgeProtocol` from `project(action="get_status")`. `builtAt` there is the compile timestamp of the running plugin, and `plugin` versus `client` are the two protocol versions. When they differ, the client also says so in the error on any action the running plugin does not have. `bridgeApiVersion` in the same response is read from the header on disk and describes the source, so the two disagreeing is itself the signal that the deployed plugin has not been rebuilt.
 
 If `--build` reports success but the behavior still persists, force a clean rebuild (incremental builds and Live Coding can load stale patches over a fresh build):
 

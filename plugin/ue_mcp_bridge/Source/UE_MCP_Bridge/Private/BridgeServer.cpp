@@ -1,20 +1,25 @@
 #include "BridgeServer.h"
 #include "UE_MCP_BridgeModule.h"
 #include "MCPEngineStatus.h"
+#include "MCPHandlerRegistration.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformMisc.h"
+#include "HAL/PlatformTime.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/DateTime.h"
 #include "Misc/Timespan.h"
+#include "Misc/App.h"
+#include "Misc/EngineVersion.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 #include "Misc/SecureHash.h"
+#include "Misc/ScopeLock.h"
 #include "Async/Async.h"
 #include "Handlers/EditorHandlers.h"
 #include "Handlers/AssetHandlers.h"
@@ -69,12 +74,46 @@
 #pragma comment(lib, "advapi32.lib")
 #endif
 
+namespace
+{
+	// #821: a JSON-RPC message can span many TCP reads and many WebSocket
+	// frames, so the reader accumulates. These are the bounds on how much it
+	// will hold for one connection before it refuses and says why, instead of
+	// growing without limit on a corrupt or hostile length field.
+	constexpr int64 kMaxWebSocketMessageBytes = 64ll * 1024ll * 1024ll; // 64 MiB
+	constexpr int32 kRecvChunkBytes = 65536;
+
+	// The upgrade request is read to its terminator rather than in one recv, so
+	// it needs its own bounds: how long the whole read may take, and how large
+	// the headers may grow before the bridge stops waiting for a blank line.
+	constexpr double kUpgradeReadTimeoutSeconds = 5.0;
+	constexpr int32 kMaxUpgradeHeaderBytes = 16 * 1024;
+
+	// How long shutdown lets connection threads notice the stop flag and close
+	// politely (their select is one second), and how long it then waits after
+	// half-closing their sockets before giving up and saying so.
+	constexpr double kConnectionCloseGraceSeconds = 2.0;
+	constexpr double kConnectionDrainTimeoutSeconds = 10.0;
+}
+
+FMCPConnectionRelease::FMCPConnectionRelease(FMCPBridgeServer& InServer, FMCPSocketHandle InHandle)
+	: Server(InServer)
+	, Handle(InHandle)
+{
+}
+
+FMCPConnectionRelease::~FMCPConnectionRelease()
+{
+	Server.UnregisterConnection(Handle);
+}
+
 FMCPBridgeServer::FMCPBridgeServer(int32 Port)
 	: ServerPort(Port)
 	, ServerThread(nullptr)
 	, bShouldStop(false)
 	, bIsRunning(false)
-	, ServerSocket(nullptr)
+	, InstanceId(FGuid::NewGuid())
+	, StartedAtUtc(FDateTime::UtcNow())
 {
 	// Register core handlers
 	FEditorHandlers::RegisterHandlers(HandlerRegistry);
@@ -126,12 +165,16 @@ bool FMCPBridgeServer::Start()
 
 void FMCPBridgeServer::Shutdown()
 {
-	if (!bIsRunning)
-	{
-		return;
-	}
-
+	// No early return on bIsRunning. Exit() clears that flag, and on the
+	// bind-failure path Exit() runs before Shutdown() does, so guarding on it
+	// meant the server thread was never joined in exactly the case where the
+	// thread had already failed and nobody was watching.
 	bShouldStop = true;
+
+	// Let anything waiting on the game thread give up now. Module teardown is
+	// running on the game thread, so a queued handler will never execute and
+	// its caller would otherwise sit here for the full handler timeout.
+	GameThreadExecutor.BeginShutdown();
 
 	if (ServerThread)
 	{
@@ -140,7 +183,72 @@ void FMCPBridgeServer::Shutdown()
 		ServerThread = nullptr;
 	}
 
+	// The accept loop is gone, but each connection thread captured `this` and
+	// the module destroys this object as soon as Shutdown returns. A thread
+	// still inside ProcessMessage at that point is running on freed memory:
+	// that is the stop_editor-with-a-client-attached crash.
+	//
+	// Connection loops see bShouldStop at the end of their current one-second
+	// select and close cleanly. Give them that long before being blunt about it.
+	if (!WaitForConnectionsToFinish(kConnectionCloseGraceSeconds))
+	{
+		WakeAllConnections();
+		if (!WaitForConnectionsToFinish(kConnectionDrainTimeoutSeconds))
+		{
+			UE_LOG(LogMCPBridge, Error,
+				TEXT("[UE-MCP] %d bridge connection(s) still running after %.0fs. Continuing shutdown; a handler is not returning."),
+				ActiveConnectionCount.GetValue(), kConnectionCloseGraceSeconds + kConnectionDrainTimeoutSeconds);
+		}
+	}
+
 	bIsRunning = false;
+}
+
+void FMCPBridgeServer::RegisterConnection(FMCPSocketHandle Handle)
+{
+	ActiveConnectionCount.Increment();
+	FScopeLock Lock(&ConnectionsMutex);
+	LiveConnections.Add(Handle);
+}
+
+void FMCPBridgeServer::UnregisterConnection(FMCPSocketHandle Handle)
+{
+	{
+		// Out of the set before the socket is closed, under the same lock
+		// WakeAllConnections holds. Otherwise shutdown could half-close a
+		// handle number the operating system had already handed to someone else.
+		FScopeLock Lock(&ConnectionsMutex);
+		LiveConnections.Remove(Handle);
+	}
+	// The last thing a connection thread touches on this object.
+	ActiveConnectionCount.Decrement();
+}
+
+void FMCPBridgeServer::WakeAllConnections()
+{
+	FScopeLock Lock(&ConnectionsMutex);
+	for (const FMCPSocketHandle Handle : LiveConnections)
+	{
+#if PLATFORM_WINDOWS
+		shutdown(Handle, SD_BOTH);
+#else
+		shutdown(Handle, SHUT_RDWR);
+#endif
+	}
+}
+
+bool FMCPBridgeServer::WaitForConnectionsToFinish(double TimeoutSeconds)
+{
+	const double Deadline = FPlatformTime::Seconds() + TimeoutSeconds;
+	while (ActiveConnectionCount.GetValue() > 0)
+	{
+		if (FPlatformTime::Seconds() >= Deadline)
+		{
+			return false;
+		}
+		FPlatformProcess::Sleep(0.01f);
+	}
+	return true;
 }
 
 bool FMCPBridgeServer::Init()
@@ -179,10 +287,27 @@ uint32 FMCPBridgeServer::Run()
 		return 1;
 	}
 
-	// Set socket options
+	// Claim the port exclusively.
+	//
+	// #821: Winsock's SO_REUSEADDR is not the POSIX one. It allows a bind to
+	// succeed on a port another socket is actively listening on unless that
+	// socket asked for exclusive use. With it set, the collision walk below
+	// could never fire on Windows: a second editor of the same project bound at
+	// offset 0, both processes believed they owned the port, and which listener
+	// received a given connection was up to the stack. SO_EXCLUSIVEADDRUSE is
+	// what makes the second bind fail, which is what lets the walk walk.
+	//
+	// On POSIX, SO_REUSEADDR only relaxes TIME_WAIT and cannot take a live
+	// listener's port, so it stays there.
+#if PLATFORM_WINDOWS
+	int32 ExclusiveAddrUse = 1;
+	setsockopt(ServerSocketFD, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char*)&ExclusiveAddrUse, sizeof(ExclusiveAddrUse));
+#else
 	int32 ReuseAddr = 1;
 	setsockopt(ServerSocketFD, SOL_SOCKET, SO_REUSEADDR, (char*)&ReuseAddr, sizeof(ReuseAddr));
-	
+#endif
+
+
 	// Set TCP_NODELAY for immediate send (disable Nagle's algorithm)
 	int32 NoDelay = 1;
 	setsockopt(ServerSocketFD, IPPROTO_TCP, TCP_NODELAY, (char*)&NoDelay, sizeof(NoDelay));
@@ -231,6 +356,10 @@ uint32 FMCPBridgeServer::Run()
 		UE_LOG(LogMCPBridge, Error, TEXT("[UE-MCP] Failed to bind to any port in [%d, %d]"), RequestedPort, RequestedPort + kMaxPortProbe);
 		close(ServerSocketFD);
 #endif
+		// #821: "editor alive, bridge dead" used to leave nothing on disk, so
+		// the client could only report that it found no editor. Say what
+		// actually happened, in a file that is not the live editor's record.
+		WriteBindFailureRecord(RequestedPort, RequestedPort + kMaxPortProbe, ErrorCode);
 		return 1;
 	}
 
@@ -247,6 +376,7 @@ uint32 FMCPBridgeServer::Run()
 		UE_LOG(LogMCPBridge, Error, TEXT("[UE-MCP] Failed to listen on socket"));
 		close(ServerSocketFD);
 #endif
+		WriteBindFailureRecord(BoundPort, BoundPort, ErrorCode);
 		return 1;
 	}
 
@@ -292,7 +422,11 @@ uint32 FMCPBridgeServer::Run()
 			UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Client connected from %s:%d"),
 				ANSI_TO_TCHAR(AddrStr), ntohs(ClientAddr.sin_port));
 				
-				// Handle each WebSocket connection in its own thread
+				// Handle each WebSocket connection in its own thread. Count it
+				// here, before the thread exists, so a shutdown racing this
+				// accept cannot decide that nothing is running and let the
+				// module free the server out from under the new thread.
+				RegisterConnection(ClientSocketFD);
 				Async(EAsyncExecution::Thread, [this, ClientSocketFD]() {
 					HandleWebSocketConnection(ClientSocketFD);
 				});
@@ -323,7 +457,11 @@ void FMCPBridgeServer::Exit()
 	// #492: remove the lockfile on graceful shutdown so the next editor boot
 	// doesn't see a stale entry. A hard-crash leaves the file, but the next
 	// startup overwrites it with the live PID.
-	DeletePortLockfile();
+	//
+	// #821: only if this instance wrote it. Exit() runs on every return from
+	// Run(), the bind-failure path included, so an unconditional delete here
+	// let an editor that never listened remove a running editor's record.
+	DeletePortLockfileIfOwned();
 }
 
 // #492: per-project port lockfile. Multiple editors can run side-by-side as
@@ -336,33 +474,136 @@ FString FMCPBridgeServer::GetPortLockfilePath()
 	return FPaths::Combine(Dir, TEXT("port.json"));
 }
 
+FString FMCPBridgeServer::GetBridgeErrorFilePath()
+{
+	const FString Dir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UE_MCP_Bridge"));
+	return FPaths::Combine(Dir, TEXT("bridge-error.json"));
+}
+
+namespace
+{
+	/**
+	 * Publish JSON by writing a temporary file and renaming it over the target.
+	 *
+	 * The client polls these files every couple of seconds while it waits for
+	 * an editor. Writing in place means a poll can land mid-write, read a torn
+	 * document, fail to parse it and silently fall back to a guessed port. A
+	 * rename is the one step a reader cannot catch halfway through.
+	 */
+	bool PublishJsonAtomically(const FString& FilePath, const TSharedPtr<FJsonObject>& Payload)
+	{
+		IFileManager::Get().MakeDirectory(*FPaths::GetPath(FilePath), /*Tree*/ true);
+
+		FString Serialized;
+		TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Serialized);
+		FJsonSerializer::Serialize(Payload.ToSharedRef(), Writer);
+
+		const FString TempPath = FString::Printf(TEXT("%s.%u.tmp"), *FilePath, FPlatformProcess::GetCurrentProcessId());
+		if (!FFileHelper::SaveStringToFile(Serialized, *TempPath))
+		{
+			return false;
+		}
+		if (!IFileManager::Get().Move(*FilePath, *TempPath, /*Replace*/ true))
+		{
+			IFileManager::Get().Delete(*TempPath);
+			return false;
+		}
+		return true;
+	}
+
+	/** Read the instanceId out of a record, or empty when there is not one. */
+	FString ReadRecordInstanceId(const FString& FilePath)
+	{
+		FString Raw;
+		if (!FFileHelper::LoadFileToString(Raw, *FilePath))
+		{
+			return FString();
+		}
+		TSharedPtr<FJsonObject> Parsed;
+		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Raw);
+		if (!FJsonSerializer::Deserialize(Reader, Parsed) || !Parsed.IsValid())
+		{
+			return FString();
+		}
+		FString Value;
+		Parsed->TryGetStringField(TEXT("instanceId"), Value);
+		return Value;
+	}
+}
+
 void FMCPBridgeServer::WritePortLockfile(int32 PortValue)
 {
 	const FString FilePath = GetPortLockfilePath();
-	IFileManager::Get().MakeDirectory(*FPaths::GetPath(FilePath), /*Tree*/ true);
 
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 	Obj->SetNumberField(TEXT("port"), PortValue);
 	Obj->SetNumberField(TEXT("pid"), (double)FPlatformProcess::GetCurrentProcessId());
-	Obj->SetStringField(TEXT("startedAt"), FDateTime::UtcNow().ToIso8601());
-	Obj->SetNumberField(TEXT("apiVersion"), 1.0);
+	Obj->SetStringField(TEXT("startedAt"), StartedAtUtc.ToIso8601());
+	// Who wrote this. A pid is not identity: pids are recycled, and two
+	// instances of one project would otherwise be indistinguishable on disk.
+	Obj->SetStringField(TEXT("instanceId"), InstanceId.ToString(EGuidFormats::DigitsWithHyphens));
+	Obj->SetStringField(TEXT("status"), TEXT("listening"));
+	Obj->SetNumberField(TEXT("protocolVersion"), (double)UEMCP_BRIDGE_PROTOCOL_VERSION);
+	Obj->SetNumberField(TEXT("handlerApiVersion"), (double)UEMCP_BRIDGE_API_VERSION);
 
-	FString Serialized;
-	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Serialized);
-	FJsonSerializer::Serialize(Obj.ToSharedRef(), Writer);
-
-	if (!FFileHelper::SaveStringToFile(Serialized, *FilePath))
+	if (!PublishJsonAtomically(FilePath, Obj))
 	{
 		UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Failed to write port lockfile: %s"), *FilePath);
 		return;
 	}
-	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Port lockfile published: %s (port=%d)"), *FilePath, PortValue);
+
+	// A previous failed start may have left a bind-failure record. This
+	// instance is listening, so that record no longer describes reality.
+	IFileManager::Get().Delete(*GetBridgeErrorFilePath(), /*RequireExists*/ false, /*EvenReadOnly*/ false, /*Quiet*/ true);
+
+	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Port lockfile published: %s (port=%d, instance=%s)"),
+		*FilePath, PortValue, *InstanceId.ToString(EGuidFormats::DigitsWithHyphens));
 }
 
-void FMCPBridgeServer::DeletePortLockfile()
+void FMCPBridgeServer::WriteBindFailureRecord(int32 FirstPort, int32 LastPort, int32 ErrorCode)
+{
+	// Its own path, never port.json: a failed start must not be able to erase
+	// or overwrite the record of an editor that is running perfectly well.
+	const FString FilePath = GetBridgeErrorFilePath();
+
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetStringField(TEXT("status"), TEXT("bind-failed"));
+	Obj->SetNumberField(TEXT("pid"), (double)FPlatformProcess::GetCurrentProcessId());
+	Obj->SetStringField(TEXT("startedAt"), StartedAtUtc.ToIso8601());
+	Obj->SetStringField(TEXT("failedAt"), FDateTime::UtcNow().ToIso8601());
+	Obj->SetStringField(TEXT("instanceId"), InstanceId.ToString(EGuidFormats::DigitsWithHyphens));
+	Obj->SetNumberField(TEXT("firstPortTried"), FirstPort);
+	Obj->SetNumberField(TEXT("lastPortTried"), LastPort);
+	Obj->SetNumberField(TEXT("errorCode"), ErrorCode);
+	Obj->SetStringField(TEXT("detail"), FString::Printf(
+		TEXT("The editor is running but its MCP bridge could not bind a port in [%d, %d]."), FirstPort, LastPort));
+
+	if (!PublishJsonAtomically(FilePath, Obj))
+	{
+		UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Failed to write bridge error record: %s"), *FilePath);
+	}
+}
+
+void FMCPBridgeServer::DeletePortLockfileIfOwned()
 {
 	const FString FilePath = GetPortLockfilePath();
-	if (!FPaths::FileExists(FilePath)) return;
+	if (!FPaths::FileExists(FilePath))
+	{
+		return;
+	}
+
+	// Only take away a record this instance wrote. Exit() runs on every return
+	// from Run(), including the one where the bind failed, so an editor that
+	// never listened used to delete a live editor's record on its way out.
+	const FString OwnerId = ReadRecordInstanceId(FilePath);
+	const FString OurId = InstanceId.ToString(EGuidFormats::DigitsWithHyphens);
+	if (OwnerId != OurId)
+	{
+		UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Leaving port lockfile alone: it belongs to instance %s, not %s"),
+			OwnerId.IsEmpty() ? TEXT("(unknown)") : *OwnerId, *OurId);
+		return;
+	}
+
 	if (IFileManager::Get().Delete(*FilePath))
 	{
 		UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Port lockfile removed: %s"), *FilePath);
@@ -482,6 +723,59 @@ FString FMCPBridgeServer::CreateJsonRpcError(const TSharedPtr<FJsonObject>& Requ
 	return OutputString;
 }
 
+TSharedPtr<FJsonObject> FMCPBridgeServer::BuildCapabilitiesPayload()
+{
+	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Payload->SetBoolField(TEXT("success"), true);
+	Payload->SetBoolField(TEXT("servedWithoutGameThread"), true);
+	Payload->SetNumberField(TEXT("protocolVersion"), (double)UEMCP_BRIDGE_PROTOCOL_VERSION);
+	Payload->SetNumberField(TEXT("handlerApiVersion"), (double)UEMCP_BRIDGE_API_VERSION);
+
+	// The question behind "which version is this" is nearly always "is the
+	// binary I am talking to the one built from the source on disk". A compile
+	// timestamp answers that; a constant read out of a header file cannot,
+	// because the header is the source and the source is what got ahead.
+	Payload->SetStringField(TEXT("builtAt"), ANSI_TO_TCHAR(__DATE__ " " __TIME__));
+	Payload->SetStringField(TEXT("engineVersion"), FEngineVersion::Current().ToString());
+	Payload->SetStringField(TEXT("projectName"), FApp::GetProjectName());
+	Payload->SetStringField(TEXT("instanceId"), InstanceId.ToString(EGuidFormats::DigitsWithHyphens));
+	Payload->SetNumberField(TEXT("pid"), (double)FPlatformProcess::GetCurrentProcessId());
+	Payload->SetNumberField(TEXT("port"), ServerPort);
+	Payload->SetStringField(TEXT("startedAt"), StartedAtUtc.ToIso8601());
+
+	// Named capabilities rather than "anything at or above version N", so a
+	// client can ask about the one thing it needs.
+	static const TCHAR* const Features[] = {
+		TEXT("frame-reassembly"),
+		TEXT("control-frames"),
+		TEXT("capability-handshake"),
+		TEXT("exclusive-port-claim"),
+		TEXT("owned-port-record"),
+	};
+	TArray<TSharedPtr<FJsonValue>> FeatureValues;
+	for (const TCHAR* Feature : Features)
+	{
+		FeatureValues.Add(MakeShared<FJsonValueString>(Feature));
+	}
+	Payload->SetArrayField(TEXT("features"), FeatureValues);
+
+	// The registered action list, from the running binary. This is the only
+	// answer to "does the plugin I reached have this method" that a stale DLL
+	// cannot fake.
+	TArray<FString> Names = HandlerRegistry.GetHandlerNames();
+	Names.Sort();
+	TArray<TSharedPtr<FJsonValue>> ActionValues;
+	ActionValues.Reserve(Names.Num());
+	for (const FString& Name : Names)
+	{
+		ActionValues.Add(MakeShared<FJsonValueString>(Name));
+	}
+	Payload->SetNumberField(TEXT("actionCount"), Names.Num());
+	Payload->SetArrayField(TEXT("actions"), ActionValues);
+
+	return Payload;
+}
+
 FString FMCPBridgeServer::ProcessMessage(const FString& Message)
 {
 	TSharedPtr<FJsonObject> Request = ParseJsonRpcRequest(Message);
@@ -526,6 +820,15 @@ FString FMCPBridgeServer::ProcessMessage(const FString& Message)
 		Snapshot->SetBoolField(TEXT("success"), true);
 		Snapshot->SetBoolField(TEXT("servedWithoutGameThread"), true);
 		return CreateJsonRpcResponse(Request, MakeShared<FJsonValueObject>(Snapshot));
+	}
+
+	// #821: also served here, for the same reason and one more. This is the
+	// question a client asks to find out whether the plugin it reached
+	// understands the protocol it speaks, and it asks it on connect, which is
+	// exactly when the game thread is least likely to answer anything.
+	if (Method == TEXT("get_bridge_capabilities"))
+	{
+		return CreateJsonRpcResponse(Request, MakeShared<FJsonValueObject>(BuildCapabilitiesPayload()));
 	}
 
 	// Execute handler on game thread
@@ -608,142 +911,163 @@ FString FMCPBridgeServer::ProcessMessage(const FString& Message)
 	}
 }
 
-#if PLATFORM_WINDOWS
-void FMCPBridgeServer::HandleWebSocketConnection(SOCKET ClientSocketFD)
-#else
-void FMCPBridgeServer::HandleWebSocketConnection(int32 ClientSocketFD)
-#endif
+FMCPClientSocket::FMCPClientSocket(FMCPSocketHandle InHandle)
+	: Handle(InHandle)
 {
+}
+
+FMCPClientSocket::~FMCPClientSocket()
+{
+	Close();
+}
+
+void FMCPClientSocket::Close()
+{
+	if (Handle == MCP_INVALID_SOCKET)
+	{
+		return;
+	}
+#if PLATFORM_WINDOWS
+	closesocket(Handle);
+#else
+	close(Handle);
+#endif
+	Handle = MCP_INVALID_SOCKET;
+}
+
+void FMCPBridgeServer::HandleWebSocketConnection(FMCPSocketHandle ClientSocketFD)
+{
+	// The accept loop created this handle and hands it over here. From this
+	// line on, Connection is its only owner: it closes exactly once, on the way
+	// out of this function, whichever path leaves it.
+	FMCPClientSocket Connection(ClientSocketFD);
+
+	// Declared after the socket so it is destroyed before it: the handle must
+	// leave the live set while it is still open.
+	FMCPConnectionRelease Release(*this, ClientSocketFD);
+
 	// Set TCP_NODELAY on client socket for immediate send
 	int32 NoDelay = 1;
-	setsockopt(ClientSocketFD, IPPROTO_TCP, TCP_NODELAY, (char*)&NoDelay, sizeof(NoDelay));
-	
+	setsockopt(Connection.Get(), IPPROTO_TCP, TCP_NODELAY, (char*)&NoDelay, sizeof(NoDelay));
+
+	// Anything the client pipelined behind its upgrade request. Those bytes
+	// arrived on the same read as the header and belong to the frame reader.
+	TArray<uint8> PipelinedBytes;
+
 	// Perform WebSocket handshake
-	FString Response = PerformWebSocketHandshake(ClientSocketFD);
+	const FString Response = PerformWebSocketHandshake(Connection.Get(), PipelinedBytes);
 	if (Response.IsEmpty())
 	{
-#if PLATFORM_WINDOWS
-		closesocket(ClientSocketFD);
-#else
-		close(ClientSocketFD);
-#endif
 		return;
 	}
 
-	// Send handshake response
-	// HTTP headers are ASCII, FString uses TCHAR (which is wchar_t on Windows)
-	// Convert to UTF-8 bytes for network transmission
-	FTCHARToUTF8 UTF8Response(*Response);
-	const char* ResponseBytes = (const char*)UTF8Response.Get();
-	int32 TotalBytes = UTF8Response.Length();
-	
-	// Send response - ensure all bytes are sent
-	int32 SentBytes = 0;
-	while (SentBytes < TotalBytes)
+	// HTTP headers are ASCII and FString is TCHAR, so convert to UTF-8 bytes
+	// for the wire. A partial send is a failed handshake, not a success.
+	const FTCHARToUTF8 UTF8Response(*Response);
+	if (!SendAll(Connection.Get(), (const uint8*)UTF8Response.Get(), UTF8Response.Length()))
 	{
-		int32 BytesSent = send(ClientSocketFD, ResponseBytes + SentBytes, TotalBytes - SentBytes, 0);
-		if (BytesSent < 0)
-		{
-			int32 ErrorCode = 0;
-#if PLATFORM_WINDOWS
-			ErrorCode = WSAGetLastError();
-			UE_LOG(LogMCPBridge, Error, TEXT("[UE-MCP] Failed to send WebSocket handshake response, error: %d"), ErrorCode);
-			closesocket(ClientSocketFD);
-#else
-			UE_LOG(LogMCPBridge, Error, TEXT("[UE-MCP] Failed to send WebSocket handshake response"));
-			close(ClientSocketFD);
-#endif
-			return;
-		}
-		SentBytes += BytesSent;
+		UE_LOG(LogMCPBridge, Error, TEXT("[UE-MCP] Failed to send WebSocket handshake response"));
+		return;
 	}
-	
-	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Sent WebSocket handshake response (%d/%d bytes)"), SentBytes, TotalBytes);
-	
-	// Small delay to ensure response is fully sent and received by client
-	FPlatformProcess::Sleep(0.01f); // 10ms
-	
+
+	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Sent WebSocket handshake response (%d bytes)"), UTF8Response.Length());
+
 	// Process WebSocket messages
 	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Starting WebSocket message processing"));
-	ProcessWebSocketMessages(ClientSocketFD);
+	ProcessWebSocketMessages(Connection.Get(), PipelinedBytes);
 	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] WebSocket message processing ended"));
-
-#if PLATFORM_WINDOWS
-	closesocket(ClientSocketFD);
-#else
-	close(ClientSocketFD);
-#endif
 }
 
-#if PLATFORM_WINDOWS
-FString FMCPBridgeServer::PerformWebSocketHandshake(SOCKET ClientSocketFD)
-#else
-FString FMCPBridgeServer::PerformWebSocketHandshake(int32 ClientSocketFD)
-#endif
+FString FMCPBridgeServer::PerformWebSocketHandshake(FMCPSocketHandle ClientSocketFD, TArray<uint8>& OutPipelinedBytes)
 {
-	FString Request = ReadHttpRequest(ClientSocketFD);
-	if (Request.IsEmpty())
+	FString Request;
+	if (!ReadHttpRequest(ClientSocketFD, Request, OutPipelinedBytes))
 	{
 		return TEXT("");
 	}
 
-	// Reject browser-originated upgrades from any origin other than loopback.
-	// Browsers always send an Origin header on WebSocket upgrades, so a present
-	// Origin that isn't loopback is a cross-site websocket hijacking attempt
-	// (a malicious page on the developer's machine reaching the editor bridge).
-	// Native clients (Node ws, curl) omit Origin and are allowed.
+	// Validate the request before honouring it. Answering every request that
+	// merely carries a Sec-WebSocket-Key with a 101 means a mistyped path, a
+	// POST, or a client speaking an older WebSocket draft all get told the
+	// upgrade succeeded and then fail incomprehensibly on the first frame.
 	{
-		int32 OriginStart = Request.Find(TEXT("Origin:"), ESearchCase::IgnoreCase);
-		if (OriginStart != INDEX_NONE)
+		int32 RequestLineEnd = Request.Find(TEXT("\r\n"));
+		const FString RequestLine = (RequestLineEnd == INDEX_NONE)
+			? Request.TrimStartAndEnd()
+			: Request.Left(RequestLineEnd).TrimStartAndEnd();
+
+		if (!RequestLine.StartsWith(TEXT("GET "), ESearchCase::CaseSensitive))
 		{
-			int32 ValueStart = OriginStart + 7; // strlen("Origin:")
-			while (ValueStart < Request.Len() && (Request[ValueStart] == TEXT(' ') || Request[ValueStart] == TEXT('\t')))
-			{
-				ValueStart++;
-			}
-			int32 ValueEnd = Request.Find(TEXT("\r\n"), ESearchCase::CaseSensitive, ESearchDir::FromStart, ValueStart);
-			FString Origin = (ValueEnd == INDEX_NONE)
-				? Request.Mid(ValueStart).TrimStartAndEnd()
-				: Request.Mid(ValueStart, ValueEnd - ValueStart).TrimStartAndEnd();
+			UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Rejected non-GET upgrade request: %s"), *RequestLine.Left(80));
+			SendHttpError(ClientSocketFD, 405, TEXT("Method Not Allowed"), TEXT("The UE-MCP bridge only accepts GET WebSocket upgrades."));
+			return TEXT("");
+		}
+		if (!RequestLine.EndsWith(TEXT("HTTP/1.1"), ESearchCase::IgnoreCase))
+		{
+			UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Rejected upgrade request with unsupported HTTP version: %s"), *RequestLine.Left(80));
+			SendHttpError(ClientSocketFD, 505, TEXT("HTTP Version Not Supported"), TEXT("WebSocket upgrades require HTTP/1.1."));
+			return TEXT("");
+		}
 
-			const bool bIsLoopback =
-				Origin.StartsWith(TEXT("http://localhost"), ESearchCase::IgnoreCase) ||
-				Origin.StartsWith(TEXT("https://localhost"), ESearchCase::IgnoreCase) ||
-				Origin.StartsWith(TEXT("http://127.0.0.1"), ESearchCase::IgnoreCase) ||
-				Origin.StartsWith(TEXT("https://127.0.0.1"), ESearchCase::IgnoreCase) ||
-				Origin.StartsWith(TEXT("http://[::1]"), ESearchCase::IgnoreCase) ||
-				Origin.StartsWith(TEXT("https://[::1]"), ESearchCase::IgnoreCase);
+		FString UpgradeHeader;
+		if (!FindHeaderValue(Request, TEXT("Upgrade"), UpgradeHeader) || !UpgradeHeader.Contains(TEXT("websocket"), ESearchCase::IgnoreCase))
+		{
+			UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Rejected request with no WebSocket Upgrade header"));
+			SendHttpError(ClientSocketFD, 426, TEXT("Upgrade Required"), TEXT("The UE-MCP bridge speaks WebSocket only."));
+			return TEXT("");
+		}
 
-			if (!bIsLoopback)
-			{
-				UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Rejected WebSocket upgrade from Origin: %s"), *Origin);
-				return TEXT("");
-			}
+		FString ConnectionHeader;
+		if (!FindHeaderValue(Request, TEXT("Connection"), ConnectionHeader) || !ConnectionHeader.Contains(TEXT("upgrade"), ESearchCase::IgnoreCase))
+		{
+			UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Rejected upgrade request with no 'Connection: Upgrade'"));
+			SendHttpError(ClientSocketFD, 400, TEXT("Bad Request"), TEXT("A WebSocket upgrade needs 'Connection: Upgrade'."));
+			return TEXT("");
+		}
+
+		FString VersionHeader;
+		if (!FindHeaderValue(Request, TEXT("Sec-WebSocket-Version"), VersionHeader) || FCString::Atoi(*VersionHeader) != 13)
+		{
+			UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Rejected upgrade with Sec-WebSocket-Version '%s' (13 required)"), *VersionHeader);
+			SendHttpError(ClientSocketFD, 426, TEXT("Upgrade Required"), TEXT("The UE-MCP bridge speaks WebSocket version 13."));
+			return TEXT("");
 		}
 	}
 
-	// Extract WebSocket-Key from request (case-insensitive search)
+	// Refuse every browser-originated upgrade.
+	//
+	// The bridge exposes execute_python and every editor mutation, and it
+	// authenticates nothing about the caller. Allowing loopback origins meant
+	// any page served by any dev server on the machine could scan the port
+	// range and drive the editor, because the browser supplies
+	// Sec-WebSocket-Key itself and the page never has to see the response to
+	// cause the damage.
+	//
+	// A browser cannot suppress or forge the Origin header on a WebSocket
+	// upgrade, so its presence is a reliable "this came from a page". Native
+	// clients (the npm client, curl, editor tooling) omit it and are unaffected.
+	{
+		FString Origin;
+		if (FindHeaderValue(Request, TEXT("Origin"), Origin))
+		{
+			UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Rejected browser-originated WebSocket upgrade from Origin: %s"), *Origin);
+			SendHttpError(ClientSocketFD, 403, TEXT("Forbidden"),
+				TEXT("The UE-MCP bridge does not accept upgrades from web pages. Connect from a local process instead."));
+			return TEXT("");
+		}
+	}
+
+	// Extract WebSocket-Key from request
 	FString WebSocketKey;
-	int32 KeyStart = Request.Find(TEXT("Sec-WebSocket-Key:"), ESearchCase::IgnoreCase);
-	if (KeyStart != INDEX_NONE)
-	{
-		// Skip past the header name and any whitespace
-		int32 ValueStart = KeyStart + 18; // Length of "Sec-WebSocket-Key:"
-		while (ValueStart < Request.Len() && (Request[ValueStart] == TEXT(' ') || Request[ValueStart] == TEXT('\t')))
-		{
-			ValueStart++;
-		}
-		int32 KeyEnd = Request.Find(TEXT("\r\n"), ESearchCase::CaseSensitive, ESearchDir::FromStart, ValueStart);
-		if (KeyEnd != INDEX_NONE)
-		{
-			WebSocketKey = Request.Mid(ValueStart, KeyEnd - ValueStart).TrimStartAndEnd();
-		}
-	}
-	
+	FindHeaderValue(Request, TEXT("Sec-WebSocket-Key"), WebSocketKey);
+
 	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Extracted WebSocket-Key: %s"), *WebSocketKey);
 
-	if (WebSocketKey.IsEmpty())
+	TArray<uint8> DecodedKey;
+	if (WebSocketKey.IsEmpty() || !FBase64::Decode(WebSocketKey, DecodedKey) || DecodedKey.Num() != 16)
 	{
+		UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Rejected upgrade with a missing or malformed Sec-WebSocket-Key"));
+		SendHttpError(ClientSocketFD, 400, TEXT("Bad Request"), TEXT("Sec-WebSocket-Key must be 16 base64-encoded bytes."));
 		return TEXT("");
 	}
 
@@ -768,47 +1092,126 @@ FString FMCPBridgeServer::PerformWebSocketHandshake(int32 ClientSocketFD)
 	return Response;
 }
 
-#if PLATFORM_WINDOWS
-FString FMCPBridgeServer::ReadHttpRequest(SOCKET SocketFD)
-#else
-FString FMCPBridgeServer::ReadHttpRequest(int32 SocketFD)
-#endif
+bool FMCPBridgeServer::FindHeaderValue(const FString& Request, const FString& HeaderName, FString& OutValue)
 {
-	// Read HTTP request headers (until \r\n\r\n)
-	FString Request;
-	TArray<uint8> Buffer;
-	Buffer.SetNum(4096);
-	
-	// Use select to wait for data with timeout
-	fd_set ReadSet;
-	FD_ZERO(&ReadSet);
-	FD_SET(SocketFD, &ReadSet);
-	
-	timeval Timeout;
-	Timeout.tv_sec = 5; // 5 second timeout
-	Timeout.tv_usec = 0;
-	
-	int32 SelectResult = select(SocketFD + 1, &ReadSet, nullptr, nullptr, &Timeout);
-	if (SelectResult <= 0 || !FD_ISSET(SocketFD, &ReadSet))
+	// Scan line by line rather than searching the whole request for the header
+	// name: a value that happens to contain another header's name would
+	// otherwise be read as that header.
+	TArray<FString> Lines;
+	Request.ParseIntoArray(Lines, TEXT("\r\n"), /*InCullEmpty*/ false);
+	for (int32 Index = 1; Index < Lines.Num(); ++Index) // line 0 is the request line
 	{
-		UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Timeout waiting for HTTP request"));
-		return TEXT("");
+		const int32 Colon = Lines[Index].Find(TEXT(":"), ESearchCase::CaseSensitive);
+		if (Colon == INDEX_NONE)
+		{
+			continue;
+		}
+		if (Lines[Index].Left(Colon).TrimStartAndEnd().Equals(HeaderName, ESearchCase::IgnoreCase))
+		{
+			OutValue = Lines[Index].Mid(Colon + 1).TrimStartAndEnd();
+			return true;
+		}
 	}
-	
-	// Read data
-	int32 BytesReceived = recv(SocketFD, (char*)Buffer.GetData(), Buffer.Num(), 0);
-	if (BytesReceived <= 0)
+	return false;
+}
+
+void FMCPBridgeServer::SendHttpError(FMCPSocketHandle SocketFD, int32 StatusCode, const FString& StatusText, const FString& Detail)
+{
+	// A rejected upgrade used to be a silent disconnect, which reads to the
+	// caller exactly like "no editor is running". Say what was wrong.
+	const FString Body = Detail + TEXT("\r\n");
+	const FTCHARToUTF8 Utf8Body(*Body);
+	const FString Response = FString::Printf(
+		TEXT("HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s"),
+		StatusCode, *StatusText, Utf8Body.Length(), *Body);
+
+	const FTCHARToUTF8 Utf8Response(*Response);
+	SendAll(SocketFD, (const uint8*)Utf8Response.Get(), Utf8Response.Length());
+}
+
+bool FMCPBridgeServer::ReadHttpRequest(FMCPSocketHandle SocketFD, FString& OutRequest, TArray<uint8>& OutPipelinedBytes)
+{
+	OutRequest.Reset();
+	OutPipelinedBytes.Reset();
+
+	TArray<uint8> Raw;
+	uint8 Chunk[4096];
+	int32 HeaderEnd = INDEX_NONE;
+
+	const double Deadline = FPlatformTime::Seconds() + kUpgradeReadTimeoutSeconds;
+
+	// Read until the blank line that ends the headers. A single recv is not a
+	// request: a header split across segments loses Sec-WebSocket-Key, and the
+	// connection then drops with nothing said about why.
+	while (HeaderEnd == INDEX_NONE)
 	{
-		UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Failed to read HTTP request"));
-		return TEXT("");
+		const double Remaining = Deadline - FPlatformTime::Seconds();
+		if (Remaining <= 0.0)
+		{
+			UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Timed out reading the WebSocket upgrade request (%d bytes read)"), Raw.Num());
+			return false;
+		}
+
+		fd_set ReadSet;
+		FD_ZERO(&ReadSet);
+		FD_SET(SocketFD, &ReadSet);
+
+		timeval Timeout;
+		Timeout.tv_sec = (long)Remaining;
+		Timeout.tv_usec = (long)((Remaining - (double)Timeout.tv_sec) * 1000000.0);
+
+		const int32 SelectResult = select(SocketFD + 1, &ReadSet, nullptr, nullptr, &Timeout);
+		if (SelectResult <= 0 || !FD_ISSET(SocketFD, &ReadSet))
+		{
+			UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Timeout waiting for the WebSocket upgrade request"));
+			return false;
+		}
+
+		const int32 BytesReceived = recv(SocketFD, (char*)Chunk, (int32)sizeof(Chunk), 0);
+		if (BytesReceived <= 0)
+		{
+			UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Connection closed before the upgrade request completed (%d bytes read)"), Raw.Num());
+			return false;
+		}
+
+		// The terminator can straddle two reads, so back up three bytes.
+		const int32 SearchFrom = FMath::Max(0, Raw.Num() - 3);
+		Raw.Append(Chunk, BytesReceived);
+
+		for (int32 Index = SearchFrom; Index + 3 < Raw.Num(); ++Index)
+		{
+			if (Raw[Index] == '\r' && Raw[Index + 1] == '\n' && Raw[Index + 2] == '\r' && Raw[Index + 3] == '\n')
+			{
+				HeaderEnd = Index + 4;
+				break;
+			}
+		}
+
+		if (HeaderEnd == INDEX_NONE && Raw.Num() > kMaxUpgradeHeaderBytes)
+		{
+			UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Upgrade request headers exceed %d bytes with no terminator; refusing"), kMaxUpgradeHeaderBytes);
+			SendHttpError(SocketFD, 431, TEXT("Request Header Fields Too Large"), TEXT("The upgrade request headers are too large for the UE-MCP bridge."));
+			return false;
+		}
 	}
-	
-	Buffer.SetNum(BytesReceived);
-	Request = FString(ANSI_TO_TCHAR((char*)Buffer.GetData()));
-	
-	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Read HTTP request (%d bytes):\n%s"), BytesReceived, *Request.Left(200));
-	
-	return Request;
+
+	// Decode exactly the header bytes. ANSI_TO_TCHAR reads until a NUL, and a
+	// socket buffer does not contain one; passing the length is what keeps the
+	// conversion inside the buffer.
+	const FUTF8ToTCHAR Header((const char*)Raw.GetData(), HeaderEnd);
+	OutRequest = FString(Header.Length(), Header.Get());
+
+	// Whatever followed the blank line is the client's first frames, arriving
+	// in the same segment as the upgrade. They belong to the frame reader.
+	if (Raw.Num() > HeaderEnd)
+	{
+		OutPipelinedBytes.Append(Raw.GetData() + HeaderEnd, Raw.Num() - HeaderEnd);
+	}
+
+	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Read HTTP upgrade request (%d header bytes, %d pipelined):\n%s"),
+		HeaderEnd, OutPipelinedBytes.Num(), *OutRequest.Left(200));
+
+	return true;
 }
 
 FString FMCPBridgeServer::CreateWebSocketAcceptKey(const FString& ClientKey)
@@ -848,57 +1251,218 @@ FString FMCPBridgeServer::CreateWebSocketAcceptKey(const FString& ClientKey)
 	return AcceptKey;
 }
 
-#if PLATFORM_WINDOWS
-void FMCPBridgeServer::ProcessWebSocketMessages(SOCKET ClientSocketFD)
-#else
-void FMCPBridgeServer::ProcessWebSocketMessages(int32 ClientSocketFD)
-#endif
+void FMCPBridgeServer::ProcessWebSocketMessages(FMCPSocketHandle ClientSocketFD, TArray<uint8>& InitialBytes)
 {
-	constexpr int32 RecvBufferSize = 65536;
-	TArray<uint8> Buffer;
-	Buffer.SetNumUninitialized(RecvBufferSize);
+	TArray<uint8> Chunk;
+	Chunk.SetNumUninitialized(kRecvChunkBytes);
+
+	// Everything received and not yet consumed by the decoder. A TCP read is a
+	// byte-stream event, not a message event: one read can carry half a frame,
+	// three frames, or two frames and half of a fourth. This buffer is what
+	// makes those all mean the same thing. It starts with whatever the client
+	// pipelined behind its upgrade request.
+	TArray<uint8> PendingBytes = MoveTemp(InitialBytes);
+
+	// Reassembly state for a fragmented message (a data frame with FIN clear
+	// followed by continuation frames).
+	TArray<uint8> MessagePayload;
+	bool bAssembling = false;
+
+	// True once the connection has ended for a reason of its own: the peer
+	// closed, the stream stopped parsing, or the socket failed. False means the
+	// loop exited only because the bridge is stopping, which the peer deserves
+	// to be told about.
+	bool bConnectionFinished = false;
 
 	while (!bShouldStop)
 	{
-		fd_set ReadSet;
-		FD_ZERO(&ReadSet);
-		FD_SET(ClientSocketFD, &ReadSet);
-		
-		timeval Timeout;
-		Timeout.tv_sec = 1;
-		Timeout.tv_usec = 0;
-		
-		int32 SelectResult = select(ClientSocketFD + 1, &ReadSet, nullptr, nullptr, &Timeout);
-		
-		if (SelectResult > 0 && FD_ISSET(ClientSocketFD, &ReadSet))
+		// Decode before reading. Bytes left over from the previous read may
+		// already hold a whole request, and waiting on select first would stall
+		// it until the peer happened to send something else.
+		bool bDone = false;
+		for (;;)
 		{
-			int32 BytesReceived = recv(ClientSocketFD, (char*)Buffer.GetData(), RecvBufferSize, 0);
-			if (BytesReceived <= 0)
+			FMCPWebSocketFrame Frame;
+			FString DecodeError;
+			uint16 DecodeCloseCode = 1002;
+			const EMCPFrameDecode Status = DecodeWebSocketFrame(PendingBytes, Frame, DecodeError, DecodeCloseCode);
+
+			if (Status == EMCPFrameDecode::NeedMoreData)
 			{
 				break;
 			}
-
-			TArray<uint8> FrameData(Buffer.GetData(), BytesReceived);
-			FString Message = ParseWebSocketFrame(FrameData);
-			
-			if (!Message.IsEmpty())
+			if (Status == EMCPFrameDecode::ProtocolError)
 			{
-				FString Response = ProcessMessage(Message);
-				TArray<uint8> ResponseFrame = CreateWebSocketFrame(Response);
-				int32 TotalToSend = ResponseFrame.Num();
-				int32 Sent = 0;
-				while (Sent < TotalToSend)
+				UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] WebSocket protocol error, closing connection: %s"), *DecodeError);
+				SendCloseFrame(ClientSocketFD, DecodeCloseCode, DecodeError);
+				bDone = true;
+				break;
+			}
+
+			// Control frames are answers the protocol owes the peer, not
+			// requests. Handing a close frame to the JSON-RPC parser (which is
+			// what happened before opcodes were read) replied to "goodbye" with
+			// a parse error and left the client waiting for a close that never
+			// came, holding a connection thread open for the rest of the
+			// session.
+			if (Frame.Opcode == EMCPWebSocketOpcode::Close)
+			{
+				uint16 PeerCode = 1000;
+				FString PeerReason;
+				if (Frame.Payload.Num() >= 2)
 				{
-					int32 BytesSent = send(ClientSocketFD, (char*)ResponseFrame.GetData() + Sent, TotalToSend - Sent, 0);
-					if (BytesSent <= 0) break;
-					Sent += BytesSent;
+					PeerCode = (uint16)(((uint16)Frame.Payload[0] << 8) | (uint16)Frame.Payload[1]);
+					if (Frame.Payload.Num() > 2)
+					{
+						FUTF8ToTCHAR ReasonText((const char*)Frame.Payload.GetData() + 2, Frame.Payload.Num() - 2);
+						PeerReason = FString(ReasonText.Length(), ReasonText.Get());
+					}
 				}
+				UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Client closed the WebSocket (code %u%s%s)"),
+					(uint32)PeerCode,
+					PeerReason.IsEmpty() ? TEXT("") : TEXT(": "),
+					*PeerReason);
+				// Echo the code back to finish the handshake, then stop reading.
+				SendCloseFrame(ClientSocketFD, PeerCode, TEXT(""));
+				bDone = true;
+				break;
+			}
+			if (Frame.Opcode == EMCPWebSocketOpcode::Ping)
+			{
+				const TArray<uint8> Pong = CreateControlFrame(EMCPWebSocketOpcode::Pong, Frame.Payload);
+				if (!SendAll(ClientSocketFD, Pong.GetData(), Pong.Num()))
+				{
+					bDone = true;
+					break;
+				}
+				continue;
+			}
+			if (Frame.Opcode == EMCPWebSocketOpcode::Pong)
+			{
+				continue; // keepalive answer, nothing owed
+			}
+
+			if (Frame.Opcode == EMCPWebSocketOpcode::Continuation)
+			{
+				if (!bAssembling)
+				{
+					UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Continuation frame with no message in progress"));
+					SendCloseFrame(ClientSocketFD, 1002, TEXT("continuation frame with no message in progress"));
+					bDone = true;
+					break;
+				}
+				MessagePayload.Append(Frame.Payload);
+			}
+			else
+			{
+				if (bAssembling)
+				{
+					UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] New data frame while a fragmented message was still open"));
+					SendCloseFrame(ClientSocketFD, 1002, TEXT("data frame interleaved with an open fragmented message"));
+					bDone = true;
+					break;
+				}
+				MessagePayload = MoveTemp(Frame.Payload);
+				bAssembling = true;
+			}
+
+			if ((int64)MessagePayload.Num() > kMaxWebSocketMessageBytes)
+			{
+				// Say the number rather than dying quietly: a caller that sends
+				// a genuinely enormous payload needs to know it hit a limit and
+				// what the limit is, not watch the socket disappear.
+				const FString Reason = FString::Printf(
+					TEXT("message of %lld bytes exceeds the %lld byte bridge limit"),
+					(int64)MessagePayload.Num(), kMaxWebSocketMessageBytes);
+				UE_LOG(LogMCPBridge, Error, TEXT("[UE-MCP] %s"), *Reason);
+				SendCloseFrame(ClientSocketFD, 1009, Reason);
+				bDone = true;
+				break;
+			}
+
+			if (!Frame.bFinal)
+			{
+				continue; // more fragments still to come
+			}
+
+			bAssembling = false;
+			FString Message;
+			if (MessagePayload.Num() > 0)
+			{
+				FUTF8ToTCHAR Converted((const char*)MessagePayload.GetData(), MessagePayload.Num());
+				Message = FString(Converted.Length(), Converted.Get());
+			}
+			MessagePayload.Reset();
+
+			if (Message.IsEmpty())
+			{
+				continue;
+			}
+
+			const FString Response = ProcessMessage(Message);
+			const TArray<uint8> ResponseFrame = CreateWebSocketFrame(Response);
+			if (!SendAll(ClientSocketFD, ResponseFrame.GetData(), ResponseFrame.Num()))
+			{
+				UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Failed to send response frame; closing connection"));
+				bDone = true;
+				break;
 			}
 		}
-		else if (SelectResult < 0)
+
+		if (bDone)
 		{
+			bConnectionFinished = true;
 			break;
 		}
+
+		fd_set ReadSet;
+		FD_ZERO(&ReadSet);
+		FD_SET(ClientSocketFD, &ReadSet);
+
+		timeval Timeout;
+		Timeout.tv_sec = 1;
+		Timeout.tv_usec = 0;
+
+		const int32 SelectResult = select(ClientSocketFD + 1, &ReadSet, nullptr, nullptr, &Timeout);
+		if (SelectResult < 0)
+		{
+			bConnectionFinished = true;
+			break;
+		}
+		if (SelectResult == 0 || !FD_ISSET(ClientSocketFD, &ReadSet))
+		{
+			continue;
+		}
+
+		const int32 BytesReceived = recv(ClientSocketFD, (char*)Chunk.GetData(), kRecvChunkBytes, 0);
+		if (BytesReceived <= 0)
+		{
+			bConnectionFinished = true;
+			break;
+		}
+		PendingBytes.Append(Chunk.GetData(), BytesReceived);
+
+		// A peer that keeps sending without ever completing a frame would grow
+		// this buffer without limit. Bound it by the same number a single
+		// message is bounded by.
+		if ((int64)PendingBytes.Num() > kMaxWebSocketMessageBytes)
+		{
+			const FString Reason = FString::Printf(
+				TEXT("unparsed receive buffer of %lld bytes exceeds the %lld byte bridge limit"),
+				(int64)PendingBytes.Num(), kMaxWebSocketMessageBytes);
+			UE_LOG(LogMCPBridge, Error, TEXT("[UE-MCP] %s"), *Reason);
+			SendCloseFrame(ClientSocketFD, 1009, Reason);
+			bConnectionFinished = true;
+			break;
+		}
+	}
+
+	if (!bConnectionFinished)
+	{
+		// The only way out of the loop that is not the connection's own doing:
+		// the bridge is stopping. Tell the client so, instead of leaving it to
+		// infer a healthy editor from a severed socket.
+		SendCloseFrame(ClientSocketFD, 1001, TEXT("editor is shutting down"));
 	}
 }
 
@@ -945,71 +1509,183 @@ TArray<uint8> FMCPBridgeServer::CreateWebSocketFrame(const FString& Message)
 	return Frame;
 }
 
-FString FMCPBridgeServer::ParseWebSocketFrame(const TArray<uint8>& Data)
+EMCPFrameDecode FMCPBridgeServer::DecodeWebSocketFrame(TArray<uint8>& Buffer, FMCPWebSocketFrame& OutFrame, FString& OutError, uint16& OutCloseCode)
 {
-	if (Data.Num() < 2)
+	// Everything below is a framing violation (1002) unless it is specifically
+	// a size refusal, which the caller has to report as 1009 for the client to
+	// tell "you sent too much" apart from "your framing is wrong".
+	OutCloseCode = 1002;
+
+	const int64 Available = (int64)Buffer.Num();
+	if (Available < 2)
 	{
-		return TEXT("");
+		return EMCPFrameDecode::NeedMoreData;
 	}
 
-	uint8 FirstByte = Data[0];
-	uint8 SecondByte = Data[1];
+	const uint8 FirstByte = Buffer[0];
+	const uint8 SecondByte = Buffer[1];
 
-	bool bMasked = (SecondByte & 0x80) != 0;
-	int32 PayloadLen = SecondByte & 0x7F;
+	// RSV1-3 only carry meaning once an extension has been negotiated, and the
+	// bridge negotiates none. A set bit means the peer is framing to rules we
+	// never agreed to, so no boundary in the stream can be trusted.
+	if ((FirstByte & 0x70) != 0)
+	{
+		OutError = TEXT("reserved frame bits set with no negotiated extension");
+		return EMCPFrameDecode::ProtocolError;
+	}
 
-	int32 HeaderLen = 2;
+	OutFrame.bFinal = (FirstByte & 0x80) != 0;
+
+	const uint8 RawOpcode = FirstByte & 0x0F;
+	switch (RawOpcode)
+	{
+	case 0x0: OutFrame.Opcode = EMCPWebSocketOpcode::Continuation; break;
+	case 0x1: OutFrame.Opcode = EMCPWebSocketOpcode::Text; break;
+	case 0x2: OutFrame.Opcode = EMCPWebSocketOpcode::Binary; break;
+	case 0x8: OutFrame.Opcode = EMCPWebSocketOpcode::Close; break;
+	case 0x9: OutFrame.Opcode = EMCPWebSocketOpcode::Ping; break;
+	case 0xA: OutFrame.Opcode = EMCPWebSocketOpcode::Pong; break;
+	default:
+		OutError = FString::Printf(TEXT("unsupported WebSocket opcode 0x%X"), (int32)RawOpcode);
+		return EMCPFrameDecode::ProtocolError;
+	}
+
+	const bool bMasked = (SecondByte & 0x80) != 0;
+	if (!bMasked)
+	{
+		// RFC 6455 section 5.1: a client must mask every frame it sends, and a
+		// server that receives an unmasked one must fail the connection. The bit
+		// was read here and then only used to decide whether to skip four bytes,
+		// so an unmasked frame was accepted and its payload taken from wherever
+		// the mask key would have been. Nothing after that point is trustworthy:
+		// the very next frame boundary is already in the wrong place.
+		OutError = TEXT("client frame arrived unmasked, which RFC 6455 requires clients never to send");
+		return EMCPFrameDecode::ProtocolError;
+	}
+
+	uint64 PayloadLen = (uint64)(SecondByte & 0x7F);
+	int64 HeaderLen = 2;
+
 	if (PayloadLen == 126)
 	{
-		if (Data.Num() < 4)
+		if (Available < 4)
 		{
-			return TEXT("");
+			return EMCPFrameDecode::NeedMoreData;
 		}
-		PayloadLen = (Data[2] << 8) | Data[3];
+		PayloadLen = ((uint64)Buffer[2] << 8) | (uint64)Buffer[3];
 		HeaderLen = 4;
 	}
 	else if (PayloadLen == 127)
 	{
-		if (Data.Num() < 10)
+		if (Available < 10)
 		{
-			return TEXT("");
+			return EMCPFrameDecode::NeedMoreData;
 		}
+		// Accumulate in 64 bits. Folding an 8-byte length into a 32-bit
+		// accumulator is what turns a large or hostile length into a negative
+		// count and a read that walks off the end of the buffer.
 		PayloadLen = 0;
 		for (int32 i = 0; i < 8; ++i)
 		{
-			PayloadLen = (PayloadLen << 8) | Data[2 + i];
+			PayloadLen = (PayloadLen << 8) | (uint64)Buffer[2 + i];
+		}
+		if ((PayloadLen & 0x8000000000000000ull) != 0)
+		{
+			OutError = TEXT("64-bit payload length has its high bit set");
+			return EMCPFrameDecode::ProtocolError;
 		}
 		HeaderLen = 10;
 	}
 
-	if (bMasked)
+	const bool bIsControl = (RawOpcode & 0x08) != 0;
+	if (bIsControl)
 	{
-		HeaderLen += 4; // Masking key
-	}
-
-	if (Data.Num() < HeaderLen + PayloadLen)
-	{
-		return TEXT("");
-	}
-
-	TArray<uint8> Payload;
-	Payload.Append(Data.GetData() + HeaderLen, PayloadLen);
-
-	if (bMasked)
-	{
-		// Unmask payload
-		uint8 MaskKey[4];
-		MaskKey[0] = Data[HeaderLen - 4];
-		MaskKey[1] = Data[HeaderLen - 3];
-		MaskKey[2] = Data[HeaderLen - 2];
-		MaskKey[3] = Data[HeaderLen - 1];
-		
-		for (int32 i = 0; i < Payload.Num(); ++i)
+		// Control frames carry at most 125 bytes and are never fragmented.
+		if (PayloadLen > 125)
 		{
-			Payload[i] ^= MaskKey[i % 4];
+			OutError = FString::Printf(TEXT("control frame payload of %llu bytes exceeds 125"), PayloadLen);
+			return EMCPFrameDecode::ProtocolError;
+		}
+		if (!OutFrame.bFinal)
+		{
+			OutError = TEXT("fragmented control frame");
+			return EMCPFrameDecode::ProtocolError;
 		}
 	}
 
-	FUTF8ToTCHAR UTF8ToTCHAR((char*)Payload.GetData(), Payload.Num());
-	return FString(UTF8ToTCHAR.Length(), UTF8ToTCHAR.Get());
+	if (PayloadLen > (uint64)kMaxWebSocketMessageBytes)
+	{
+		OutError = FString::Printf(
+			TEXT("frame payload of %llu bytes exceeds the %lld byte bridge limit"),
+			PayloadLen, kMaxWebSocketMessageBytes);
+		OutCloseCode = 1009; // message too big, same as the assembled-message bound
+		return EMCPFrameDecode::ProtocolError;
+	}
+
+	if (bMasked)
+	{
+		HeaderLen += 4; // masking key
+	}
+
+	const int64 TotalLen = HeaderLen + (int64)PayloadLen;
+	if (Available < TotalLen)
+	{
+		// The rest of this frame is still in flight. Leave every byte in place
+		// and let the caller read again.
+		return EMCPFrameDecode::NeedMoreData;
+	}
+
+	OutFrame.Payload.Reset();
+	OutFrame.Payload.Append(Buffer.GetData() + HeaderLen, (int32)PayloadLen);
+
+	if (bMasked)
+	{
+		const uint8* MaskKey = Buffer.GetData() + HeaderLen - 4;
+		for (int32 i = 0; i < OutFrame.Payload.Num(); ++i)
+		{
+			OutFrame.Payload[i] ^= MaskKey[i % 4];
+		}
+	}
+
+	Buffer.RemoveAt(0, (int32)TotalLen);
+	return EMCPFrameDecode::Decoded;
+}
+
+TArray<uint8> FMCPBridgeServer::CreateControlFrame(EMCPWebSocketOpcode Opcode, const TArray<uint8>& Payload)
+{
+	TArray<uint8> Frame;
+	Frame.Add((uint8)(0x80 | (uint8)Opcode)); // FIN + opcode
+	const int32 Len = FMath::Min(Payload.Num(), 125);
+	Frame.Add((uint8)Len);
+	Frame.Append(Payload.GetData(), Len);
+	return Frame;
+}
+
+void FMCPBridgeServer::SendCloseFrame(FMCPSocketHandle SocketFD, uint16 StatusCode, const FString& Reason)
+{
+	TArray<uint8> Payload;
+	Payload.Add((uint8)((StatusCode >> 8) & 0xFF));
+	Payload.Add((uint8)(StatusCode & 0xFF));
+
+	FTCHARToUTF8 Utf8Reason(*Reason);
+	const int32 ReasonLen = FMath::Min(Utf8Reason.Length(), 123);
+	Payload.Append((const uint8*)Utf8Reason.Get(), ReasonLen);
+
+	const TArray<uint8> Frame = CreateControlFrame(EMCPWebSocketOpcode::Close, Payload);
+	SendAll(SocketFD, Frame.GetData(), Frame.Num());
+}
+
+bool FMCPBridgeServer::SendAll(FMCPSocketHandle SocketFD, const uint8* Data, int32 NumBytes)
+{
+	int32 Sent = 0;
+	while (Sent < NumBytes)
+	{
+		const int32 BytesSent = send(SocketFD, (const char*)Data + Sent, NumBytes - Sent, 0);
+		if (BytesSent <= 0)
+		{
+			return false;
+		}
+		Sent += BytesSent;
+	}
+	return true;
 }

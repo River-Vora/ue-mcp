@@ -190,6 +190,8 @@ Or per session, without editing the file: `UE_MCP_CONTEXT_STRATEGY=micro` (the e
 
 The C++ plugin listens on a **per-project WebSocket port** derived from a hash of the project root path (in the IANA ephemeral range `49152-65535`). Deriving the port from the path means two checkouts of the same project - or several unrelated projects - on one machine each get a stable, launch-order-independent port, so their MCP clients never collide on a single fixed number. The Node client and the C++ bridge compute the identical value independently, and the bridge also publishes the actual bound port to `<project>/Saved/UE_MCP_Bridge/port.json` as the authoritative source (if the port is already taken, the bridge probes upward and the lockfile records where it really landed). The legacy fixed port `9877` remains the fallback when no project root is known. Pin an explicit port with `UE_MCP_PORT` or `bridge.port` in `ue-mcp.yml`. The MCP server auto-connects on startup and reconnects every 15 seconds if the connection drops.
 
+On Windows the listening socket is claimed with `SO_EXCLUSIVEADDRUSE`, so a second editor of the same project cannot bind the same port. It walks upward instead and publishes where it landed, which is what lets two editors of one project coexist without their clients reaching the wrong one.
+
 ### Which editor lifecycle actions act on
 
 `editor(start_editor)`, `editor(stop_editor)` and `editor(restart_editor)` act on a process, so they resolve their target more strictly than ordinary tool calls (#819):
@@ -201,6 +203,19 @@ The C++ plugin listens on a **per-project WebSocket port** derived from a hash o
 
 Consequence worth knowing: if an editor is killed rather than closed, its lockfile stays behind and `stop_editor` reports the stale PID it names. Delete `<project>/Saved/UE_MCP_Bridge/port.json` to clear it.
 
+### Bridge state files
+
+The bridge keeps two records under `<project>/Saved/UE_MCP_Bridge/`. Both are published by rename, so a client polling them never reads a half-written file.
+
+| File | Written when | Contents |
+|------|--------------|----------|
+| `port.json` | The bridge is listening | `port`, `pid`, `instanceId`, `startedAt`, `status`, `protocolVersion`, `handlerApiVersion` |
+| `bridge-error.json` | The editor came up but the bridge could not bind | `status: "bind-failed"`, the port range tried, the socket error, `pid`, `instanceId` |
+
+`instanceId` identifies the server object that wrote the record, and only that instance removes it. A pid alone is not enough, since pids are recycled: an editor that failed to start can no longer delete the record of one that is running, and a second instance of a project cannot overwrite the first's. The `pid` is what lifecycle actions check before they act on a record, as described above.
+
+`bridge-error.json` is what distinguishes "no editor" from "editor running, bridge dead". When a connection fails and this record names a live process, the client quotes its detail in the error.
+
 ### Connection States
 
 | State | Meaning |
@@ -208,6 +223,10 @@ Consequence worth knowing: if an editor is killed rather than closed, its lockfi
 | **Connected** | Bridge is active, all tools available |
 | **Disconnected** | Editor not running or plugin not loaded. Filesystem tools still work (INI parsing, C++ headers, asset listing) |
 | **Reconnecting** | Connection lost, auto-retry in progress |
+
+### Who may connect
+
+The bridge binds loopback only and refuses every upgrade that carries an `Origin` header. Browsers always send one on a WebSocket upgrade and cannot suppress or forge it, so this keeps out any page served by a local dev server, which would otherwise be able to scan the port range and call `execute_python`. Native clients (the npm client, curl, editor tooling) omit the header and are unaffected.
 
 Check the current state with `project(action="get_status")`. Alongside `editorConnected`, it reports `editorTarget`: the `.uproject` the connection belongs to, the port, and how that port was chosen (`lockfile`, `config`, `derived`, `env`, `explicit`). The connection is always bound to one project, so `editorTarget.projectPath` matches the loaded project.
 

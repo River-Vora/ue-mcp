@@ -24,7 +24,9 @@ async function fakeEditor(name: string): Promise<{
   server.on("connection", (socket) => {
     socket.on("message", (data) => {
       const request = JSON.parse(data.toString()) as { id: string; method: string };
-      received.push(request.method);
+      // #821: every connect opens with a capability handshake. It says nothing
+      // about which editor a caller's work reached, so it stays out of the log.
+      if (request.method !== "get_bridge_capabilities") received.push(request.method);
       socket.send(JSON.stringify({ id: request.id, result: { editor: name } }));
     });
   });
