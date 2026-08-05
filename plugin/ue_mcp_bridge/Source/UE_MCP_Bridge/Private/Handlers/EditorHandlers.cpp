@@ -1430,9 +1430,13 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScreenshot(const TSharedPtr<FJson
 	UGameViewportClient* PieGameViewport = PieWorld ? PieWorld->GetGameViewport() : nullptr;
 	const bool bUsePie = (Target == TEXT("pie")) || (Target == TEXT("auto") && PieWorld);
 
-	auto CaptureSlateWidget = [&Filename, SelectedPIEContext, PieWorld](
+	// ReportContext is the PIE world the capture actually targeted, or null when
+	// the capture is of something else (the editor window). Reporting an
+	// instance the call did not capture would be worse than reporting none.
+	auto CaptureSlateWidget = [&Filename](
 		const TSharedRef<SWidget>& CaptureWidget,
 		const FString& ResultTarget,
+		const FWorldContext* ReportContext,
 		const FString& CaptureDescription) -> TSharedPtr<FJsonValue>
 	{
 		TArray<FColor> Pixels;
@@ -1480,36 +1484,52 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScreenshot(const TSharedPtr<FJson
 		Result->SetNumberField(TEXT("width"), CaptureSize.X);
 		Result->SetNumberField(TEXT("height"), CaptureSize.Y);
 		Result->SetStringField(TEXT("note"), CaptureDescription);
-		if (SelectedPIEContext && PieWorld)
+		if (ReportContext && ReportContext->World())
 		{
-			Result->SetNumberField(TEXT("pieInstance"), SelectedPIEContext->PIEInstance);
-			Result->SetStringField(TEXT("worldPath"), PieWorld->GetPathName());
+			Result->SetNumberField(TEXT("pieInstance"), ReportContext->PIEInstance);
+			Result->SetStringField(TEXT("worldPath"), ReportContext->World()->GetPathName());
 		}
 		return MCPResult(Result);
 	};
 
-	// target=window: synchronous FSlateApplication::TakeScreenshot of the whole
-	// selected PIE window when one exists, otherwise the active (or last visible)
-	// editor window. This is pixel-true for ALL Slate content and synchronous.
+	// target=window: synchronous FSlateApplication::TakeScreenshot of a whole
+	// Slate window, pixel-true for ALL Slate content.
+	//
+	// Which window is addressed, not guessed: an explicit pieInstance/worldPath
+	// asks for that PIE client's window, and everything else keeps the original
+	// meaning of "the active window". Preferring the PIE window whenever PIE
+	// happened to be running took away the ability to capture editor UI during a
+	// PIE session, which is how editor utility widgets get QA'd.
 	if (Target == TEXT("window"))
 	{
 		if (!FSlateApplication::IsInitialized())
 		{
 			return MCPError(TEXT("Slate is not initialized"));
 		}
-		TSharedPtr<SWindow> CaptureWindow =
-			PieGameViewport ? PieGameViewport->GetWindow() : nullptr;
-		if (!CaptureWindow.IsValid())
+		const bool bWantsPieWindow = bHasRequestedPIEInstance || bHasRequestedWorldPath;
+		TSharedPtr<SWindow> CaptureWindow;
+		if (bWantsPieWindow)
+		{
+			CaptureWindow = PieGameViewport ? PieGameViewport->GetWindow() : nullptr;
+			if (!CaptureWindow.IsValid())
+			{
+				return MCPError(FString::Printf(
+					TEXT("PIE world '%s' (instance %d) has no Slate window; omit pieInstance/worldPath to capture the active window"),
+					PieWorld ? *PieWorld->GetPathName() : TEXT("<none>"),
+					SelectedPIEContext ? SelectedPIEContext->PIEInstance : INDEX_NONE));
+			}
+		}
+		else
 		{
 			CaptureWindow = FSlateApplication::Get().GetActiveTopLevelWindow();
-		}
-		if (!CaptureWindow.IsValid())
-		{
-			TArray<TSharedRef<SWindow>> VisibleWindows;
-			FSlateApplication::Get().GetAllVisibleWindowsOrdered(VisibleWindows);
-			if (VisibleWindows.Num() > 0)
+			if (!CaptureWindow.IsValid())
 			{
-				CaptureWindow = VisibleWindows.Last();
+				TArray<TSharedRef<SWindow>> VisibleWindows;
+				FSlateApplication::Get().GetAllVisibleWindowsOrdered(VisibleWindows);
+				if (VisibleWindows.Num() > 0)
+				{
+					CaptureWindow = VisibleWindows.Last();
+				}
 			}
 		}
 		if (!CaptureWindow.IsValid())
@@ -1520,7 +1540,10 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScreenshot(const TSharedPtr<FJson
 		TSharedPtr<FJsonValue> CaptureResult = CaptureSlateWidget(
 			CaptureWindow.ToSharedRef(),
 			TEXT("window"),
-			TEXT("Synchronous selected PIE Slate-window capture including all UI."));
+			bWantsPieWindow ? SelectedPIEContext : nullptr,
+			bWantsPieWindow
+				? TEXT("Synchronous PIE client window capture including all UI.")
+				: TEXT("Synchronous active window capture including all UI."));
 		if (CaptureResult.IsValid() && CaptureResult->Type == EJson::Object)
 		{
 			CaptureResult->AsObject()->SetStringField(
@@ -1544,6 +1567,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScreenshot(const TSharedPtr<FJson
 			TSharedPtr<FJsonValue> CaptureResult = CaptureSlateWidget(
 				PieGameViewport->GetGameViewportWidget().ToSharedRef(),
 				TEXT("pie"),
+				SelectedPIEContext,
 				TEXT("Synchronous selected PIE game-viewport capture including UMG/Slate UI."));
 			if (CaptureResult.IsValid() && CaptureResult->Type == EJson::Object)
 			{
