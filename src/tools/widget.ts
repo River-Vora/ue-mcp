@@ -22,8 +22,19 @@ export const widgetTool: ToolDef = categoryTool(
     run_utility_widget:       bp("Open editor utility widget. Params: assetPath", "run_editor_utility_widget"),
     create_utility_blueprint: bp("Create editor utility blueprint. Params: assetPath, name?, packagePath?", "create_editor_utility_blueprint"),
     run_utility_blueprint:    bp("Run editor utility blueprint. Params: assetPath", "run_editor_utility_blueprint"),
-    add_widget:               bp("Add widget to widget tree. Params: assetPath, widgetClass, widgetName?, parentWidgetName?", "add_widget"),
-    remove_widget:            bp("Remove widget from tree. Params: assetPath, widgetName", "remove_widget"),
+    // #799: both compile and save the Widget Blueprint before they answer, and
+    // that can run well past the 30s default when the asset is open in the
+    // designer. The mutation is on disk by the time the default cap expires, so
+    // giving up early only turns a completed call into an ambiguous one. Both
+    // are idempotent by assetPath + widgetName, so a retry is safe.
+    add_widget: {
+      ...bp("Add widget to widget tree. Idempotent by assetPath + widgetName: passing widgetName makes a retry safe, and the result carries requestedWidgetName/persistedWidgetName/renamed plus compileStatus. Params: assetPath, widgetClass, widgetName?, parentWidgetName?", "add_widget"),
+      timeoutMs: 120_000,
+    },
+    remove_widget: {
+      ...bp("Remove widget from tree. Idempotent, and clears the widget's Widget Blueprint GUID metadata so later compiles stop reporting a deleted variable (#799). Params: assetPath, widgetName", "remove_widget"),
+      timeoutMs: 120_000,
+    },
     move_widget:              bp("Reparent widget. Params: assetPath, widgetName, newParentWidgetName", "move_widget"),
     set_root:                 bp("Replace WBP root with an existing widget by name (#365). Params: assetPath, widgetName", "set_root_widget", (p) => ({ assetPath: p.assetPath, widgetName: p.widgetName })),
     wrap_root:                bp("Wrap the current root in a new panel widget (UMG 'Wrap With'). Params: assetPath, wrapperClass (must be a UPanelWidget subclass), wrapperName? (#365)", "wrap_root_widget", (p) => ({ assetPath: p.assetPath, wrapperClass: p.wrapperClass, widgetClass: p.widgetClass, wrapperName: p.wrapperName })),
