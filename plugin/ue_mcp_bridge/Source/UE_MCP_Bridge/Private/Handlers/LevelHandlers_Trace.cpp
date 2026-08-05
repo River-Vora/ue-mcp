@@ -37,7 +37,9 @@ namespace
 		Result->SetObjectField(TEXT("normal"), MCPVec3ToJsonObject(Hit.Normal));
 		Result->SetObjectField(TEXT("impactNormal"), MCPVec3ToJsonObject(Hit.ImpactNormal));
 		Result->SetNumberField(TEXT("distance"), Hit.Distance);
-		Result->SetNumberField(TEXT("faceIndex"), Hit.FaceIndex);
+		// Only a per-triangle (complex) hit carries a face index. Emitting -1 for a
+		// simple hit invites callers to read it as a real triangle.
+		if (Hit.FaceIndex != INDEX_NONE) Result->SetNumberField(TEXT("faceIndex"), Hit.FaceIndex);
 		if (Hit.BoneName != NAME_None) Result->SetStringField(TEXT("boneName"), Hit.BoneName.ToString());
 		if (Hit.PhysMaterial.IsValid()) Result->SetStringField(TEXT("physicalMaterial"), Hit.PhysMaterial->GetPathName());
 	}
@@ -69,9 +71,15 @@ TSharedPtr<FJsonValue> FLevelHandlers::LineTrace(const TSharedPtr<FJsonObject>& 
 		return MCPError(TEXT("Pass either 'end' (Vec3) or 'direction' (Vec3) + 'distance?'"));
 	}
 
-	FCollisionQueryParams Query(SCENE_QUERY_STAT(MCPLineTrace), /*bTraceComplex*/ true);
+	// Gameplay traces run against simple collision unless they ask otherwise, so a
+	// trace taken here to verify in-game behaviour has to do the same by default.
+	// Complex geometry and its simple hull can be far apart, and a per-triangle hit
+	// the running game never produces reads as a confirmed impact point.
+	const bool bTraceComplex = OptionalBool(Params, TEXT("traceComplex"), false);
+
+	FCollisionQueryParams Query(SCENE_QUERY_STAT(MCPLineTrace), bTraceComplex);
 	Query.bReturnPhysicalMaterial = true;
-	Query.bReturnFaceIndex = true;
+	Query.bReturnFaceIndex = bTraceComplex;
 
 	const TArray<TSharedPtr<FJsonValue>>* IgnoreArr = nullptr;
 	if (Params->TryGetArrayField(TEXT("ignoreActors"), IgnoreArr) && IgnoreArr)
@@ -91,6 +99,9 @@ TSharedPtr<FJsonValue> FLevelHandlers::LineTrace(const TSharedPtr<FJsonObject>& 
 	Result->SetBoolField(TEXT("hit"), bHit);
 	Result->SetObjectField(TEXT("start"), MCPVec3ToJsonObject(Start));
 	Result->SetObjectField(TEXT("end"), MCPVec3ToJsonObject(End));
+	// Report the collision semantics the result was produced under, so a caller
+	// comparing against the game can see which one it got.
+	Result->SetBoolField(TEXT("traceComplex"), bTraceComplex);
 	if (bHit) EmitHitFields(Result, Hit);
 	return MCPResult(Result);
 }
