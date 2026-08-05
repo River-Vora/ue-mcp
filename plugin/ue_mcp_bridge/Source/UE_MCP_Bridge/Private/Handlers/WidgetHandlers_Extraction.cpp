@@ -475,12 +475,22 @@ TSharedPtr<FJsonValue> FWidgetHandlers::ExtractWidgetSubtree(const TSharedPtr<FJ
 		return MCPError(TEXT("Destination WidgetBlueprint compiled but could not be saved"));
 	}
 
-	MCPSetCreated(Result);
+	if (bCreatedDestination)
+	{
+		MCPSetCreated(Result);
+		// Only offer the destructive inverse for an asset this call authored.
+		// Filling in a destination the caller already had on disk must not
+		// hand FlowRunner a rollback that deletes it.
+		MCPSetDeleteAssetRollback(Result, Destination->GetPathName());
+	}
+	else
+	{
+		MCPSetUpdated(Result);
+	}
 	Result->SetStringField(TEXT("destinationAssetPath"), Destination->GetPathName());
 	Result->SetNumberField(TEXT("bindingCount"), CopiedBindings);
 	Result->SetBoolField(TEXT("sourcePackageDirtyBefore"), bSourceDirtyBefore);
 	Result->SetBoolField(TEXT("sourcePackageDirtyAfter"), Source->GetOutermost()->IsDirty());
 	Result->SetBoolField(TEXT("sourceUnchanged"), bSourceDirtyBefore == Source->GetOutermost()->IsDirty());
-	MCPSetDeleteAssetRollback(Result, Destination->GetPathName());
 	return MCPResult(Result);
 }
