@@ -1,4 +1,6 @@
 #include "BridgeServer.h"
+#include "BridgeParamEcho.h"
+#include "BridgeStateFiles.h"
 #include "UE_MCP_BridgeModule.h"
 #include "MCPEngineStatus.h"
 #include "MCPHandlerRegistration.h"
@@ -118,6 +120,12 @@ FMCPBridgeServer::FMCPBridgeServer(int32 Port, const FString& InPortSource, bool
 	, InstanceId(FGuid::NewGuid())
 	, StartedAtUtc(FDateTime::UtcNow())
 {
+	// #817: construction-gated, from the command line or the environment only.
+	// There is deliberately no way to turn this on over the socket: it is a
+	// test facility, and a facility a caller can enable remotely is a facility
+	// an attacker can enable remotely.
+	FMCPParamEcho::Get().SetEnabled(FMCPParamEcho::ResolveEnabledFromEnvironment());
+
 	// Register core handlers
 	FEditorHandlers::RegisterHandlers(HandlerRegistry);
 	FAssetHandlers::RegisterHandlers(HandlerRegistry);
@@ -400,6 +408,17 @@ uint32 FMCPBridgeServer::Run()
 	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Bridge listening on ws://127.0.0.1:%d (loopback only)"), ServerPort);
 	bIsRunning = true;
 
+	// #817: this instance's own record first. It is written before port.json
+	// because port.json may legitimately decline to name this bridge (another
+	// live editor of the same project owns it), and in that case the instance
+	// record is the only published address this editor has.
+	WriteInstanceRecord(TEXT("listening"), ServerPort);
+
+	// Records left by processes that are gone. Swept here, once, by the next
+	// process that can prove them stale rather than by a timer, so a machine
+	// that crashes repeatedly does not accumulate a directory of dead editors.
+	ReapStaleInstanceRecords();
+
 	// #492: publish the bound port to <Project>/Saved/UE_MCP_Bridge/port.json
 	// so the npm client (which was started against this project's .uproject)
 	// can find us even when the default port was already taken by another editor.
@@ -479,6 +498,12 @@ void FMCPBridgeServer::Exit()
 	// Run(), the bind-failure path included, so an unconditional delete here
 	// let an editor that never listened remove a running editor's record.
 	DeletePortLockfileIfOwned();
+
+	// #817: and this instance's own record. Exit() runs on the bind-failure
+	// path too, where the record says "bind-failed" and has to survive: it is
+	// the only thing that will still be on disk to explain why an editor that
+	// is plainly running has no bridge. DeleteOwnInstanceRecord knows that.
+	DeleteOwnInstanceRecord();
 }
 
 // #492: per-project port lockfile. Multiple editors can run side-by-side as
@@ -499,46 +524,17 @@ FString FMCPBridgeServer::GetBridgeErrorFilePath()
 
 namespace
 {
-	/**
-	 * Publish JSON by writing a temporary file and renaming it over the target.
-	 *
-	 * The client polls these files every couple of seconds while it waits for
-	 * an editor. Writing in place means a poll can land mid-write, read a torn
-	 * document, fail to parse it and silently fall back to a guessed port. A
-	 * rename is the one step a reader cannot catch halfway through.
-	 */
+	/** Publish JSON by temp-and-rename. See FMCPBridgeStateFiles::PublishJson. */
 	bool PublishJsonAtomically(const FString& FilePath, const TSharedPtr<FJsonObject>& Payload)
 	{
-		IFileManager::Get().MakeDirectory(*FPaths::GetPath(FilePath), /*Tree*/ true);
-
-		FString Serialized;
-		TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Serialized);
-		FJsonSerializer::Serialize(Payload.ToSharedRef(), Writer);
-
-		const FString TempPath = FString::Printf(TEXT("%s.%u.tmp"), *FilePath, FPlatformProcess::GetCurrentProcessId());
-		if (!FFileHelper::SaveStringToFile(Serialized, *TempPath))
-		{
-			return false;
-		}
-		if (!IFileManager::Get().Move(*FilePath, *TempPath, /*Replace*/ true))
-		{
-			IFileManager::Get().Delete(*TempPath);
-			return false;
-		}
-		return true;
+		return FMCPBridgeStateFiles::PublishJson(FilePath, Payload);
 	}
 
 	/** Read the instanceId out of a record, or empty when there is not one. */
 	FString ReadRecordInstanceId(const FString& FilePath)
 	{
-		FString Raw;
-		if (!FFileHelper::LoadFileToString(Raw, *FilePath))
-		{
-			return FString();
-		}
-		TSharedPtr<FJsonObject> Parsed;
-		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Raw);
-		if (!FJsonSerializer::Deserialize(Reader, Parsed) || !Parsed.IsValid())
+		const TSharedPtr<FJsonObject> Parsed = FMCPBridgeStateFiles::LoadJson(FilePath);
+		if (!Parsed.IsValid())
 		{
 			return FString();
 		}
@@ -546,11 +542,54 @@ namespace
 		Parsed->TryGetStringField(TEXT("instanceId"), Value);
 		return Value;
 	}
+
+	/**
+	 * Is the instance that published this port.json still there?
+	 *
+	 * Only ever asked about a record this process did not write, and only to
+	 * decide whether overwriting it would take a working editor's address away
+	 * from the client that depends on it.
+	 */
+	bool PortLockfileOwnerIsLive(const TSharedPtr<FJsonObject>& Record)
+	{
+		FMCPInstanceRecord Owner;
+		double NumberValue = 0.0;
+		if (Record->TryGetNumberField(TEXT("pid"), NumberValue))
+		{
+			Owner.Pid = (uint32)NumberValue;
+		}
+		if (Record->TryGetNumberField(TEXT("port"), NumberValue))
+		{
+			Owner.Port = (int32)NumberValue;
+		}
+		Record->TryGetStringField(TEXT("status"), Owner.State);
+		return FMCPBridgeStateFiles::IsInstanceLive(Owner);
+	}
 }
 
 void FMCPBridgeServer::WritePortLockfile(int32 PortValue)
 {
 	const FString FilePath = GetPortLockfilePath();
+	const FString OurId = InstanceId.ToString(EGuidFormats::DigitsWithHyphens);
+
+	// #817: the write is owner-checked, the same way the delete already was.
+	// One project directory has one port.json and two editors of that project
+	// have two ports, so the second editor to boot used to publish its own
+	// address over a perfectly healthy first editor's, and every client reading
+	// the file was silently re-aimed at the newcomer. The newcomer's address is
+	// in its own instance record, where it cannot displace anyone.
+	{
+		const TSharedPtr<FJsonObject> Existing = FMCPBridgeStateFiles::LoadJson(FilePath);
+		FString ExistingOwner;
+		if (Existing.IsValid() && Existing->TryGetStringField(TEXT("instanceId"), ExistingOwner)
+			&& !ExistingOwner.IsEmpty() && ExistingOwner != OurId && PortLockfileOwnerIsLive(Existing))
+		{
+			UE_LOG(LogMCPBridge, Warning,
+				TEXT("[UE-MCP] Another editor of this project (instance %s) is still listening and owns %s, so this bridge did not publish over it. This bridge is on port %d and its address is in %s. Clients reading port.json will reach the other editor."),
+				*ExistingOwner, *FilePath, PortValue, *FMCPBridgeStateFiles::RecordPath(FMCPBridgeStateFiles::InstancesDir(), FPlatformProcess::GetCurrentProcessId()));
+			return;
+		}
+	}
 
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 	Obj->SetNumberField(TEXT("port"), PortValue);
@@ -599,6 +638,51 @@ void FMCPBridgeServer::WriteBindFailureRecord(int32 FirstPort, int32 LastPort, i
 	{
 		UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] Failed to write bridge error record: %s"), *FilePath);
 	}
+
+	// #817: and again as this instance's own record, so a failed start is
+	// visible in the same place a successful one is. bridge-error.json is one
+	// file per project and a second editor's failure would overwrite the first
+	// editor's; the per-pid record cannot be overwritten by anyone.
+	WriteInstanceRecord(TEXT("bind-failed"), /*PortValue*/ 0);
+}
+
+void FMCPBridgeServer::WriteInstanceRecord(const FString& State, int32 PortValue)
+{
+	FMCPInstanceRecord Record;
+	Record.Port = PortValue;
+	Record.Pid = FPlatformProcess::GetCurrentProcessId();
+	Record.InstanceId = InstanceId.ToString(EGuidFormats::DigitsWithHyphens);
+	Record.ProjectRoot = FMCPBridgeStateFiles::ThisProjectRoot();
+	Record.StartedAtUtc = StartedAtUtc.ToIso8601();
+	Record.EngineVersion = FEngineVersion::Current().ToString();
+	Record.ProtocolVersion = UEMCP_BRIDGE_PROTOCOL_VERSION;
+	Record.HandlerApiVersion = UEMCP_BRIDGE_API_VERSION;
+	Record.State = State;
+
+	if (FMCPBridgeStateFiles::WriteInstanceRecord(FMCPBridgeStateFiles::InstancesDir(), Record))
+	{
+		UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Instance record published: %s (state=%s, port=%d)"),
+			*FMCPBridgeStateFiles::RecordPath(FMCPBridgeStateFiles::InstancesDir(), Record.Pid), *State, PortValue);
+	}
+}
+
+void FMCPBridgeServer::DeleteOwnInstanceRecord()
+{
+	FMCPBridgeStateFiles::DeleteOwnInstanceRecord(
+		FMCPBridgeStateFiles::InstancesDir(),
+		FPlatformProcess::GetCurrentProcessId(),
+		InstanceId.ToString(EGuidFormats::DigitsWithHyphens));
+}
+
+void FMCPBridgeServer::ReapStaleInstanceRecords()
+{
+	const int32 Removed = FMCPBridgeStateFiles::ReapStaleInstanceRecords(
+		FMCPBridgeStateFiles::InstancesDir(),
+		InstanceId.ToString(EGuidFormats::DigitsWithHyphens));
+	if (Removed > 0)
+	{
+		UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Removed %d stale bridge instance record(s)."), Removed);
+	}
 }
 
 void FMCPBridgeServer::DeletePortLockfileIfOwned()
@@ -634,13 +718,10 @@ void FMCPBridgeServer::DeletePortLockfileIfOwned()
 // no extra dependency; the hash only spreads ports, it is not security.
 int32 FMCPBridgeServer::DeriveProjectPort(const FString& ProjectRootDir)
 {
-	FString Norm = ProjectRootDir;
-	Norm.ReplaceInline(TEXT("\\"), TEXT("/"));
-	while (Norm.EndsWith(TEXT("/")))
-	{
-		Norm = Norm.LeftChop(1);
-	}
-	Norm.ToLowerInline();
+	// One implementation of the normalization, shared with the instance records
+	// and requested.json, all of which compare these strings against the ones
+	// the client writes. Two copies is how the two sides drift apart.
+	const FString Norm = FMCPBridgeStateFiles::NormalizeProjectRoot(ProjectRootDir);
 
 	FTCHARToUTF8 Utf8(*Norm);
 	uint8 Hash[20];
@@ -1156,9 +1237,52 @@ FMCPBridgePortChoice FMCPBridgeServer::ResolveConfiguredPort()
 			TEXT("[UE-MCP] UE_MCP_PORT is '%s', which is not a port number. Ignoring it."), *EnvPort);
 	}
 
-	// 3. `ue-mcp.bridge.port` from the project's layered config (#819). The
+	// 3. The port the client published for this project in
+	//    Saved/UE_MCP_Bridge/requested.json (#817).
+	//
+	//    The pin the client uses is a four-layer config merge plus environment,
+	//    resolved in TypeScript. An editor launched from Explorer sees none of
+	//    that: it has no UE_MCP_PORT in its environment and no way to apply the
+	//    same precedence, so the two halves ended up on different ports for
+	//    exactly the users who had asked for a specific one. The client writes
+	//    the integer it resolved; the bridge reads it and binds it.
+	//
+	//    Above the bridge's own config read because it is the same answer with
+	//    more inputs. Below the two explicit overrides, because a human typing
+	//    -MCPPort= or UE_MCP_PORT for this launch means this launch.
+	//
+	//    The file exists only while a pin exists (the client removes it when the
+	//    pin goes away), so an unpinned install finds nothing here, logs
+	//    nothing, and resolves byte-identically to how it did before.
+	{
+		FString RequestDetail;
+		const int32 RequestedPort = FMCPBridgeStateFiles::ReadRequestedPort(
+			FMCPBridgeStateFiles::RequestedPortPath(),
+			FMCPBridgeStateFiles::ThisProjectRoot(),
+			RequestDetail);
+
+		if (RequestedPort != INDEX_NONE)
+		{
+			UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Using port %d requested by the ue-mcp client in %s"),
+				RequestedPort, *FMCPBridgeStateFiles::RequestedPortPath());
+			Choice.Port = RequestedPort;
+			Choice.Source = TEXT("requested.json published by the ue-mcp client");
+			Choice.bPinned = true;
+			return Choice;
+		}
+		if (!RequestDetail.IsEmpty())
+		{
+			// A file that is present and unusable is a pin that silently did not
+			// take, which is the failure this whole channel exists to remove.
+			UE_LOG(LogMCPBridge, Warning, TEXT("[UE-MCP] %s"), *RequestDetail);
+		}
+	}
+
+	// 4. `ue-mcp.bridge.port` from the project's layered config (#819). The
 	//    client reads the same key, so skipping it here is how a pinned project
-	//    ends up with the two halves on different ports.
+	//    ends up with the two halves on different ports. This stays as the
+	//    answer for a project the client has never been run against, which is
+	//    the case where requested.json does not exist yet.
 	FString ConfigFile;
 	const int32 ConfigPort = ReadConfiguredBridgePort(ConfigFile);
 	if (ConfigPort != INDEX_NONE)
@@ -1170,7 +1294,7 @@ FMCPBridgePortChoice FMCPBridgeServer::ResolveConfiguredPort()
 		return Choice;
 	}
 
-	// 4. Deterministic per-worktree port derived from the project root path.
+	// 5. Deterministic per-worktree port derived from the project root path.
 	const FString ProjectRoot = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
 	const int32 Derived = DeriveProjectPort(ProjectRoot);
 	UE_LOG(LogMCPBridge, Log, TEXT("[UE-MCP] Derived per-project port %d from %s"), Derived, *ProjectRoot);
@@ -1264,6 +1388,13 @@ TSharedPtr<FJsonObject> FMCPBridgeServer::BuildCapabilitiesPayload()
 		TEXT("capability-handshake"),
 		TEXT("exclusive-port-claim"),
 		TEXT("owned-port-record"),
+		// #817. Both are always compiled in and always advertised: a caller has
+		// to be able to tell "this bridge cannot do that" from "this bridge can
+		// and the facility is switched off", and only the first of those two is
+		// grounds for skipping a test.
+		TEXT("instance-records"),
+		TEXT("requested-port-file"),
+		TEXT("param-echo"),
 	};
 	TArray<TSharedPtr<FJsonValue>> FeatureValues;
 	for (const TCHAR* Feature : Features)
@@ -1271,6 +1402,11 @@ TSharedPtr<FJsonObject> FMCPBridgeServer::BuildCapabilitiesPayload()
 		FeatureValues.Add(MakeShared<FJsonValueString>(Feature));
 	}
 	Payload->SetArrayField(TEXT("features"), FeatureValues);
+
+	// Whether the echo is currently recording, which is a runtime fact and not
+	// a capability. A test asserting on forwarded parameters needs both: the
+	// feature name says the method exists, this says the answer will be real.
+	Payload->SetBoolField(TEXT("paramEcho"), FMCPParamEcho::Get().IsEnabled());
 
 	// The registered action list, from the running binary. This is the only
 	// answer to "does the plugin I reached have this method" that a stale DLL
@@ -1323,6 +1459,19 @@ FString FMCPBridgeServer::ProcessMessage(const FString& Message)
 		Params = MakeShared<FJsonObject>();
 	}
 
+	// #817: note what this dispatch was handed, before anything decides what to
+	// do with it. Recorded for unknown methods too: a leaked parameter on a
+	// method the bridge does not have is still a leaked parameter, and it is
+	// the case a stale-plugin test is most likely to hit.
+	//
+	// The two echo methods are excluded so reading the log does not append to
+	// it, which would make a second read return a different answer from the
+	// first for reasons that have nothing to do with the call under test.
+	if (Method != TEXT("get_param_echo") && Method != TEXT("clear_param_echo"))
+	{
+		FMCPParamEcho::Get().Record(Method, Params);
+	}
+
 	// Served here, on the socket thread, deliberately. Every other method waits
 	// on the game thread, so when the game thread is inside a modal dialog, a
 	// slow task, or a hang, this is the only question the bridge can still
@@ -1342,6 +1491,25 @@ FString FMCPBridgeServer::ProcessMessage(const FString& Message)
 	if (Method == TEXT("get_bridge_capabilities"))
 	{
 		return CreateJsonRpcResponse(Request, MakeShared<FJsonValueObject>(BuildCapabilitiesPayload()));
+	}
+
+	// #817: the parameter-name log, and its reset. Served off the game thread
+	// for the same reason the handshake is: the assertion that reads it runs
+	// straight after the call it is about, and making it queue behind the game
+	// thread would let an unrelated slow handler decide whether a leak test
+	// passes.
+	if (Method == TEXT("get_param_echo"))
+	{
+		return CreateJsonRpcResponse(Request, MakeShared<FJsonValueObject>(FMCPParamEcho::Get().BuildPayload()));
+	}
+	if (Method == TEXT("clear_param_echo"))
+	{
+		FMCPParamEcho::Get().Clear();
+		TSharedPtr<FJsonObject> Cleared = MakeShared<FJsonObject>();
+		Cleared->SetBoolField(TEXT("success"), true);
+		Cleared->SetBoolField(TEXT("servedWithoutGameThread"), true);
+		Cleared->SetBoolField(TEXT("enabled"), FMCPParamEcho::Get().IsEnabled());
+		return CreateJsonRpcResponse(Request, MakeShared<FJsonValueObject>(Cleared));
 	}
 
 	// Execute handler on game thread
@@ -1977,6 +2145,11 @@ void FMCPBridgeServer::ProcessWebSocketMessages(FMCPSocketHandle ClientSocketFD,
 		// infer a healthy editor from a severed socket.
 		SendCloseFrame(ClientSocketFD, 1001, TEXT("editor is shutting down"));
 	}
+}
+
+int64 FMCPBridgeServer::MaxMessageBytes()
+{
+	return kMaxWebSocketMessageBytes;
 }
 
 TArray<uint8> FMCPBridgeServer::CreateWebSocketFrame(const FString& Message)

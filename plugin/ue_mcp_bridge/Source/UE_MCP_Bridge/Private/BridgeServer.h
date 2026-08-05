@@ -171,6 +171,20 @@ public:
 	 *  own path so a failed start can never overwrite a live editor's record. */
 	void WriteBindFailureRecord(int32 FirstPort, int32 LastPort, int32 ErrorCode);
 
+	// #817: this process's own record under Saved/UE_MCP_Bridge/instances/.
+	//
+	// port.json names one bridge for a whole project directory, which is the
+	// right answer for one editor and no answer at all for two. A per-pid file
+	// has exactly one writer by construction, so a second editor of the same
+	// project describes itself instead of overwriting the first, and a record
+	// left by a crash is provably stale instead of merely suspicious.
+	void WriteInstanceRecord(const FString& State, int32 PortValue);
+	void DeleteOwnInstanceRecord();
+
+	/** Remove records whose process is gone. Runs once, at startup, on the
+	 *  server thread; the sweep never touches this instance's own record. */
+	void ReapStaleInstanceRecords();
+
 	// Deterministic per-worktree base port. Derived from a hash of the project
 	// root path so every checkout gets a stable, launch-order-independent port
 	// that the Node client computes identically (see src/port.ts). Keep the two
@@ -178,12 +192,19 @@ public:
 	static int32 DeriveProjectPort(const FString& ProjectRootDir);
 
 	// Resolve the base port to bind: -MCPPort= command line > UE_MCP_PORT env >
+	// the port the client published in Saved/UE_MCP_Bridge/requested.json >
 	// `ue-mcp.bridge.port` from the project's config files > deterministic
 	// derived port. That order is the client's (see src/bridge.ts); both sides
 	// have to walk it identically or a pinned project ends up with a client
 	// aimed at one port and an editor listening on another (#819). The probe
 	// loop in Run() walks upward from here on collision, and the actual bound
 	// port is published to the lockfile.
+	//
+	// requested.json (#817) sits above the config read because it is the same
+	// answer computed from more inputs: the client merges four config layers
+	// and the environment, none of which an editor launched from Explorer can
+	// see. It exists only while a pin exists, so an unpinned install resolves
+	// exactly as it did before that channel was added.
 	static FMCPBridgePortChoice ResolveConfiguredPort();
 
 	// Get handler registry
@@ -202,6 +223,38 @@ public:
 	 * binary actually registered.
 	 */
 	TSharedPtr<FJsonObject> BuildCapabilitiesPayload();
+
+	// ── Framing ──────────────────────────────────────────────────────────────
+	//
+	// Public because they are pure functions over a byte buffer with no server
+	// state behind them, and because the automation spec in
+	// Private/Tests/BridgeProtocolTests.cpp is the only thing that can prove
+	// them. The alternative was befriending the test class, which encodes a
+	// test's name into the header and breaks whenever the test is renamed.
+
+	/**
+	 * Decode at most one frame from the front of Buffer.
+	 *
+	 * On Decoded the frame's bytes (header, mask and payload) are consumed from
+	 * Buffer and whatever follows is left in place, so a read that delivered two
+	 * pipelined requests yields both instead of dropping the second. On
+	 * NeedMoreData nothing is consumed and the caller reads again.
+	 *
+	 * On ProtocolError OutCloseCode carries the status the peer should be closed
+	 * with: 1002 for framing the bridge cannot follow, 1009 when the frame is
+	 * merely too large. The caller sends that code, so the client can tell a
+	 * size refusal from a broken stream.
+	 */
+	static EMCPFrameDecode DecodeWebSocketFrame(TArray<uint8>& Buffer, FMCPWebSocketFrame& OutFrame, FString& OutError, uint16& OutCloseCode);
+
+	/** Frame a text message for the wire. Server to client, so never masked. */
+	static TArray<uint8> CreateWebSocketFrame(const FString& Message);
+
+	/** Frame a control opcode (close, ping, pong) with its payload. */
+	static TArray<uint8> CreateControlFrame(EMCPWebSocketOpcode Opcode, const TArray<uint8>& Payload);
+
+	/** The largest assembled message the bridge will hold for one connection. */
+	static int64 MaxMessageBytes();
 
 private:
 	// Server port
@@ -249,25 +302,6 @@ private:
 	static void SendHttpError(FMCPSocketHandle SocketFD, int32 StatusCode, const FString& StatusText, const FString& Detail);
 
 	FString CreateWebSocketAcceptKey(const FString& ClientKey);
-	TArray<uint8> CreateWebSocketFrame(const FString& Message);
-
-	/**
-	 * Decode at most one frame from the front of Buffer.
-	 *
-	 * On Decoded the frame's bytes (header, mask and payload) are consumed from
-	 * Buffer and whatever follows is left in place, so a read that delivered two
-	 * pipelined requests yields both instead of dropping the second. On
-	 * NeedMoreData nothing is consumed and the caller reads again.
-	 *
-	 * On ProtocolError OutCloseCode carries the status the peer should be closed
-	 * with: 1002 for framing the bridge cannot follow, 1009 when the frame is
-	 * merely too large. The caller sends that code, so the client can tell a
-	 * size refusal from a broken stream.
-	 */
-	static EMCPFrameDecode DecodeWebSocketFrame(TArray<uint8>& Buffer, FMCPWebSocketFrame& OutFrame, FString& OutError, uint16& OutCloseCode);
-
-	/** Frame a control opcode (close, ping, pong) with its payload. */
-	static TArray<uint8> CreateControlFrame(EMCPWebSocketOpcode Opcode, const TArray<uint8>& Payload);
 
 	/** Send a close frame carrying a status code and a human-readable reason. */
 	static void SendCloseFrame(FMCPSocketHandle SocketFD, uint16 StatusCode, const FString& Reason);
