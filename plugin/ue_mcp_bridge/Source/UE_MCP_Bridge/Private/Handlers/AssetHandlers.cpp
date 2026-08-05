@@ -187,6 +187,7 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// Texture handlers
 	Registry.RegisterHandler(TEXT("import_texture"), &ImportTexture);
 	Registry.RegisterHandler(TEXT("import_texture_batch"), &ImportTextureBatch);
+	Registry.RegisterHandler(TEXT("create_render_target_2d"), &CreateRenderTarget2D);
 	// #697: texture export + compare.
 	Registry.RegisterHandler(TEXT("export_texture"), &ExportTexture);
 	Registry.RegisterHandler(TEXT("compare_textures"), &CompareTextures);

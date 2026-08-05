@@ -78,6 +78,57 @@ describe("asset — write (with cleanup)", () => {
     expect(r.method).toBe("save_asset");
   });
 
+  it("create_render_target_2d persists settings and is idempotent", async () => {
+    const name = `RenderTarget_${Date.now()}`;
+    const assetPath = `${TEST_PREFIX}/${name}`;
+    const params = {
+      name,
+      packagePath: TEST_PREFIX,
+      width: 320,
+      height: 180,
+      format: "RGBA16F",
+      clearColor: { r: 0.1, g: 0.2, b: 0.3, a: 0.0 },
+      generateMips: true,
+      targetGamma: 2.2,
+    };
+
+    const first = await callBridge(bridge, "create_render_target_2d", params);
+    expect(first.ok, first.error).toBe(true);
+    const firstResult = first.result as Record<string, unknown>;
+    expect(firstResult.created).toBe(true);
+    expect(firstResult.width).toBe(320);
+    expect(firstResult.height).toBe(180);
+    expect(firstResult.format).toBe("RGBA16F");
+    expect(firstResult.generateMips).toBe(true);
+    expect(firstResult.targetGamma).toBeCloseTo(2.2, 4);
+    created.push(assetPath);
+
+    const replay = await callBridge(bridge, "create_render_target_2d", params);
+    expect(replay.ok, replay.error).toBe(true);
+    const replayResult = replay.result as Record<string, unknown>;
+    expect(replayResult.existed).toBe(true);
+    expect(replayResult.created).toBe(false);
+
+    const conflict = await callBridge(bridge, "create_render_target_2d", { ...params, onConflict: "error" });
+    expect(conflict.ok).toBe(false);
+  });
+
+  it("create_render_target_2d rejects an unsupported format and an out-of-range size", async () => {
+    const badFormat = await callBridge(bridge, "create_render_target_2d", {
+      name: `RenderTargetBadFormat_${Date.now()}`,
+      packagePath: TEST_PREFIX,
+      format: "BC7",
+    });
+    expect(badFormat.ok).toBe(false);
+
+    const badSize = await callBridge(bridge, "create_render_target_2d", {
+      name: `RenderTargetBadSize_${Date.now()}`,
+      packagePath: TEST_PREFIX,
+      width: 16384,
+    });
+    expect(badSize.ok).toBe(false);
+  });
+
   it("create_folder + delete_folder round-trip", async () => {
     const folder = `${TEST_PREFIX}/FolderRoundTrip_${Date.now()}`;
     const created = await callBridge(bridge, "create_folder", { path: folder });
