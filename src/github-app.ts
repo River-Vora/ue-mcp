@@ -1,18 +1,46 @@
 import { resolveUserAuth, clearUserAuth, type PendingDeviceFlow } from "./auth.js";
-import { CORE_REPO, registryBase, repoSlug, sameRepo, type GitHubRepo } from "./registry-catalog.js";
+import {
+  CORE_REPO,
+  feedbackBase,
+  registryBase,
+  repoSlug,
+  sameRepo,
+  type GitHubRepo,
+} from "./registry-catalog.js";
 
 /**
- * Hosted signing endpoint for the anonymous bot path.
+ * Hosted signing endpoints for the anonymous bot path, in the order they are
+ * tried.
  *
  * This package holds no GitHub App credential. Anonymous reports are POSTed as
  * plain JSON to the endpoint, which holds the App key in server-side secrets,
- * mints a short-lived installation token, and opens the issue. Overridable so a
- * self-hosted registry (or a local one during development) can serve it.
+ * mints a short-lived installation token, and opens the issue.
+ *
+ * Feedback has its own public name, `feedback.ue-mcp.com`, so it is no longer
+ * addressed through the plugin registry's hostname. The registry path stays as
+ * a fallback for two reasons: a deployment older than that name, or self-hosted,
+ * still answers there, and while DNS for the new name propagates the anonymous
+ * path keeps working instead of going dark.
+ *
+ * Overrides:
+ *   UE_MCP_FEEDBACK_ENDPOINT  full URL. Exact, and the only candidate: an
+ *                             operator who named a URL means that URL, and
+ *                             silently posting somewhere else would be worse
+ *                             than failing.
+ *   UE_MCP_FEEDBACK           origin only, root path.
+ *   UE_MCP_REGISTRY           when set without UE_MCP_FEEDBACK, that self-hosted
+ *                             origin is tried first, since its operator meant
+ *                             their deployment, not the public one.
  */
-function signingEndpoint(): string {
+function signingEndpoints(): string[] {
   const override = process.env.UE_MCP_FEEDBACK_ENDPOINT?.trim();
-  if (override) return override.replace(/\/+$/, "");
-  return `${registryBase()}/api/feedback`;
+  if (override) return [override.replace(/\/+$/, "")];
+
+  const hosted = `${feedbackBase()}/`;
+  const viaRegistry = `${registryBase()}/api/feedback`;
+  const selfHostedRegistry = Boolean(process.env.UE_MCP_REGISTRY?.trim());
+  const ordered = selfHostedRegistry ? [viaRegistry, hosted] : [hosted, viaRegistry];
+  return ordered.filter((url, i) => ordered.indexOf(url) === i);
 }
 
 /** The signing endpoint should answer in well under this; a slow one is a dead one. */
@@ -86,6 +114,20 @@ interface SigningResponse {
 }
 
 /**
+ * One attempt against one endpoint.
+ *
+ * `endpointMissing` separates "there is no signing service at this URL" from
+ * "the signing service answered". Only the first is worth retrying elsewhere:
+ * a service that replied not-configured, rate-limited, or refused-destination
+ * has given a real answer, and asking a different host the same question would
+ * either duplicate the report or contradict the operator's intent.
+ */
+interface SigningAttempt {
+  result: SubmitResult;
+  endpointMissing: boolean;
+}
+
+/**
  * Anonymous bot path.
  *
  * No credential is involved on this side: the body goes to the hosted signing
@@ -93,13 +135,13 @@ interface SigningResponse {
  * is an outcome the caller can act on (file as the user, or open the prefilled
  * URL), so the only thing thrown here is a genuinely unexpected response shape.
  */
-async function submitAsBot(
+async function attemptSigning(
+  endpoint: string,
   title: string,
   body: string,
   labels: string[],
   repo: GitHubRepo,
-): Promise<SubmitResult> {
-  const endpoint = signingEndpoint();
+): Promise<SigningAttempt> {
   let res: Response;
   try {
     res = await fetch(endpoint, {
@@ -113,10 +155,14 @@ async function submitAsBot(
       signal: AbortSignal.timeout(SIGNING_TIMEOUT_MS),
     });
   } catch (e) {
+    // DNS, TLS, timeout: nothing answered, so another origin is worth a try.
     return {
-      kind: "bot_unavailable",
-      code: "unreachable",
-      message: `Could not reach the feedback signing service at ${endpoint} (${e instanceof Error ? e.message : String(e)}).`,
+      endpointMissing: true,
+      result: {
+        kind: "bot_unavailable",
+        code: "unreachable",
+        message: `Could not reach the feedback signing service at ${endpoint} (${e instanceof Error ? e.message : String(e)}).`,
+      },
     };
   }
 
@@ -129,12 +175,15 @@ async function submitAsBot(
 
   if (res.ok && payload.url && typeof payload.number === "number") {
     return {
-      kind: "submitted",
-      url: payload.url,
-      number: payload.number,
-      authoredBy: payload.authoredBy ?? "ue-mcp-feedback[bot]",
-      authoredAs: "bot",
-      repo: payload.repo ?? repoSlug(repo),
+      endpointMissing: false,
+      result: {
+        kind: "submitted",
+        url: payload.url,
+        number: payload.number,
+        authoredBy: payload.authoredBy ?? "ue-mcp-feedback[bot]",
+        authoredAs: "bot",
+        repo: payload.repo ?? repoSlug(repo),
+      },
     };
   }
 
@@ -142,44 +191,99 @@ async function submitAsBot(
   // callers' existing recovery (prefilled URL, or re-file on core) applies.
   if (payload.code === "repo_unavailable" || payload.code === "repo_not_allowed") {
     return {
-      kind: "repo_unavailable",
-      repo: repoSlug(repo),
-      status: payload.status ?? res.status,
-      message: (payload.error ?? "The tracker refused the issue.").slice(0, 300),
+      endpointMissing: false,
+      result: {
+        kind: "repo_unavailable",
+        repo: repoSlug(repo),
+        status: payload.status ?? res.status,
+        message: (payload.error ?? "The tracker refused the issue.").slice(0, 300),
+      },
     };
   }
 
-  if (res.status === 503 || payload.code === "signing_not_configured") {
+  if (payload.code === "signing_not_configured") {
     return {
-      kind: "bot_unavailable",
-      code: "not_configured",
-      message: payload.error ?? "Anonymous feedback signing is not enabled on this deployment.",
-    };
-  }
-
-  // A bare 404 is the endpoint not existing at this origin, not a tracker
-  // saying no. Report it as the anonymous path being off.
-  if (res.status === 404 && !payload.code) {
-    return {
-      kind: "bot_unavailable",
-      code: "not_configured",
-      message: `No feedback signing service at ${endpoint}.`,
+      endpointMissing: false,
+      result: {
+        kind: "bot_unavailable",
+        code: "not_configured",
+        message: payload.error ?? "Anonymous feedback signing is not enabled on this deployment.",
+      },
     };
   }
 
   if (res.status === 429 || payload.code === "rate_limited") {
     return {
-      kind: "bot_unavailable",
-      code: "rate_limited",
-      message: payload.error ?? "Too many anonymous submissions from here recently.",
-      retryAfter: payload.retry_after ?? (Number(res.headers.get("retry-after")) || undefined),
+      endpointMissing: false,
+      result: {
+        kind: "bot_unavailable",
+        code: "rate_limited",
+        message: payload.error ?? "Too many anonymous submissions from here recently.",
+        retryAfter: payload.retry_after ?? (Number(res.headers.get("retry-after")) || undefined),
+      },
+    };
+  }
+
+  /**
+   * Nothing recognisable came back. A 404 or 405 is the endpoint not existing
+   * at this origin, and a 5xx with no code of ours is a proxy or a cold
+   * deployment answering instead of the handler. Neither is a tracker saying
+   * no, so report the anonymous path as off and let the caller try the next
+   * origin.
+   */
+  if (!payload.code && (res.status === 404 || res.status === 405 || res.status >= 500)) {
+    return {
+      endpointMissing: true,
+      result: {
+        kind: "bot_unavailable",
+        code: "not_configured",
+        message: `No feedback signing service at ${endpoint}.`,
+      },
     };
   }
 
   return {
+    endpointMissing: false,
+    result: {
+      kind: "bot_unavailable",
+      code: "rejected",
+      message: `${payload.error ?? "The feedback signing service rejected the submission."} (HTTP ${res.status})`,
+    },
+  };
+}
+
+/**
+ * Try each known signing origin until one of them actually answers.
+ *
+ * The report itself is never at risk here: every branch below is an outcome the
+ * caller can act on, so an offline service ends with a prefilled issue URL in
+ * the user's hands rather than an exception.
+ */
+async function submitAsBot(
+  title: string,
+  body: string,
+  labels: string[],
+  repo: GitHubRepo,
+): Promise<SubmitResult> {
+  const endpoints = signingEndpoints();
+  const missed: SubmitResult[] = [];
+
+  for (const endpoint of endpoints) {
+    const attempt = await attemptSigning(endpoint, title, body, labels, repo);
+    if (!attempt.endpointMissing) return attempt.result;
+    missed.push(attempt.result);
+  }
+
+  // One candidate: keep the original, more specific outcome.
+  if (missed.length === 1) return missed[0];
+
+  // Every origin came up empty. Name them all, because the usual cause is a
+  // host that has not resolved yet and the user can see that from the message.
+  const allUnreachable = missed.every((r) => r.kind === "bot_unavailable" && r.code === "unreachable");
+  return {
     kind: "bot_unavailable",
-    code: "rejected",
-    message: `${payload.error ?? "The feedback signing service rejected the submission."} (HTTP ${res.status})`,
+    code: allUnreachable ? "unreachable" : "not_configured",
+    message: `No feedback signing service answered at ${endpoints.join(" or ")}.`,
   };
 }
 

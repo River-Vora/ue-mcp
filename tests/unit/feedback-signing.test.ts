@@ -14,8 +14,14 @@ const { submitFeedback } = await import("../../src/github-app.js");
 const REPO = { owner: "db-lyon", repo: "ue-mcp" };
 const ENDPOINT = "https://signing.example.test/api/feedback";
 
+/** The two origins tried by default, in order. */
+const FEEDBACK_HOST = "https://feedback.ue-mcp.com/";
+const REGISTRY_PATH = "https://plugins.ue-mcp.com/api/feedback";
+
 const originalFetch = globalThis.fetch;
 const originalEndpointEnv = process.env.UE_MCP_FEEDBACK_ENDPOINT;
+const originalFeedbackEnv = process.env.UE_MCP_FEEDBACK;
+const originalRegistryEnv = process.env.UE_MCP_REGISTRY;
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -29,6 +35,8 @@ describe("anonymous feedback goes through the hosted signing service", () => {
 
   beforeEach(() => {
     process.env.UE_MCP_FEEDBACK_ENDPOINT = ENDPOINT;
+    delete process.env.UE_MCP_FEEDBACK;
+    delete process.env.UE_MCP_REGISTRY;
     fetchMock.mockReset();
     globalThis.fetch = fetchMock as unknown as typeof fetch;
   });
@@ -37,6 +45,10 @@ describe("anonymous feedback goes through the hosted signing service", () => {
     globalThis.fetch = originalFetch;
     if (originalEndpointEnv === undefined) delete process.env.UE_MCP_FEEDBACK_ENDPOINT;
     else process.env.UE_MCP_FEEDBACK_ENDPOINT = originalEndpointEnv;
+    if (originalFeedbackEnv === undefined) delete process.env.UE_MCP_FEEDBACK;
+    else process.env.UE_MCP_FEEDBACK = originalFeedbackEnv;
+    if (originalRegistryEnv === undefined) delete process.env.UE_MCP_REGISTRY;
+    else process.env.UE_MCP_REGISTRY = originalRegistryEnv;
   });
 
   it("posts the report to the endpoint and sends no credential", async () => {
@@ -142,16 +154,125 @@ describe("anonymous feedback goes through the hosted signing service", () => {
     expect(result.status).toBe(403);
   });
 
-  it("defaults to the registry origin when no endpoint override is set", async () => {
-    delete process.env.UE_MCP_FEEDBACK_ENDPOINT;
-    fetchMock.mockResolvedValue(
-      jsonResponse(201, { ok: true, url: "https://example.test/issues/1", number: 1 }),
-    );
+  it("stops at the named endpoint when one was named, rather than trying another host", async () => {
+    fetchMock.mockResolvedValue(new Response("<html>not found</html>", { status: 404 }));
 
     await submitFeedback("A title", "A body", [], { useBot: true, repo: REPO });
 
-    const [url] = fetchMock.mock.calls[0] as [string];
-    expect(url).toBe("https://plugins.ue-mcp.com/api/feedback");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((fetchMock.mock.calls[0] as [string])[0]).toBe(ENDPOINT);
+  });
+});
+
+/**
+ * Feedback has its own public name. The registry path is kept behind it so a
+ * deployment that predates the name, or a self-hosted one, still works, and so
+ * a client does not go dark while DNS for the new host propagates.
+ */
+describe("which signing origin gets asked", () => {
+  const fetchMock = vi.fn();
+
+  const created = () =>
+    jsonResponse(201, { ok: true, url: "https://example.test/issues/1", number: 1 });
+
+  beforeEach(() => {
+    delete process.env.UE_MCP_FEEDBACK_ENDPOINT;
+    delete process.env.UE_MCP_FEEDBACK;
+    delete process.env.UE_MCP_REGISTRY;
+    fetchMock.mockReset();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (originalEndpointEnv === undefined) delete process.env.UE_MCP_FEEDBACK_ENDPOINT;
+    else process.env.UE_MCP_FEEDBACK_ENDPOINT = originalEndpointEnv;
+    if (originalFeedbackEnv === undefined) delete process.env.UE_MCP_FEEDBACK;
+    else process.env.UE_MCP_FEEDBACK = originalFeedbackEnv;
+    if (originalRegistryEnv === undefined) delete process.env.UE_MCP_REGISTRY;
+    else process.env.UE_MCP_REGISTRY = originalRegistryEnv;
+  });
+
+  const urlsCalled = () => fetchMock.mock.calls.map((c) => (c as [string])[0]);
+
+  it("posts to the feedback host by default", async () => {
+    fetchMock.mockResolvedValue(created());
+
+    await submitFeedback("A title", "A body", [], { useBot: true, repo: REPO });
+
+    expect(urlsCalled()).toEqual([FEEDBACK_HOST]);
+  });
+
+  it("falls back to the registry path when the feedback host does not resolve", async () => {
+    fetchMock
+      .mockRejectedValueOnce(new Error("getaddrinfo ENOTFOUND feedback.ue-mcp.com"))
+      .mockResolvedValueOnce(created());
+
+    const result = await submitFeedback("A title", "A body", [], { useBot: true, repo: REPO });
+
+    expect(urlsCalled()).toEqual([FEEDBACK_HOST, REGISTRY_PATH]);
+    expect(result.kind).toBe("submitted");
+  });
+
+  it("falls back when the feedback host answers with something other than the endpoint", async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response("<html>bad gateway</html>", { status: 502 }))
+      .mockResolvedValueOnce(created());
+
+    const result = await submitFeedback("A title", "A body", [], { useBot: true, repo: REPO });
+
+    expect(urlsCalled()).toEqual([FEEDBACK_HOST, REGISTRY_PATH]);
+    expect(result.kind).toBe("submitted");
+  });
+
+  it("accepts a real answer from the first host instead of asking the second", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(503, { error: "not configured here", code: "signing_not_configured" }),
+    );
+
+    const result = await submitFeedback("A title", "A body", [], { useBot: true, repo: REPO });
+
+    expect(urlsCalled()).toEqual([FEEDBACK_HOST]);
+    expect(result.kind).toBe("bot_unavailable");
+  });
+
+  it("does not double-post when the first host rate limits the caller", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(429, { code: "rate_limited", retry_after: 600 }));
+
+    await submitFeedback("A title", "A body", [], { useBot: true, repo: REPO });
+
+    expect(urlsCalled()).toEqual([FEEDBACK_HOST]);
+  });
+
+  it("names both origins, and still degrades gracefully, when neither answers", async () => {
+    fetchMock.mockRejectedValue(new Error("getaddrinfo ENOTFOUND"));
+
+    const result = await submitFeedback("A title", "A body", [], { useBot: true, repo: REPO });
+
+    expect(urlsCalled()).toEqual([FEEDBACK_HOST, REGISTRY_PATH]);
+    expect(result.kind).toBe("bot_unavailable");
+    if (result.kind !== "bot_unavailable") throw new Error("unreachable");
+    expect(result.code).toBe("unreachable");
+    expect(result.message).toContain(FEEDBACK_HOST);
+    expect(result.message).toContain(REGISTRY_PATH);
+  });
+
+  it("honours UE_MCP_FEEDBACK as the origin", async () => {
+    process.env.UE_MCP_FEEDBACK = "https://feedback.local.test/";
+    fetchMock.mockResolvedValue(created());
+
+    await submitFeedback("A title", "A body", [], { useBot: true, repo: REPO });
+
+    expect(urlsCalled()[0]).toBe("https://feedback.local.test/");
+  });
+
+  it("asks a self-hosted registry first when only UE_MCP_REGISTRY is set", async () => {
+    process.env.UE_MCP_REGISTRY = "https://registry.internal.test";
+    fetchMock.mockResolvedValue(created());
+
+    await submitFeedback("A title", "A body", [], { useBot: true, repo: REPO });
+
+    expect(urlsCalled()).toEqual(["https://registry.internal.test/api/feedback"]);
   });
 });
 
