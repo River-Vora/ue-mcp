@@ -1635,15 +1635,28 @@ namespace MCPNodeSearch
 		return true;
 	}
 
-	/** Palette label for a function: DisplayName metadata, else the spaced name. */
-	static FString DisplayNameFor(const UFunction* Func)
+	/** The authored palette label, or empty when the function has none. */
+	static FString DisplayNameMetaFor(const UFunction* Func)
 	{
 		static const FName NAME_DisplayNameMeta(TEXT("DisplayName"));
 		if (const FString* Meta = Func->FindMetaData(NAME_DisplayNameMeta))
 		{
 			if (!Meta->IsEmpty()) return *Meta;
 		}
-		return FName::NameToDisplayString(Func->GetName(), false);
+		return FString();
+	}
+
+	/** Label shown in the palette. Only reported for hits: the fallback spacing
+	 *  pass takes a lock and scans an exemption list, which is too expensive to
+	 *  run over every loaded function, and it cannot change a match anyway since
+	 *  it only inserts spaces that normalization strips again. */
+	static FString PaletteLabelFor(const UFunction* Func, const FString& KnownDisplayNameMeta)
+	{
+		if (!KnownDisplayNameMeta.IsEmpty()) return KnownDisplayNameMeta;
+		// An exact name match short-circuits the metadata read, so look once more
+		// before falling back to the spaced name.
+		const FString Meta = DisplayNameMetaFor(Func);
+		return Meta.IsEmpty() ? FName::NameToDisplayString(Func->GetName(), false) : Meta;
 	}
 
 	/** Skip engine bookkeeping classes that hold no placeable nodes. */
@@ -1738,12 +1751,12 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SearchNodeTypes(const TSharedPtr<FJso
 			// lookups and this loop runs over every loaded blueprint function.
 			int32 Score = ScoreTerm(NormName, NormQuery);
 
-			FString DisplayName;
+			FString DisplayNameMeta;
 			FString NormDisplay;
 			if (Score < 100)
 			{
-				DisplayName = DisplayNameFor(Func);
-				NormDisplay = Normalize(DisplayName);
+				DisplayNameMeta = DisplayNameMetaFor(Func);
+				NormDisplay = Normalize(DisplayNameMeta);
 				Score = FMath::Max(Score, ScoreTerm(NormDisplay, NormQuery));
 			}
 
@@ -1768,7 +1781,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SearchNodeTypes(const TSharedPtr<FJso
 			if (Score == 0) continue;
 			if (Func->HasMetaData(NAME_BlueprintInternalUseOnlyMeta)) continue;
 
-			if (DisplayName.IsEmpty()) DisplayName = DisplayNameFor(Func);
+			const FString DisplayName = PaletteLabelFor(Func, DisplayNameMeta);
 			if (Keywords.IsEmpty())
 			{
 				if (const FString* KeywordMeta = Func->FindMetaData(NAME_KeywordsMeta))
@@ -1801,10 +1814,10 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SearchNodeTypes(const TSharedPtr<FJso
 			TSharedPtr<FJsonObject> NodeParams = MakeShared<FJsonObject>();
 			NodeParams->SetStringField(TEXT("functionName"), FuncName);
 			NodeParams->SetStringField(TEXT("targetClass"), OwnerClass->GetPathName());
-			TSharedPtr<FJsonObject> AddNode = MakeShared<FJsonObject>();
-			AddNode->SetStringField(TEXT("nodeClass"), TEXT("CallFunction"));
-			AddNode->SetObjectField(TEXT("nodeParams"), NodeParams);
-			Entry->SetObjectField(TEXT("addNode"), AddNode);
+			TSharedPtr<FJsonObject> AddNodeCall = MakeShared<FJsonObject>();
+			AddNodeCall->SetStringField(TEXT("nodeClass"), TEXT("CallFunction"));
+			AddNodeCall->SetObjectField(TEXT("nodeParams"), NodeParams);
+			Entry->SetObjectField(TEXT("addNode"), AddNodeCall);
 
 			Hits.Add(FHit{ Score, FuncName, Entry });
 		}
@@ -1838,9 +1851,9 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SearchNodeTypes(const TSharedPtr<FJso
 			Entry->SetStringField(TEXT("class"), NodeClass->GetSuperClass() ? NodeClass->GetSuperClass()->GetName() : TEXT(""));
 			Entry->SetStringField(TEXT("fullPath"), NodeClass->GetPathName());
 
-			TSharedPtr<FJsonObject> AddNode = MakeShared<FJsonObject>();
-			AddNode->SetStringField(TEXT("nodeClass"), ClassName);
-			Entry->SetObjectField(TEXT("addNode"), AddNode);
+			TSharedPtr<FJsonObject> AddNodeCall = MakeShared<FJsonObject>();
+			AddNodeCall->SetStringField(TEXT("nodeClass"), ClassName);
+			Entry->SetObjectField(TEXT("addNode"), AddNodeCall);
 
 			Hits.Add(FHit{ Score, ClassName, Entry });
 		}
