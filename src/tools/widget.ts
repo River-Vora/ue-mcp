@@ -31,7 +31,7 @@ export const widgetTool: ToolDef = categoryTool(
     get_runtime:              bp("(#160) Inspect a live PIE widget tree with text/visibility/brush/percent plus style values: renderOpacity (all), colorAndOpacity (TextBlock/Image), Border brushColor/contentColorAndOpacity (#592). Params: widgetName? | className?, childName?, maxDepth?", "get_runtime_widget"),
     get_runtime_delegates:    bp("(#161) Read delegate binding state on a live PIE widget. Params: widgetName, className?. Returns array of {delegateName, isBound, numBindings}", "get_runtime_delegates"),
     add_to_viewport:          bp("(#602) Instantiate a WidgetBlueprint and add it to the live PIE viewport for visual verification. Requires PIE running. Params: assetPath (WidgetBlueprint path), zOrder?", "add_to_viewport", (p) => ({ assetPath: p.assetPath, zOrder: p.zOrder })),
-    invoke_runtime_function:  bp("(#559) Fire a UI interaction on a live PIE widget: a parameterless UFUNCTION (functionName) on the located UserWidget, OR a button click via childName (broadcasts the child UButton's OnClicked). Locate the widget with widgetName or className. Params: widgetName?|className?, functionName?, childName?", "invoke_runtime_function", (p) => ({ widgetName: p.widgetName, className: p.className, functionName: p.functionName, childName: p.childName })),
+    invoke_runtime_function:  bp("(#559/#812) Fire a UI interaction on a live PIE widget: a parameterless UFUNCTION (functionName) on the located UserWidget, OR drive an interactive child via childName - Button (click), CheckBox (value true/false/toggle), Slider and SpinBox (numeric value), EditableText/EditableTextBox/MultiLineEditableText/MultiLineEditableTextBox (string value), ComboBoxString (option string or index). The matching delegate is broadcast so bound Blueprint logic runs. functionName alongside childName picks the delegate (e.g. OnPressed, OnTextChanged). Locate the widget with widgetName or className. Params: widgetName?|className?, functionName?, childName?, value?, commitMethod?", "invoke_runtime_function", (p) => ({ widgetName: p.widgetName, className: p.className, functionName: p.functionName, childName: p.childName, value: p.value, commitMethod: p.commitMethod })),
   },
   undefined,
   {
@@ -57,7 +57,8 @@ export const widgetTool: ToolDef = categoryTool(
     namePrefix: z.string().optional().describe("Instance name prefix filter for list_runtime"),
     viewportOnly: z.boolean().optional().describe("list_runtime: only return widgets currently added to the viewport"),
     childName: z.string().optional().describe("get_runtime/invoke_runtime_function: named child inside the UserWidget (#559)"),
-    functionName: z.string().optional().describe("invoke_runtime_function: parameterless UFUNCTION to call on the live widget (#559)"),
+    functionName: z.string().optional().describe("invoke_runtime_function: parameterless UFUNCTION to call on the live widget (#559), or with childName the child delegate to fire (#812)"),
+    commitMethod: z.string().optional().describe("invoke_runtime_function: text/spin box commit type - OnEnter (default), OnUserMovedFocus, OnCleared, Default (#812)"),
     zOrder: z.number().optional().describe("add_to_viewport: viewport Z-order (#602)"),
     maxDepth: z.number().optional().describe("get_runtime: max widget-tree depth to walk (default 6)"),
     wrapperClass: z.string().optional().describe("wrap_root: panel widget class (CanvasPanel, VerticalBox, Overlay, etc.)"),

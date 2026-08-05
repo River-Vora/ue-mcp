@@ -61,6 +61,7 @@ nav:
   - Tool Reference: tool-reference.md
   - Native Tools: native-tools.md
   - Handler Conventions: handler-conventions.md
+  - Runtime Widget Interaction: runtime-widget-interaction.md
   - Flows: flows.md
   - Plugins:
     - plugins.md
