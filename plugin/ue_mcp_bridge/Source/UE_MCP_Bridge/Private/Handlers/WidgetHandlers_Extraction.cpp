@@ -361,6 +361,19 @@ TSharedPtr<FJsonValue> FWidgetHandlers::ExtractWidgetSubtree(const TSharedPtr<FJ
 		bCreatedDestination = true;
 	}
 
+	// ImportWidgetsFromText reparents every imported widget into the
+	// destination's WidgetTree. A WidgetBlueprint saved without one (a broken
+	// or partially authored asset) would dereference null here, so refuse it
+	// with a message instead of taking the editor down.
+	if (!Destination->WidgetTree)
+	{
+		if (bCreatedDestination)
+		{
+			UEditorAssetLibrary::DeleteAsset(DestinationAssetPath);
+		}
+		return MCPError(FString::Printf(TEXT("Destination '%s' has no widget tree to import into"), *DestinationAssetPath));
+	}
+
 	Destination->Modify();
 	Destination->WidgetTree->Modify();
 	TSet<UWidget*> ImportedWidgets;
