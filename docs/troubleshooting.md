@@ -100,6 +100,16 @@ The editor publishes that file while its bridge is listening and removes it on a
 
 `start_editor` refusing with "Editor is already running for this project" is the same targeting rule from the other side: it names the PID, and that PID has this project's `.uproject` on its command line. Editors for other projects and headless shards never trigger it.
 
+### A call ran in the wrong editor
+
+Only possible with more than one editor session registered. Start with `project(action="list_editors")`: it reports every session, the bridge port each resolved to, and which one untargeted calls fall through to.
+
+- **The call had no target.** Untargeted calls run in the active session. Pass `editor="<name>"` on the call, or move the default with `project(action="use_editor", editorTarget="<name>")`.
+- **The `editor` parameter is not advertised.** It appears only while more than one session is registered. Add the other project with `project(action="add_editor", projectPath="...")`, or list both `.uproject` paths in your MCP client config.
+- **Two sessions on one port.** `list_editors` reports it as `portSharedWith`. It happens when two projects pin the same `bridge.port`, or when a global `UE_MCP_PORT` overrides both, and it means the editor answering there cannot be attributed to either project. Give each project its own port, or unset the variable, then restart the server.
+
+Lifecycle actions are not affected by the last case: they resolve through the addressed project's own lockfile and the PID it names, and refuse rather than guess.
+
 ## Plugin Build Issues
 
 ### Plugin fails to compile

@@ -133,7 +133,20 @@ function findEditorExecutable(project?: ProjectContext): string | null {
   return null;
 }
 
-async function isBridgeAvailable(host = process.env.UE_MCP_HOST ?? "127.0.0.1", port = 0, timeoutMs = 1000): Promise<boolean> {
+/** The host the client talks to a bridge on. UE_MCP_HOST covers remote setups. */
+function bridgeHost(): string {
+  return process.env.UE_MCP_HOST ?? "127.0.0.1";
+}
+
+/**
+ * Is anything answering on this port? Exported so a session can be reported as
+ * reachable or not without opening a bridge connection to find out (#817).
+ */
+export function isBridgeReachable(port: number, host?: string, timeoutMs = 1000): Promise<boolean> {
+  return isBridgeAvailable(host, port, timeoutMs);
+}
+
+async function isBridgeAvailable(host = bridgeHost(), port = 0, timeoutMs = 1000): Promise<boolean> {
   if (!port) return false;
   return new Promise((resolve) => {
     const socket = new net.Socket();
@@ -580,7 +593,9 @@ function uprojectInDir(projectDir?: string): string | null {
 function sendOneBridgeCall(port: number, method: string, params: Record<string, unknown>): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     let settled = false;
-    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    // Same host the reachability probe uses. Probing one host and sending the
+    // quit to another is its own way of reaching an editor nobody addressed.
+    const ws = new WebSocket(`ws://${bridgeHost()}:${port}`);
     const finish = (v: boolean) => {
       if (settled) return;
       settled = true;
@@ -695,7 +710,7 @@ export async function stopEditor(force = false, projectDir?: string): Promise<{ 
   }
 
   const port = target.port;
-  const bridgeUp = await isBridgeAvailable("127.0.0.1", port);
+  const bridgeUp = await isBridgeAvailable(undefined, port);
   if (!bridgeUp && (await findInteractiveEditors(projectPath)).length === 0) {
     return { success: false, message: "Editor is not running" };
   }
@@ -722,7 +737,7 @@ export async function stopEditor(force = false, projectDir?: string): Promise<{ 
   // Confirm via the project's own bridge port closing - specific to this editor.
   for (let i = 0; i < 20; i++) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
-    if (!(await isBridgeAvailable("127.0.0.1", port))) {
+    if (!(await isBridgeAvailable(undefined, port))) {
       return { success: true, message: "Editor quit itself via the bridge" };
     }
   }
