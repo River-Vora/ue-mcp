@@ -300,7 +300,8 @@ TSharedPtr<FJsonObject> BuildItemResult(
 	const FPreparedUpsertItem& Prepared,
 	const FString& Status,
 	const bool bSaved,
-	const int32 ChangedPropertyCount)
+	const int32 ChangedPropertyCount,
+	const FString& Error = FString())
 {
 	TSharedPtr<FJsonObject> ItemResult = MakeShared<FJsonObject>();
 	ItemResult->SetStringField(TEXT("assetPath"), Prepared.AssetPath);
@@ -310,12 +311,17 @@ TSharedPtr<FJsonObject> BuildItemResult(
 		? Prepared.DataClass->GetPathName()
 		: Prepared.ClassName);
 	ItemResult->SetStringField(TEXT("status"), Status);
+	ItemResult->SetBoolField(TEXT("success"), Status != TEXT("failed"));
 	ItemResult->SetBoolField(TEXT("created"), Status == TEXT("created"));
 	ItemResult->SetBoolField(TEXT("updated"), Status == TEXT("updated"));
 	ItemResult->SetBoolField(TEXT("skipped"), Status == TEXT("skipped") || Status == TEXT("wouldSkip"));
 	ItemResult->SetBoolField(TEXT("saved"), bSaved);
 	ItemResult->SetNumberField(TEXT("propertyCount"), Prepared.Properties.Num());
 	ItemResult->SetNumberField(TEXT("changedPropertyCount"), ChangedPropertyCount);
+	if (!Error.IsEmpty())
+	{
+		ItemResult->SetStringField(TEXT("error"), Error);
+	}
 	return ItemResult;
 }
 } // namespace
@@ -607,6 +613,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::BulkUpsertDataAssets(const TSharedPtr<FJs
 	int32 SkippedAssetCount = 0;
 	int32 SavedAssetCount = 0;
 	int32 SaveFailedCount = 0;
+	int32 FailedAssetCount = 0;
 	int32 ChangedPropertyCount = 0;
 
 	for (FPreparedUpsertItem& Prepared : PreparedItems)
@@ -658,7 +665,17 @@ TSharedPtr<FJsonValue> FAssetHandlers::BulkUpsertDataAssets(const TSharedPtr<FJs
 				Factory);
 			if (!Asset)
 			{
-				return MCPError(FString::Printf(TEXT("Failed to create DataAsset '%s'"), *Prepared.AssetPath));
+				// Per-item failure, not a batch abort: earlier items in this
+				// batch are already on disk, so the caller needs the full
+				// per-item record plus the rollback descriptor covering them.
+				++FailedAssetCount;
+				ItemResults.Add(MakeShared<FJsonValueObject>(BuildItemResult(
+					Prepared,
+					TEXT("failed"),
+					false,
+					0,
+					FString::Printf(TEXT("Failed to create DataAsset '%s'"), *Prepared.AssetPath))));
+				continue;
 			}
 			CreatedAssetPaths.Add(MakeShared<FJsonValueString>(Prepared.AssetPath));
 		}
@@ -668,10 +685,26 @@ TSharedPtr<FJsonValue> FAssetHandlers::BulkUpsertDataAssets(const TSharedPtr<FJs
 		int32 AppliedChangedPropertyCount = 0;
 		if (!ApplyPreparedProperties(Asset, Prepared.Properties, AppliedChangedPropertyCount, ApplyError))
 		{
-			return MCPError(FString::Printf(
-				TEXT("Apply failed after preflight for '%s': %s"),
-				*Prepared.AssetPath,
-				*ApplyError));
+			// Preflight already applied every value to a transient copy, so
+			// reaching here means the real object rejected a write the copy
+			// accepted. Record it against the item and carry on; the asset
+			// (created or existing) is left in the registry and the rollback
+			// descriptor still names it.
+			++FailedAssetCount;
+			if (bWouldCreate)
+			{
+				++CreatedAssetCount;
+			}
+			ItemResults.Add(MakeShared<FJsonValueObject>(BuildItemResult(
+				Prepared,
+				TEXT("failed"),
+				false,
+				AppliedChangedPropertyCount,
+				FString::Printf(
+					TEXT("Apply failed after preflight for '%s': %s"),
+					*Prepared.AssetPath,
+					*ApplyError))));
+			continue;
 		}
 
 		const bool bChanged = bWouldCreate || AppliedChangedPropertyCount > 0;
@@ -724,16 +757,29 @@ TSharedPtr<FJsonValue> FAssetHandlers::BulkUpsertDataAssets(const TSharedPtr<FJs
 		const FString Status = bWouldCreate
 			? TEXT("created")
 			: (bChanged ? TEXT("updated") : TEXT("unchanged"));
+		// A package that would not write is an item-level fact, so it rides on
+		// the item record rather than only in an aggregate count.
+		const FString ItemError = (bChanged && bSave && !bSaved)
+			? FString::Printf(TEXT("Asset was modified in memory but '%s' could not be saved"), *Prepared.AssetPath)
+			: FString();
 		ItemResults.Add(MakeShared<FJsonValueObject>(BuildItemResult(
 			Prepared,
 			Status,
 			bSaved,
-			AppliedChangedPropertyCount)));
+			AppliedChangedPropertyCount,
+			ItemError)));
 	}
 
 	auto Result = MCPSuccess();
-	Result->SetBoolField(TEXT("success"), SaveFailedCount == 0);
-	if (SaveFailedCount > 0)
+	Result->SetBoolField(TEXT("success"), SaveFailedCount == 0 && FailedAssetCount == 0);
+	if (FailedAssetCount > 0)
+	{
+		Result->SetStringField(TEXT("error"), FString::Printf(
+			TEXT("%d of %d DataAssets failed; see items[].error"),
+			FailedAssetCount,
+			PreparedItems.Num()));
+	}
+	else if (SaveFailedCount > 0)
 	{
 		Result->SetStringField(TEXT("error"), TEXT("One or more changed DataAssets could not be saved"));
 	}
@@ -747,6 +793,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::BulkUpsertDataAssets(const TSharedPtr<FJs
 	Result->SetNumberField(TEXT("updatedAssetCount"), UpdatedAssetCount);
 	Result->SetNumberField(TEXT("unchangedAssetCount"), UnchangedAssetCount);
 	Result->SetNumberField(TEXT("skippedAssetCount"), SkippedAssetCount);
+	Result->SetNumberField(TEXT("failedAssetCount"), FailedAssetCount);
 	Result->SetNumberField(TEXT("changedPropertyCount"), ChangedPropertyCount);
 	Result->SetNumberField(TEXT("savedAssetCount"), SavedAssetCount);
 	Result->SetNumberField(TEXT("saveFailedCount"), SaveFailedCount);
