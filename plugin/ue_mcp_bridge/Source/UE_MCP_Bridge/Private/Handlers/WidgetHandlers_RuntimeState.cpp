@@ -14,7 +14,7 @@
 
 namespace WidgetRuntimeState
 {
-	TArray<FString> ReadStringArray(const TSharedPtr<FJsonObject>& Params, const TCHAR* FieldName)
+	static TArray<FString> ReadStringArray(const TSharedPtr<FJsonObject>& Params, const TCHAR* FieldName)
 	{
 		TArray<FString> Result;
 		const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
@@ -33,7 +33,7 @@ namespace WidgetRuntimeState
 		return Result;
 	}
 
-	FString BuildHierarchyPath(const UWidget* Widget)
+	static FString BuildHierarchyPath(const UWidget* Widget)
 	{
 		TArray<FString> Segments;
 		for (const UWidget* Current = Widget; Current; Current = Current->GetParent())
@@ -50,7 +50,7 @@ namespace WidgetRuntimeState
 		FString HierarchyPath;
 	};
 
-	TSharedPtr<FJsonObject> SerializeWidgetNode(const FInspectNode& Target, const TArray<FString>& PropertyNames)
+	static TSharedPtr<FJsonObject> SerializeWidgetNode(const FInspectNode& Target, const TArray<FString>& PropertyNames)
 	{
 		UWidget* Widget = Target.Widget;
 		TSharedPtr<FJsonObject> Node = MakeShared<FJsonObject>();
@@ -80,7 +80,7 @@ namespace WidgetRuntimeState
 		return Node;
 	}
 
-	bool MatchesChildFilter(const UWidget* Widget, const FString& ChildName, const FString& ChildClassFilter)
+	static bool MatchesChildFilter(const UWidget* Widget, const FString& ChildName, const FString& ChildClassFilter)
 	{
 		if (!ChildName.IsEmpty() && Widget->GetName() != ChildName)
 		{
@@ -90,7 +90,7 @@ namespace WidgetRuntimeState
 			|| Widget->GetClass()->GetName().Contains(ChildClassFilter, ESearchCase::IgnoreCase);
 	}
 
-	int32 ResolvePIEInstance(const UWorld* World)
+	static int32 ResolvePIEInstance(const UWorld* World)
 	{
 		if (!GEngine || !World) return INDEX_NONE;
 		for (const FWorldContext& Context : GEngine->GetWorldContexts())
