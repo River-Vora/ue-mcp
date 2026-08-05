@@ -267,6 +267,18 @@ export const editorTool: ToolDef = categoryTool(
     get_pie_pawn: bp("Resolve the controlled pawn in the active PIE world. Params: playerIndex? (default 0). Returns actorLabel/class/location/rotation (#228/#229)", "get_pie_pawn", (p) => ({ playerIndex: p.playerIndex })),
     list_pie_instances: bp("List the running PIE worlds with their instance id, net mode (standalone|listenServer|dedicatedServer|client), player count and whether they own a game viewport. In a multiplayer PIE session every other runtime action resolves the primary world (the server) unless you pass pieInstance, so this is how you discover that a client exists and what id addresses it. Params: none (#778)", "list_pie_instances"),
     invoke_object_function: bp("Call a UFUNCTION on any UObject, not just a placed actor. Target it with objectPath, or target=gameinstance|gamemode|gamestate|playercontroller|playerpawn|subsystem (subsystem also needs subsystemClass; playercontroller/playerpawn accept playerIndex). The GameInstance, GameMode and subsystems have no actor label, so invoke_function could never reach them. Returns output and return params under returnValues; an unknown function name lists the available ones. Params: functionName, objectPath? | target?, subsystemClass?, playerIndex?, args?, world? (editor|pie|auto), pieInstance? (#739)", "invoke_object_function", (p) => ({ functionName: p.functionName, objectPath: p.objectPath, target: p.target, subsystemClass: p.subsystemClass, playerIndex: p.playerIndex, args: normalizeFunctionArgs(p.args), world: p.world, pieInstance: p.pieInstance })),
+    invoke_object_functions: {
+      description: "Call 1-64 UFUNCTIONs in order without yielding to the editor tick loop. Each call independently targets a UObject using the same fields as invoke_object_function, so one sequence can span an actor and its components. Calls stop at the first failure; earlier calls are not rolled back. Returns results[] in call order plus completedCalls/requestedCalls, and failedIndex when it stops early, so a retry can resume instead of replaying mutations. Params: calls[] ({functionName, objectPath? | target?, subsystemClass?, playerIndex?, args?}), world? (editor|pie|auto), pieInstance?",
+      bridge: "invoke_object_functions",
+      timeoutMs: 300_000,
+      mapParams: (p) => ({
+        calls: Array.isArray(p.calls)
+          ? (p.calls as Record<string, unknown>[]).map((c, i) => ({ ...c, args: normalizeFunctionArgs(c.args, `calls[${i}].args`) }))
+          : p.calls,
+        world: p.world,
+        pieInstance: p.pieInstance,
+      }),
+    },
     get_object_properties: bp("Read reflected properties off any UObject, with the same targeting as invoke_object_function. Pass propertyNames to filter; names that do not exist come back under missingProperties instead of silently returning nothing. Params: objectPath? | target?, subsystemClass?, playerIndex?, propertyNames?, world? (editor|pie|auto), pieInstance? (#739)", "get_object_properties", (p) => ({ objectPath: p.objectPath, target: p.target, subsystemClass: p.subsystemClass, playerIndex: p.playerIndex, propertyNames: p.propertyNames, world: p.world, pieInstance: p.pieInstance, limit: p.limit, maxValueLength: p.maxValueLength })),
     read_bone_transforms: bp("Read live skeletal bone and socket transforms off an actor, once. This is a point-in-time read, NOT a time series - for per-frame capture over a window use the pie category's observe actions. Pass bones (bone OR socket names) or omit for every bone up to limit. space=world (default) or component; component space is independent of where the actor is standing. Pass relativeTo (bone OR socket name) to express every sample in that live reference frame; relativeTo supersedes space and is calculated in component space. Also reports the AnimInstance class/path. Params: actorLabel, componentName?, bones?, relativeTo?, space?, limit?, world? (editor|pie|auto), pieInstance? (#756/#757/#761/#764)", "read_bone_transforms", (p) => ({ actorLabel: p.actorLabel, componentName: p.componentName, bones: p.bones, relativeTo: p.relativeTo, space: p.space, limit: p.limit, world: p.world, pieInstance: p.pieInstance })),
     set_movement_mode: bp("Set a live PIE character's movement mode and/or velocity on its CharacterMovementComponent. Modes are named (none|walking|navwalking|falling|swimming|flying|custom) rather than raw enum numbers, because a wrong number reads as success and then behaves as None. Reports previousMode/previousVelocity and reads the mode back afterwards, since SetMovementMode can refuse a mode the character cannot enter (flying with bCanFly off, swimming outside a volume). Params: actorLabel, mode?, customMode? (only with mode='custom'), velocity? {x,y,z}, world? (default pie), pieInstance? (#757)", "set_movement_mode", (p) => ({ actorLabel: p.actorLabel, mode: p.mode, customMode: p.customMode, velocity: p.velocity, world: p.world, pieInstance: p.pieInstance })),
@@ -338,6 +350,14 @@ export const editorTool: ToolDef = categoryTool(
     ruledOut: z.array(z.object({ action: z.string(), reason: z.string() })).optional().describe("execute_python: reason each searched candidate action does not fit; every candidate must be ruled out before Python runs (#704)"),
     filePath: z.string().optional().describe("Absolute path to a .py file for run_python_file"),
     args: FunctionArgs.optional().describe('run_python_file: array of positional args. invoke_function / invoke_object_function / invoke_static_function: object mapping parameter name to value, e.g. {"bEnabled": true}. An entry list ([{"name","value"}]) or a JSON string of either is accepted and normalized (#811)'),
+    calls: z.array(z.object({
+      functionName: z.string().min(1),
+      objectPath: z.string().optional(),
+      target: z.string().optional(),
+      subsystemClass: z.string().optional(),
+      playerIndex: z.number().int().optional(),
+      args: FunctionArgs.optional(),
+    })).min(1).max(64).optional().describe("invoke_object_functions: ordered UObject calls executed in one game-thread dispatch"),
     objectPath: z.string().optional(),
     target: z.string().optional().describe("capture_screenshot: auto (default) | pie | editor | window. invoke_object_function/get_object_properties: gameinstance | gamemode | gamestate | playercontroller | playerpawn | subsystem (#739)"),
     worldPath: z.string().optional().describe("capture_screenshot: select an exact PIE UWorld path or name"),
