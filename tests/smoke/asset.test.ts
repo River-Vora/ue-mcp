@@ -113,6 +113,22 @@ describe("asset — write (with cleanup)", () => {
     expect(conflict.ok).toBe(false);
   });
 
+  it("create_render_target_2d rejects an unsupported format and an out-of-range size", async () => {
+    const badFormat = await callBridge(bridge, "create_render_target_2d", {
+      name: `RenderTargetBadFormat_${Date.now()}`,
+      packagePath: TEST_PREFIX,
+      format: "BC7",
+    });
+    expect(badFormat.ok).toBe(false);
+
+    const badSize = await callBridge(bridge, "create_render_target_2d", {
+      name: `RenderTargetBadSize_${Date.now()}`,
+      packagePath: TEST_PREFIX,
+      width: 16384,
+    });
+    expect(badSize.ok).toBe(false);
+  });
+
   it("create_folder + delete_folder round-trip", async () => {
     const folder = `${TEST_PREFIX}/FolderRoundTrip_${Date.now()}`;
     const created = await callBridge(bridge, "create_folder", { path: folder });
