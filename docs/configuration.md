@@ -170,7 +170,7 @@ The bridge keeps two records under `<project>/Saved/UE_MCP_Bridge/`. Both are pu
 | `port.json` | The bridge is listening | `port`, `pid`, `instanceId`, `startedAt`, `status`, `protocolVersion`, `handlerApiVersion` |
 | `bridge-error.json` | The editor came up but the bridge could not bind | `status: "bind-failed"`, the port range tried, the socket error, `pid`, `instanceId` |
 
-`instanceId` identifies the server object that wrote the record, and only that instance removes it. A pid alone is not enough, since pids are recycled. Clients skip a record whose process is gone, so an editor that crashed does not send the next session at a port nobody is listening on.
+`instanceId` identifies the server object that wrote the record, and only that instance removes it. A pid alone is not enough, since pids are recycled: an editor that failed to start can no longer delete the record of one that is running, and a second instance of a project cannot overwrite the first's. The `pid` is what lifecycle actions check before they act on a record, as described above.
 
 `bridge-error.json` is what distinguishes "no editor" from "editor running, bridge dead". When a connection fails and this record names a live process, the client quotes its detail in the error.
 

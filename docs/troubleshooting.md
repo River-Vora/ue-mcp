@@ -28,7 +28,7 @@
 
 5. **The editor is up but the bridge is not.** If the bridge could not bind any port, it writes `<project>/Saved/UE_MCP_Bridge/bridge-error.json` with the range it tried and the socket error, and the client quotes that detail in the connection error rather than reporting no editor. Read the file directly if you are looking without the client.
 
-6. **A stale record.** `<project>/Saved/UE_MCP_Bridge/port.json` names the pid that wrote it. A record left by an editor that crashed is skipped rather than followed, so a connection failure after a crash points at the derived port, not the dead one.
+6. **A stale record.** `<project>/Saved/UE_MCP_Bridge/port.json` names the pid and the instance that wrote it, and only that instance removes it. An editor that was killed rather than closed leaves it behind; see [stop_editor or restart_editor says no port is published](#stop_editor-or-restart_editor-says-no-port-is-published).
 
 ### Handlers time out, or the editor never finishes starting
 
