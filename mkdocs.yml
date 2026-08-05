@@ -60,6 +60,7 @@ nav:
   - Architecture: architecture.md
   - Tool Reference: tool-reference.md
   - Runtime Widget Layout Diagnostics: runtime-widget-layout-diagnostics.md
+  - Widget Parameters: widget-parameters.md
   - Native Tools: native-tools.md
   - Runtime Widget Inspection: runtime-widget-inspection.md
   - Handler Conventions: handler-conventions.md
