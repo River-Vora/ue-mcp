@@ -702,6 +702,32 @@ namespace MCPClassResolve
 		}
 		return ScanCaseInsensitive(Candidates);
 	}
+
+	/** Resolution constrained to subclasses of Base. Only reached when the
+	 *  unconstrained answer is the wrong kind of class: "Timeline" must land on
+	 *  the graph node, not on the component that shares the leaf name. */
+	inline UClass* ResolveOfType(const FString& Spec, UClass* Base, bool bAllowLoad)
+	{
+		UClass* Direct = Resolve(Spec, bAllowLoad, nullptr);
+		if (Direct && (!Base || Direct->IsChildOf(Base))) return Direct;
+		if (!Base) return nullptr;
+
+		const TArray<FString> Candidates = BuildCandidates(Spec);
+		UClass* LooseHit = nullptr;
+		for (TObjectIterator<UClass> It; It; ++It)
+		{
+			if (!It->IsChildOf(Base)) continue;
+			const FString Name = It->GetName();
+			if (IsTransientClassName(Name)) continue;
+			for (const FString& Candidate : Candidates)
+			{
+				if (Candidate.Contains(TEXT("/"))) continue;
+				if (Name.Equals(Candidate, ESearchCase::CaseSensitive)) return *It;
+				if (!LooseHit && Name.Equals(Candidate, ESearchCase::IgnoreCase)) LooseHit = *It;
+			}
+		}
+		return LooseHit;
+	}
 }
 
 /** Resolve a class name or path to a UClass, tolerating the C++ type prefix.
@@ -712,6 +738,14 @@ namespace MCPClassResolve
 inline UClass* MCPResolveClass(const FString& Spec, bool bAllowLoad = true)
 {
 	return MCPClassResolve::Resolve(Spec, bAllowLoad, nullptr);
+}
+
+/** Same resolution, restricted to subclasses of Base. Use it wherever only one
+ *  family of class is meaningful (graph nodes, schemas, factories) so a leaf
+ *  name shared with an unrelated class cannot win. */
+inline UClass* MCPResolveClassOfType(const FString& Spec, UClass* Base, bool bAllowLoad = true)
+{
+	return MCPClassResolve::ResolveOfType(Spec, Base, bAllowLoad);
 }
 
 /** "Class not found", with the exact spellings tried and the closest loaded
