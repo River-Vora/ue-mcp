@@ -119,6 +119,10 @@ A version with a prerelease suffix (`1.2.0-beta`, `1.2.0-beta.2`, `1.3.0-rc.1`) 
 
 The tag name still has to match the version exactly: `gh release create v1.2.0-beta --draft --notes-file ...`.
 
+#### Cutting the stable release the betas led up to
+
+Prerelease notes stay incremental: the `1.2.0-beta.3` page says what changed since `beta.2`. Stable notes are cumulative, because the betas never took the "Latest" badge and everything they shipped is invisible from the `1.2.0` page otherwise. `npm run release:notes -- --version 1.2.0 --notes-file <what landed since the last beta> --out /tmp/v1.2.0.md` builds that union: it reads every published prerelease of the same `X.Y.Z` in semver order, merges their bodies section by section, folds bullets that repeat or cite the same issue number, and unions the headlines back off the `landing/headline` commit statuses. It prints what it merged, what it deduped and any headline item it had to drop for the six-item cap, then runs its own output through `scripts/release-headline.mjs` so the file cannot fail the publish gate later. Reread the summary paragraph before you create the draft, since it may have come from a beta. A stable release with no prereleases passes its notes file straight through.
+
 ## Issue handling
 
 - **Never close an issue without shipping code that resolves it.** Not "out of scope for this patch", not "prerequisite shipped", not "follow-up". Issues close only when the fix ships.
@@ -156,6 +160,7 @@ npm run build           # Build the UE C++ plugin only
 npx tsc --noEmit        # Type-check TS
 npm run test:smoke      # Live smoke tests (tests/ue_mcp only)
 npm run golden:record   # Re-record tests/golden/editor-down.json (review the diff)
+npm run release:notes   # Compose cumulative stable notes from a version's prereleases
 npm test                # Vitest unit tests
 node scripts/deploy.mjs # Sync plugin/ → tests/ue_mcp/Plugins/
 ```
