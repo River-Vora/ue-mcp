@@ -1,17 +1,29 @@
+// Coverage for bulk_upsert_data_assets that is safe to run anywhere.
+//
+// run_automation_tests dispatches every EditorContext/EngineFilter test in the
+// process when it is called without a filter, against whatever project the
+// bridge is attached to. A test that creates and deletes real packages would
+// therefore mutate a user's live project as a side effect of asking for a test
+// run. Everything below is confined to argument validation, preflight
+// rejection, and the dry-run path, all of which are specified to write nothing;
+// the create/update/replay behaviour is exercised by the smoke suite against
+// the dedicated test project instead.
+
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "HandlerRegistry.h"
+#include "Handlers/AssetHandlers.h"
 #include "Misc/AutomationTest.h"
 #include "EditorAssetLibrary.h"
 
 namespace
 {
-TSharedPtr<FJsonObject> MakeDryRunRequest(const FString& PackagePath)
+TSharedPtr<FJsonObject> MakeUpsertRequest(const FString& PackagePath, const FString& ClassName)
 {
 	TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 	Item->SetStringField(TEXT("name"), TEXT("DA_UEMCP_BulkUpsertDryRun"));
 	Item->SetStringField(TEXT("packagePath"), PackagePath);
-	Item->SetStringField(TEXT("className"), TEXT("/Script/EnhancedInput.InputAction"));
+	Item->SetStringField(TEXT("className"), ClassName);
 	TSharedPtr<FJsonObject> Properties = MakeShared<FJsonObject>();
 	Properties->SetBoolField(TEXT("bConsumeInput"), false);
 	Item->SetObjectField(TEXT("properties"), Properties);
@@ -31,9 +43,10 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FAssetBulkUpsertRegistrationTest::RunTest(const FString& Parameters)
 {
 	FMCPHandlerRegistry Registry;
-	TestTrue(TEXT("canonical handler is registered"), Registry.HasHandler(TEXT("bulk_upsert_data_assets")));
-	TestTrue(TEXT("dotted handler alias is registered"), Registry.HasHandler(TEXT("asset.bulk_upsert_data_assets")));
+	FAssetHandlers::RegisterHandlers(Registry);
+	TestTrue(TEXT("upsert handler is registered"), Registry.HasHandler(TEXT("bulk_upsert_data_assets")));
 	TestTrue(TEXT("rollback handler is registered"), Registry.HasHandler(TEXT("bulk_restore_data_assets")));
+	TestTrue(TEXT("upsert handler carries its own timeout"), Registry.GetHandlerTimeout(TEXT("bulk_upsert_data_assets")) > 0.0f);
 
 	const TSharedPtr<FJsonValue> MissingItemsResponse = Registry.ExecuteHandler(
 		TEXT("bulk_upsert_data_assets"),
@@ -62,15 +75,34 @@ bool FAssetBulkUpsertRegistrationTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("oversized batch reports the bound"), OversizedResponse->AsObject()->GetStringField(TEXT("error")).Contains(TEXT("500")));
 	}
 
-	const FString DryRunAssetPath = TEXT("/Game/UEMCPTests/DA_UEMCP_BulkUpsertDryRun.DA_UEMCP_BulkUpsertDryRun");
-	if (UEditorAssetLibrary::DoesAssetExist(DryRunAssetPath))
+	TSharedPtr<FJsonObject> BadConflictRequest = MakeUpsertRequest(
+		TEXT("/Game/UEMCPTests"),
+		TEXT("/Script/EnhancedInput.InputAction"));
+	BadConflictRequest->SetStringField(TEXT("onConflict"), TEXT("merge"));
+	const TSharedPtr<FJsonValue> BadConflictResponse = Registry.ExecuteHandler(
+		TEXT("bulk_upsert_data_assets"),
+		BadConflictRequest);
+	if (BadConflictResponse.IsValid() && BadConflictResponse->Type == EJson::Object)
 	{
-		UEditorAssetLibrary::DeleteAsset(DryRunAssetPath);
+		TestFalse(TEXT("unknown conflict policy is rejected"), BadConflictResponse->AsObject()->GetBoolField(TEXT("success")));
 	}
-	TestFalse(TEXT("dry-run target is absent before preflight"), UEditorAssetLibrary::DoesAssetExist(DryRunAssetPath));
+
+	// A class that is not a UDataAsset subclass must be rejected in preflight
+	// rather than produce an asset the caller cannot use.
+	const TSharedPtr<FJsonValue> WrongClassResponse = Registry.ExecuteHandler(
+		TEXT("bulk_upsert_data_assets"),
+		MakeUpsertRequest(TEXT("/Game/UEMCPTests"), TEXT("/Script/Engine.StaticMesh")));
+	if (WrongClassResponse.IsValid() && WrongClassResponse->Type == EJson::Object)
+	{
+		TestFalse(TEXT("non-DataAsset class is rejected"), WrongClassResponse->AsObject()->GetBoolField(TEXT("success")));
+		TestTrue(TEXT("non-DataAsset rejection names the requirement"), WrongClassResponse->AsObject()->GetStringField(TEXT("error")).Contains(TEXT("UDataAsset")));
+	}
+
+	const FString DryRunAssetPath = TEXT("/Game/UEMCPTests/DA_UEMCP_BulkUpsertDryRun.DA_UEMCP_BulkUpsertDryRun");
+	const bool bTargetExisted = UEditorAssetLibrary::DoesAssetExist(DryRunAssetPath);
 	const TSharedPtr<FJsonValue> DryRunResponse = Registry.ExecuteHandler(
 		TEXT("bulk_upsert_data_assets"),
-		MakeDryRunRequest(TEXT("/Game/UEMCPTests")));
+		MakeUpsertRequest(TEXT("/Game/UEMCPTests"), TEXT("/Script/EnhancedInput.InputAction")));
 	TestTrue(TEXT("dry run returns an object"), DryRunResponse.IsValid() && DryRunResponse->Type == EJson::Object);
 	if (DryRunResponse.IsValid() && DryRunResponse->Type == EJson::Object)
 	{
@@ -82,52 +114,21 @@ bool FAssetBulkUpsertRegistrationTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("dry run returns one item"), Items.Num(), 1);
 		if (Items.Num() == 1)
 		{
-			TestEqual(TEXT("dry run plans creation"), Items[0]->AsObject()->GetStringField(TEXT("status")), FString(TEXT("wouldCreate")));
+			const TSharedPtr<FJsonObject> Item = Items[0]->AsObject();
+			TestTrue(TEXT("dry run item reports success"), Item->GetBoolField(TEXT("success")));
+			TestEqual(
+				TEXT("dry run plans the right outcome"),
+				Item->GetStringField(TEXT("status")),
+				bTargetExisted ? FString(TEXT("wouldUpdate")) : FString(TEXT("wouldCreate")));
 		}
 	}
-	TestFalse(TEXT("dry-run target remains absent"), UEditorAssetLibrary::DoesAssetExist(DryRunAssetPath));
-
-	TSharedPtr<FJsonObject> CreateRequest = MakeDryRunRequest(TEXT("/Game/UEMCPTests"));
-	CreateRequest->SetBoolField(TEXT("dryRun"), false);
-	CreateRequest->SetBoolField(TEXT("save"), false);
-	const TSharedPtr<FJsonValue> CreateResponse = Registry.ExecuteHandler(
-		TEXT("bulk_upsert_data_assets"),
-		CreateRequest);
-	TestTrue(TEXT("execution creates the requested asset"), UEditorAssetLibrary::DoesAssetExist(DryRunAssetPath));
-	if (CreateResponse.IsValid() && CreateResponse->Type == EJson::Object)
-	{
-		const TSharedPtr<FJsonObject> Result = CreateResponse->AsObject();
-		TestTrue(TEXT("create succeeds"), Result->GetBoolField(TEXT("success")));
-		TestEqual(TEXT("one asset is created"), static_cast<int32>(Result->GetNumberField(TEXT("createdAssetCount"))), 1);
-		const TArray<TSharedPtr<FJsonValue>>& Items = Result->GetArrayField(TEXT("items"));
-		if (Items.Num() == 1)
-		{
-			TestEqual(TEXT("create status is reported"), Items[0]->AsObject()->GetStringField(TEXT("status")), FString(TEXT("created")));
-		}
-	}
-
-	const TSharedPtr<FJsonValue> RepeatResponse = Registry.ExecuteHandler(
-		TEXT("bulk_upsert_data_assets"),
-		CreateRequest);
-	if (RepeatResponse.IsValid() && RepeatResponse->Type == EJson::Object)
-	{
-		const TSharedPtr<FJsonObject> Result = RepeatResponse->AsObject();
-		TestTrue(TEXT("repeat succeeds"), Result->GetBoolField(TEXT("success")));
-		TestEqual(TEXT("repeat is idempotent"), static_cast<int32>(Result->GetNumberField(TEXT("unchangedAssetCount"))), 1);
-		const TArray<TSharedPtr<FJsonValue>>& Items = Result->GetArrayField(TEXT("items"));
-		if (Items.Num() == 1)
-		{
-			TestEqual(TEXT("unchanged status is reported"), Items[0]->AsObject()->GetStringField(TEXT("status")), FString(TEXT("unchanged")));
-		}
-	}
-	if (UEditorAssetLibrary::DoesAssetExist(DryRunAssetPath))
-	{
-		TestTrue(TEXT("test asset cleanup succeeds"), UEditorAssetLibrary::DeleteAsset(DryRunAssetPath));
-	}
+	TestTrue(
+		TEXT("dry run leaves the target package untouched"),
+		UEditorAssetLibrary::DoesAssetExist(DryRunAssetPath) == bTargetExisted);
 
 	const TSharedPtr<FJsonValue> ProtectedResponse = Registry.ExecuteHandler(
 		TEXT("bulk_upsert_data_assets"),
-		MakeDryRunRequest(TEXT("/Engine/UEMCPTests")));
+		MakeUpsertRequest(TEXT("/Engine/UEMCPTests"), TEXT("/Script/EnhancedInput.InputAction")));
 	TestTrue(TEXT("protected path returns an object"), ProtectedResponse.IsValid() && ProtectedResponse->Type == EJson::Object);
 	if (ProtectedResponse.IsValid() && ProtectedResponse->Type == EJson::Object)
 	{
