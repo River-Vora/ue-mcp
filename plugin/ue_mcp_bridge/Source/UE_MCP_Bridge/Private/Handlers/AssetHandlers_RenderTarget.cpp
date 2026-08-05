@@ -1,7 +1,8 @@
 #include "AssetHandlers.h"
 
-#include "AssetRegistry/AssetRegistryModule.h"
 #include "Engine/TextureRenderTarget2D.h"
+#include "Factories/TextureRenderTargetFactoryNew.h"
+#include "HandlerAssetCreate.h"
 #include "HandlerUtils.h"
 #include "Misc/PackageName.h"
 #include "UObject/Package.h"
@@ -9,36 +10,41 @@
 namespace
 {
 	constexpr int32 DefaultRenderTargetSize = 512;
-	constexpr int32 MaxRenderTargetSize = 16384;
+	// UTextureRenderTarget2D::PostEditChangeProperty clamps to 8192, so anything
+	// larger would be silently shrunk the first time the asset is edited in the
+	// editor. Reject it up front instead.
+	constexpr int32 MaxRenderTargetSize = 8192;
 
-	bool TryParseRenderTargetFormat(const FString& Value, ETextureRenderTargetFormat& OutFormat, FString& OutCanonical)
+	struct FRenderTargetFormatEntry
 	{
-		struct FFormatEntry
-		{
-			const TCHAR* Name;
-			ETextureRenderTargetFormat Format;
-		};
+		const TCHAR* Name;
+		ETextureRenderTargetFormat Format;
+	};
 
-		static const FFormatEntry Formats[] = {
-			{TEXT("R8"), RTF_R8},
-			{TEXT("RG8"), RTF_RG8},
-			{TEXT("RGBA8"), RTF_RGBA8},
-			{TEXT("RGBA8_SRGB"), RTF_RGBA8_SRGB},
-			{TEXT("R16F"), RTF_R16f},
-			{TEXT("RG16F"), RTF_RG16f},
-			{TEXT("RGBA16F"), RTF_RGBA16f},
-			{TEXT("R32F"), RTF_R32f},
-			{TEXT("RG32F"), RTF_RG32f},
-			{TEXT("RGBA32F"), RTF_RGBA32f},
-			{TEXT("RGB10A2"), RTF_RGB10A2},
-		};
+	// The subset of ETextureRenderTargetFormat the editor exposes on a
+	// TextureRenderTarget2D, in enum order. Single source of truth for both
+	// parsing the `format` parameter and reporting it back.
+	const FRenderTargetFormatEntry RenderTargetFormats[] = {
+		{TEXT("R8"), RTF_R8},
+		{TEXT("RG8"), RTF_RG8},
+		{TEXT("RGBA8"), RTF_RGBA8},
+		{TEXT("RGBA8_SRGB"), RTF_RGBA8_SRGB},
+		{TEXT("R16F"), RTF_R16f},
+		{TEXT("RG16F"), RTF_RG16f},
+		{TEXT("RGBA16F"), RTF_RGBA16f},
+		{TEXT("R32F"), RTF_R32f},
+		{TEXT("RG32F"), RTF_RG32f},
+		{TEXT("RGBA32F"), RTF_RGBA32f},
+		{TEXT("RGB10A2"), RTF_RGB10A2},
+	};
 
-		for (const FFormatEntry& Entry : Formats)
+	bool TryParseRenderTargetFormat(const FString& Value, ETextureRenderTargetFormat& OutFormat)
+	{
+		for (const FRenderTargetFormatEntry& Entry : RenderTargetFormats)
 		{
 			if (Value.Equals(Entry.Name, ESearchCase::IgnoreCase))
 			{
 				OutFormat = Entry.Format;
-				OutCanonical = Entry.Name;
 				return true;
 			}
 		}
@@ -47,33 +53,22 @@ namespace
 
 	FString RenderTargetFormatToString(ETextureRenderTargetFormat Format)
 	{
-		FString Canonical;
-		ETextureRenderTargetFormat Parsed = RTF_RGBA8_SRGB;
-		const TCHAR* Candidates[] = {
-			TEXT("R8"), TEXT("RG8"), TEXT("RGBA8"), TEXT("RGBA8_SRGB"),
-			TEXT("R16F"), TEXT("RG16F"), TEXT("RGBA16F"), TEXT("R32F"),
-			TEXT("RG32F"), TEXT("RGBA32F"), TEXT("RGB10A2")
-		};
-		for (const TCHAR* Candidate : Candidates)
+		for (const FRenderTargetFormatEntry& Entry : RenderTargetFormats)
 		{
-			if (TryParseRenderTargetFormat(Candidate, Parsed, Canonical) && Parsed == Format)
-			{
-				return Canonical;
-			}
+			if (Entry.Format == Format) return Entry.Name;
 		}
 		return TEXT("UNKNOWN");
 	}
 
-	void SetColorResult(TSharedPtr<FJsonObject> Result, const FLinearColor& Color)
+	FString RenderTargetFormatList()
 	{
-		TSharedPtr<FJsonObject> ColorObject = MakeShared<FJsonObject>();
-		ColorObject->SetNumberField(TEXT("r"), Color.R);
-		ColorObject->SetNumberField(TEXT("g"), Color.G);
-		ColorObject->SetNumberField(TEXT("b"), Color.B);
-		ColorObject->SetNumberField(TEXT("a"), Color.A);
-		Result->SetObjectField(TEXT("clearColor"), ColorObject);
+		TArray<FString> Names;
+		for (const FRenderTargetFormatEntry& Entry : RenderTargetFormats) Names.Add(Entry.Name);
+		return FString::Join(Names, TEXT(", "));
 	}
 
+	/** Full settings readback so callers never need a second round trip to
+	 *  learn what the asset actually ended up with. */
 	TSharedPtr<FJsonValue> MakeRenderTargetResult(UTextureRenderTarget2D* RenderTarget, bool bCreated)
 	{
 		auto Result = MCPSuccess();
@@ -93,19 +88,27 @@ namespace
 		Result->SetNumberField(TEXT("width"), RenderTarget->SizeX);
 		Result->SetNumberField(TEXT("height"), RenderTarget->SizeY);
 		Result->SetStringField(TEXT("format"), RenderTargetFormatToString(RenderTarget->RenderTargetFormat));
-		SetColorResult(Result, RenderTarget->ClearColor);
-		Result->SetBoolField(TEXT("generateMips"), RenderTarget->bAutoGenerateMips);
+
+		TSharedPtr<FJsonObject> ColorObject = MakeShared<FJsonObject>();
+		ColorObject->SetNumberField(TEXT("r"), RenderTarget->ClearColor.R);
+		ColorObject->SetNumberField(TEXT("g"), RenderTarget->ClearColor.G);
+		ColorObject->SetNumberField(TEXT("b"), RenderTarget->ClearColor.B);
+		ColorObject->SetNumberField(TEXT("a"), RenderTarget->ClearColor.A);
+		Result->SetObjectField(TEXT("clearColor"), ColorObject);
+
+		Result->SetBoolField(TEXT("generateMips"), RenderTarget->bAutoGenerateMips != 0);
 		Result->SetNumberField(TEXT("targetGamma"), RenderTarget->TargetGamma);
 		return MCPResult(Result);
 	}
 
 	bool TryReadColor(const TSharedPtr<FJsonObject>& Params, FLinearColor& OutColor, FString& OutError)
 	{
-		const TSharedPtr<FJsonObject>* ColorObject = nullptr;
 		if (!Params->HasField(TEXT("clearColor")))
 		{
 			return true;
 		}
+
+		const TSharedPtr<FJsonObject>* ColorObject = nullptr;
 		if (!Params->TryGetObjectField(TEXT("clearColor"), ColorObject) || !ColorObject || !ColorObject->IsValid())
 		{
 			OutError = TEXT("clearColor must be an object with numeric r, g, b, and a channels");
@@ -171,11 +174,10 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateRenderTarget2D(const TSharedPtr<FJs
 	}
 
 	ETextureRenderTargetFormat RenderTargetFormat = RTF_RGBA8_SRGB;
-	FString CanonicalFormat;
 	const FString Format = OptionalString(Params, TEXT("format"), TEXT("RGBA8_SRGB"));
-	if (!TryParseRenderTargetFormat(Format, RenderTargetFormat, CanonicalFormat))
+	if (!TryParseRenderTargetFormat(Format, RenderTargetFormat))
 	{
-		return MCPError(TEXT("format must be one of R8, RG8, RGBA8, RGBA8_SRGB, R16F, RG16F, RGBA16F, R32F, RG32F, RGBA32F, RGB10A2"));
+		return MCPError(FString::Printf(TEXT("format must be one of %s"), *RenderTargetFormatList()));
 	}
 
 	FLinearColor ClearColor = FLinearColor::Transparent;
@@ -193,6 +195,9 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateRenderTarget2D(const TSharedPtr<FJs
 	{
 		return MCPError(FString::Printf(TEXT("Invalid render target package name: %s"), *PackageName));
 	}
+
+	// Probe first so the idempotent hit can report the settings of the asset
+	// that is already on disk instead of the lean "existed" record.
 	const FString ObjectPath = PackageName + TEXT(".") + Name;
 	if (UObject* ExistingObject = LoadObject<UObject>(nullptr, *ObjectPath))
 	{
@@ -208,27 +213,25 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateRenderTarget2D(const TSharedPtr<FJs
 		return MakeRenderTargetResult(ExistingRenderTarget, false);
 	}
 
-	UPackage* Package = CreatePackage(*PackageName);
-	if (!Package)
-	{
-		return MCPError(FString::Printf(TEXT("Failed to create package '%s'"), *PackageName));
-	}
+	// Go through the editor factory rather than a bare NewObject so the asset
+	// is registered, dirtied and finalised exactly the way the content browser
+	// would do it.
+	UTextureRenderTargetFactoryNew* Factory = NewObject<UTextureRenderTargetFactoryNew>();
+	Factory->Width = Width;
+	Factory->Height = Height;
 
-	UTextureRenderTarget2D* RenderTarget = NewObject<UTextureRenderTarget2D>(
-		Package, UTextureRenderTarget2D::StaticClass(), *Name, RF_Public | RF_Standalone);
-	if (!RenderTarget)
-	{
-		return MCPError(FString::Printf(TEXT("Failed to construct TextureRenderTarget2D '%s'"), *Name));
-	}
+	auto Created = MCPCreateAssetIdempotent<UTextureRenderTarget2D>(
+		Name, PackagePath, OnConflict, TEXT("TextureRenderTarget2D"), Factory);
+	if (Created.EarlyReturn) return Created.EarlyReturn;
 
+	UTextureRenderTarget2D* RenderTarget = Created.Asset;
 	RenderTarget->RenderTargetFormat = RenderTargetFormat;
 	RenderTarget->ClearColor = ClearColor;
 	RenderTarget->bAutoGenerateMips = bGenerateMips;
 	RenderTarget->TargetGamma = static_cast<float>(TargetGamma);
+	// InitAutoFormat derives the pixel format from RenderTargetFormat and
+	// recreates the resource, so every setting above has to be in place first.
 	RenderTarget->InitAutoFormat(Width, Height);
-	RenderTarget->UpdateResourceImmediate(true);
-	FAssetRegistryModule::AssetCreated(RenderTarget);
-	RenderTarget->MarkPackageDirty();
 
 	if (!SaveAssetPackage(RenderTarget))
 	{
