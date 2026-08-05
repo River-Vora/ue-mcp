@@ -50,3 +50,26 @@ describe("animation.author_montages_batch", () => {
     );
   });
 });
+
+describe("animation.add_notify", () => {
+  it("carries notifyProperties through to the native handler", async () => {
+    const call = vi.fn().mockResolvedValue({ success: true });
+    const ctx = { bridge: { call } } as unknown as ToolContext;
+
+    await animationTool.handler(ctx, {
+      action: "add_notify",
+      assetPath: "/Game/Animations/AM_Attack",
+      notifyName: "Damage",
+      triggerTime: 0.35,
+      notifyClass: "/Script/Game.DamageNotify",
+      notifyProperties: { TraceGroup: "Bite" },
+    });
+
+    const [method, params] = call.mock.calls[0];
+    expect(method).toBe("add_anim_notify");
+    expect(params).toMatchObject({
+      notifyClass: "/Script/Game.DamageNotify",
+      notifyProperties: { TraceGroup: "Bite" },
+    });
+  });
+});
