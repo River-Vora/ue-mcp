@@ -2,6 +2,7 @@
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 #include "HandlerJsonProperty.h"
+#include "HandlerPropertyText.h"
 #include "HandlerAssetCreate.h"
 #include "JsonSerializer.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -771,6 +772,21 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReadAssetProperties(const TSharedPtr<FJso
 			Result->SetStringField(TEXT("value"), ValueStr);
 		}
 
+		// #820: export text cannot carry a struct-keyed TMap back into a setter,
+		// so a text-format read of a map-bearing property also hands back the
+		// structured form set_property accepts, and says whether the text form
+		// may be reused at all.
+		if (MCPPropertyText::ContainsMap(Prop))
+		{
+			Result->SetNumberField(TEXT("mapPairCount"), MCPPropertyText::CountMapPairs(Prop, ValuePtr));
+			Result->SetBoolField(TEXT("valueTextRoundTrips"),
+				MCPPropertyText::ExportedTextRoundTrips(Prop, ValuePtr, LeafOwner));
+			if (!bJsonValues)
+			{
+				Result->SetField(TEXT("valueJson"), FMCPJsonSerializer::SerializeValue(ValuePtr, Prop));
+			}
+		}
+
 		// When the path lands on an array of instanced subobjects, also
 		// enumerate each element's index and concrete class so callers can
 		// pick a trait to descend into next (#527).
@@ -843,6 +859,12 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReadAssetProperties(const TSharedPtr<FJso
 					FString ValueStr;
 					Prop->ExportText_Direct(ValueStr, ValuePtr, ValuePtr, Asset, PPF_None);
 					P->SetStringField(TEXT("value"), ValueStr);
+					// #820: a TMap does not survive the text round trip, so the
+					// structured form rides along for those properties only.
+					if (MCPPropertyText::ContainsMap(Prop))
+					{
+						P->SetField(TEXT("valueJson"), FMCPJsonSerializer::SerializeValue(ValuePtr, Prop));
+					}
 				}
 			}
 
@@ -2967,6 +2989,15 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetAssetProperty(const TSharedPtr<FJsonOb
 	FString PrevValue;
 	FinalProp->ExportText_Direct(PrevValue, ValuePtr, ValuePtr, nullptr, PPF_None);
 
+	// #820: a rollback built from export text replays as an empty map when the
+	// key is a struct. Keep the structured previous value for those properties.
+	const bool bMapBearing = MCPPropertyText::ContainsMap(FinalProp);
+	TSharedPtr<FJsonValue> PrevStructured;
+	if (bMapBearing)
+	{
+		PrevStructured = FMCPJsonSerializer::SerializeValue(ValuePtr, FinalProp);
+	}
+
 	Asset->Modify();
 	if (LeafOwner && LeafOwner != Asset) LeafOwner->Modify();
 	FString SetErr;
@@ -2988,11 +3019,23 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetAssetProperty(const TSharedPtr<FJsonOb
 	Result->SetStringField(TEXT("propertyName"), PropertyName);
 	Result->SetStringField(TEXT("previousValue"), PrevValue);
 	Result->SetStringField(TEXT("value"), NewValue);
+	if (bMapBearing)
+	{
+		Result->SetNumberField(TEXT("mapPairCount"), MCPPropertyText::CountMapPairs(FinalProp, ValuePtr));
+		Result->SetField(TEXT("valueJson"), FMCPJsonSerializer::SerializeValue(ValuePtr, FinalProp));
+	}
 
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("assetPath"), AssetPath);
 	Payload->SetStringField(TEXT("propertyName"), PropertyName);
-	Payload->SetStringField(TEXT("value"), PrevValue);
+	if (PrevStructured.IsValid())
+	{
+		Payload->SetField(TEXT("value"), PrevStructured);
+	}
+	else
+	{
+		Payload->SetStringField(TEXT("value"), PrevValue);
+	}
 	MCPSetRollback(Result, TEXT("set_asset_property"), Payload);
 	return MCPResult(Result);
 }

@@ -8,6 +8,8 @@
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 #include "HandlerJsonProperty.h"
+#include "HandlerPropertyText.h"
+#include "JsonSerializer.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "BlueprintEditorLibrary.h"
@@ -428,6 +430,16 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetComponentProperty(const TSharedPtr
 	FString PrevValue;
 	FinalProp->ExportText_Direct(PrevValue, ValuePtr, ValuePtr, nullptr, PPF_None);
 
+	// #820: export text cannot carry a struct-keyed TMap back, so a rollback
+	// built from it would replay as an empty map. Keep the structured value for
+	// map-bearing properties and roll back with that instead.
+	const bool bMapBearing = MCPPropertyText::ContainsMap(FinalProp);
+	TSharedPtr<FJsonValue> PrevStructured;
+	if (bMapBearing)
+	{
+		PrevStructured = FMCPJsonSerializer::SerializeValue(ValuePtr, FinalProp);
+	}
+
 	Template->Modify();
 	FString SetErr;
 	if (!MCPJsonProperty::SetJsonOnProperty(FinalProp, ValuePtr, ValueField, SetErr))
@@ -462,13 +474,28 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetComponentProperty(const TSharedPtr
 	Result->SetStringField(TEXT("propertyName"), PropertyName);
 	Result->SetStringField(TEXT("value"), NewValue);
 	Result->SetBoolField(TEXT("inherited"), bIsInherited);
+	if (bMapBearing)
+	{
+		// #820: `value` is export text and cannot show a struct-keyed map
+		// faithfully. Report what landed, and the structured form the setter
+		// reads back.
+		Result->SetNumberField(TEXT("mapPairCount"), MCPPropertyText::CountMapPairs(FinalProp, ValuePtr));
+		Result->SetField(TEXT("valueJson"), FMCPJsonSerializer::SerializeValue(ValuePtr, FinalProp));
+	}
 
 	// Rollback: self-inverse with previous value
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("path"), AssetPath);
 	Payload->SetStringField(TEXT("componentName"), ComponentName);
 	Payload->SetStringField(TEXT("propertyName"), PropertyName);
-	Payload->SetStringField(TEXT("value"), PrevValue);
+	if (PrevStructured.IsValid())
+	{
+		Payload->SetField(TEXT("value"), PrevStructured);
+	}
+	else
+	{
+		Payload->SetStringField(TEXT("value"), PrevValue);
+	}
 	MCPSetRollback(Result, TEXT("set_component_property"), Payload);
 
 	return MCPResult(Result);
