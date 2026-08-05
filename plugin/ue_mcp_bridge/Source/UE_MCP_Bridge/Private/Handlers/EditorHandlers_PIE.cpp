@@ -819,6 +819,10 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 			: TEXT("No editor world available"));
 	}
 
+	// Describe the world that was actually resolved, not the requested scope:
+	// world="auto" resolves to PIE when a session is running.
+	const FString WorldLabel = World->IsPlayInEditor() ? TEXT("PIE") : TEXT("editor");
+
 	// #654: also match internal UObject name and full path so unlabeled actors
 	// (e.g. AI controllers spawned at runtime, which have no editor label) can
 	// be targeted, not just editor-labelled placed actors.
@@ -826,9 +830,6 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 	// fixed label -> name -> path order, and a miss is an error. There is no
 	// class-default fallback here and there must never be one: a default object
 	// answers every call with default state, which reads as success.
-	// Describe the world that was actually resolved, not the requested scope:
-	// world="auto" resolves to PIE when a session is running.
-	const FString WorldLabel = World->IsPlayInEditor() ? TEXT("PIE") : TEXT("editor");
 	AActor* Target = FindActorByLabelNameOrPath(World, ActorLabel);
 	if (!Target)
 	{
