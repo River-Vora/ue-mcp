@@ -1026,6 +1026,19 @@ namespace WidgetRuntime_Internal
 		FMargin CanvasOffsets;
 	};
 
+	// Per-call state for the optional layout pass. Bundled into one struct so the
+	// recursive walk keeps a readable signature, and so a call that did not ask
+	// for layout can skip the whole block by checking a single flag.
+	struct FRuntimeScanContext
+	{
+		bool bIncludeLayout = false;
+		TOptional<FSlateRect> ViewportRect;
+		const TMap<FString, FRuntimeLayoutSample>* PreviousSamples = nullptr;
+		TMap<FString, FRuntimeLayoutSample> CurrentSamples;
+		int32 WarningCount = 0;
+		int32 ChangedNodeCount = 0;
+	};
+
 	static TMap<FString, TMap<FString, FRuntimeLayoutSample>> PreviousLayoutCaptures;
 	static TMap<FString, uint64> PreviousLayoutCaptureFrames;
 	static uint64 LayoutCaptureSequence = 0;
@@ -1268,17 +1281,16 @@ namespace WidgetRuntime_Internal
 		const FString& WidgetPath,
 		const FDerivedClipState& ParentClip,
 		double ParentEffectiveOpacity,
-		const TOptional<FSlateRect>& ViewportRect,
-		const TMap<FString, FRuntimeLayoutSample>* PreviousSamples,
-		TMap<FString, FRuntimeLayoutSample>& CurrentSamples,
-		int32& InOutWarningCount,
-		int32& InOutChangedNodeCount)
+		FRuntimeScanContext& Ctx)
 	{
 		if (!Widget) return nullptr;
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetStringField(TEXT("name"), Widget->GetName());
 		Obj->SetStringField(TEXT("class"), Widget->GetClass()->GetName());
-		Obj->SetStringField(TEXT("path"), WidgetPath);
+		if (Ctx.bIncludeLayout)
+		{
+			Obj->SetStringField(TEXT("path"), WidgetPath);
+		}
 		Obj->SetStringField(TEXT("visibility"), VisibilityToString(Widget->GetVisibility()));
 		Obj->SetBoolField(TEXT("isVisible"), Widget->IsVisible());
 
@@ -1340,233 +1352,241 @@ namespace WidgetRuntime_Internal
 			}
 		}
 
-		const bool bHasCachedSlateWidget = Widget->GetCachedWidget().IsValid();
-		const FGeometry& Geometry = Widget->GetCachedGeometry();
-		const FVector2D DesiredSize = Widget->GetDesiredSize();
-		const FVector2D LocalSize = Geometry.GetLocalSize();
-		const FVector2D AbsoluteSize = Geometry.GetAbsoluteSize();
-		const FSlateRect LayoutRect = Geometry.GetLayoutBoundingRect();
-		const FSlateRect RenderRect = Geometry.GetRenderBoundingRect();
-		const FVector2D AbsolutePosition(RenderRect.Left, RenderRect.Top);
-		const FWidgetTransform& RenderTransform = Widget->GetRenderTransform();
-		const FDerivedClipState EffectiveClip = ResolveClipState(Widget, WidgetPath, Geometry, DesiredSize, ParentClip);
-		const double EffectiveOpacity = ParentEffectiveOpacity * Widget->GetRenderOpacity();
+		// Layout diagnostics are opt-in: the geometry, slot reflection and delta
+		// blocks below multiply the size of a get_runtime payload, and only a caller
+		// debugging layout needs them.
+		FDerivedClipState EffectiveClip = ParentClip;
+		double EffectiveOpacity = ParentEffectiveOpacity;
+		if (Ctx.bIncludeLayout)
+		{
+			const bool bHasCachedSlateWidget = Widget->GetCachedWidget().IsValid();
+			const FGeometry& Geometry = Widget->GetCachedGeometry();
+			const FVector2D DesiredSize = Widget->GetDesiredSize();
+			const FVector2D LocalSize = Geometry.GetLocalSize();
+			const FVector2D AbsoluteSize = Geometry.GetAbsoluteSize();
+			const FSlateRect LayoutRect = Geometry.GetLayoutBoundingRect();
+			const FSlateRect RenderRect = Geometry.GetRenderBoundingRect();
+			const FVector2D AbsolutePosition(RenderRect.Left, RenderRect.Top);
+			const FWidgetTransform& RenderTransform = Widget->GetRenderTransform();
+			EffectiveClip = ResolveClipState(Widget, WidgetPath, Geometry, DesiredSize, ParentClip);
+			EffectiveOpacity = ParentEffectiveOpacity * Widget->GetRenderOpacity();
 
-		TSharedPtr<FJsonObject> GeometryObj = MakeShared<FJsonObject>();
-		GeometryObj->SetBoolField(TEXT("hasCachedSlateWidget"), bHasCachedSlateWidget);
-		GeometryObj->SetObjectField(TEXT("desiredSize"), VectorJson(DesiredSize));
-		GeometryObj->SetObjectField(TEXT("localSize"), VectorJson(LocalSize));
-		GeometryObj->SetObjectField(TEXT("absoluteSize"), VectorJson(AbsoluteSize));
-		GeometryObj->SetObjectField(TEXT("absolutePosition"), VectorJson(AbsolutePosition));
-		GeometryObj->SetObjectField(TEXT("layoutBoundingRect"), RectJson(LayoutRect));
-		GeometryObj->SetObjectField(TEXT("renderBoundingRect"), RectJson(RenderRect));
-		GeometryObj->SetNumberField(TEXT("accumulatedLayoutScale"), Geometry.GetAccumulatedLayoutTransform().GetScale());
-		Obj->SetObjectField(TEXT("geometry"), GeometryObj);
+			TSharedPtr<FJsonObject> GeometryObj = MakeShared<FJsonObject>();
+			GeometryObj->SetBoolField(TEXT("hasCachedSlateWidget"), bHasCachedSlateWidget);
+			GeometryObj->SetObjectField(TEXT("desiredSize"), VectorJson(DesiredSize));
+			GeometryObj->SetObjectField(TEXT("localSize"), VectorJson(LocalSize));
+			GeometryObj->SetObjectField(TEXT("absoluteSize"), VectorJson(AbsoluteSize));
+			GeometryObj->SetObjectField(TEXT("absolutePosition"), VectorJson(AbsolutePosition));
+			GeometryObj->SetObjectField(TEXT("layoutBoundingRect"), RectJson(LayoutRect));
+			GeometryObj->SetObjectField(TEXT("renderBoundingRect"), RectJson(RenderRect));
+			GeometryObj->SetNumberField(TEXT("accumulatedLayoutScale"), Geometry.GetAccumulatedLayoutTransform().GetScale());
+			Obj->SetObjectField(TEXT("geometry"), GeometryObj);
 
-		TSharedPtr<FJsonObject> TransformObj = MakeShared<FJsonObject>();
-		TransformObj->SetObjectField(TEXT("translation"), VectorJson(RenderTransform.Translation));
-		TransformObj->SetObjectField(TEXT("scale"), VectorJson(RenderTransform.Scale));
-		TransformObj->SetObjectField(TEXT("shear"), VectorJson(RenderTransform.Shear));
-		TransformObj->SetNumberField(TEXT("angleDegrees"), RenderTransform.Angle);
-		TransformObj->SetObjectField(TEXT("pivot"), VectorJson(Widget->GetRenderTransformPivot()));
-		Obj->SetObjectField(TEXT("renderTransform"), TransformObj);
+			TSharedPtr<FJsonObject> TransformObj = MakeShared<FJsonObject>();
+			TransformObj->SetObjectField(TEXT("translation"), VectorJson(RenderTransform.Translation));
+			TransformObj->SetObjectField(TEXT("scale"), VectorJson(RenderTransform.Scale));
+			TransformObj->SetObjectField(TEXT("shear"), VectorJson(RenderTransform.Shear));
+			TransformObj->SetNumberField(TEXT("angleDegrees"), RenderTransform.Angle);
+			TransformObj->SetObjectField(TEXT("pivot"), VectorJson(Widget->GetRenderTransformPivot()));
+			Obj->SetObjectField(TEXT("renderTransform"), TransformObj);
 
-		TSharedPtr<FJsonObject> ClipObj = MakeShared<FJsonObject>();
-		ClipObj->SetStringField(TEXT("authoredMode"), ClippingToString(Widget->GetClipping()));
-		ClipObj->SetBoolField(TEXT("hasDerivedEffectiveRect"), EffectiveClip.bHasRect);
-		ClipObj->SetBoolField(TEXT("alwaysClip"), EffectiveClip.bAlwaysClip);
-		if (EffectiveClip.bHasRect)
-		{
-			ClipObj->SetObjectField(TEXT("derivedEffectiveRect"), RectJson(EffectiveClip.Rect));
-			ClipObj->SetStringField(TEXT("sourcePath"), EffectiveClip.SourcePath);
-			bool bOverlapping = false;
-			const FSlateRect VisibleRect = RenderRect.IntersectionWith(EffectiveClip.Rect, bOverlapping);
-			const bool bFullyClipped = !bOverlapping || VisibleRect.IsEmpty();
-			const bool bPartiallyClipped = !bFullyClipped && VisibleRect.GetArea() + 0.05f < RenderRect.GetArea();
-			ClipObj->SetBoolField(TEXT("fullyClipped"), bFullyClipped);
-			ClipObj->SetBoolField(TEXT("partiallyClipped"), bPartiallyClipped);
-			ClipObj->SetObjectField(TEXT("visibleRect"), RectJson(VisibleRect));
-		}
-		else
-		{
-			ClipObj->SetBoolField(TEXT("fullyClipped"), false);
-			ClipObj->SetBoolField(TEXT("partiallyClipped"), false);
-		}
-		ClipObj->SetStringField(
-			TEXT("derivation"),
-			TEXT("Computed from UMG clipping modes and cached render bounds; use a native Widget Reflector snapshot for paint-element clip stacks."));
-		Obj->SetObjectField(TEXT("clipping"), ClipObj);
-
-		TSharedPtr<FJsonObject> ViewportObj = MakeShared<FJsonObject>();
-		ViewportObj->SetBoolField(TEXT("available"), ViewportRect.IsSet());
-		if (ViewportRect.IsSet())
-		{
-			ViewportObj->SetObjectField(TEXT("rect"), RectJson(ViewportRect.GetValue()));
-			bool bOverlapsViewport = false;
-			const FSlateRect ViewportIntersection =
-				RenderRect.IntersectionWith(ViewportRect.GetValue(), bOverlapsViewport);
-			const bool bOutsideViewport = !bOverlapsViewport || ViewportIntersection.IsEmpty();
-			const bool bPartiallyOutsideViewport =
-				!bOutsideViewport && ViewportIntersection.GetArea() + 0.05f < RenderRect.GetArea();
-			ViewportObj->SetBoolField(TEXT("overlaps"), bOverlapsViewport);
-			ViewportObj->SetBoolField(TEXT("fullyOutside"), bOutsideViewport);
-			ViewportObj->SetBoolField(TEXT("partiallyOutside"), bPartiallyOutsideViewport);
-			ViewportObj->SetObjectField(TEXT("intersectionRect"), RectJson(ViewportIntersection));
-		}
-		Obj->SetObjectField(TEXT("viewport"), ViewportObj);
-
-		if (UPanelWidget* Parent = Widget->GetParent())
-		{
-			const FSlateRect ParentRect = Parent->GetCachedGeometry().GetRenderBoundingRect();
-			TSharedPtr<FJsonObject> ParentLayout = MakeShared<FJsonObject>();
-			ParentLayout->SetStringField(TEXT("name"), Parent->GetName());
-			ParentLayout->SetStringField(TEXT("class"), Parent->GetClass()->GetName());
-			ParentLayout->SetObjectField(TEXT("renderBoundingRect"), RectJson(ParentRect));
-			bool bOverlapsParent = false;
-			RenderRect.IntersectionWith(ParentRect, bOverlapsParent);
-			ParentLayout->SetBoolField(TEXT("overlapsParentBounds"), bOverlapsParent);
-			ParentLayout->SetBoolField(
-				TEXT("extendsOutsideParentBounds"),
-				RenderRect.Left < ParentRect.Left - 0.05f ||
-				RenderRect.Top < ParentRect.Top - 0.05f ||
-				RenderRect.Right > ParentRect.Right + 0.05f ||
-				RenderRect.Bottom > ParentRect.Bottom + 0.05f);
-			Obj->SetObjectField(TEXT("parentLayout"), ParentLayout);
-		}
-
-		FString SlotSignature;
-		if (TSharedPtr<FJsonObject> SlotObj = BuildSlotJson(Widget, SlotSignature))
-		{
-			Obj->SetObjectField(TEXT("slot"), SlotObj);
-		}
-
-		FRuntimeLayoutSample Sample;
-		Sample.DesiredSize = DesiredSize;
-		Sample.LocalSize = LocalSize;
-		Sample.AbsoluteSize = AbsoluteSize;
-		Sample.AbsolutePosition = AbsolutePosition;
-		Sample.RenderRect = RenderRect;
-		Sample.SlotSignature = SlotSignature;
-		if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(Widget->Slot))
-		{
-			Sample.bHasCanvasSlot = true;
-			Sample.bCanvasAutoSize = CanvasSlot->GetAutoSize();
-			Sample.CanvasAnchors = CanvasSlot->GetAnchors();
-			Sample.CanvasOffsets = CanvasSlot->GetOffsets();
-		}
-		CurrentSamples.Add(WidgetPath, Sample);
-
-		TArray<TSharedPtr<FJsonValue>> Warnings;
-		if (!bHasCachedSlateWidget)
-		{
-			AddWarning(
-				Warnings,
-				TEXT("geometry_unavailable"),
-				TEXT("warning"),
-				TEXT("The Slate widget has not been constructed or painted, so cached geometry may be empty or stale."));
-		}
-		if (DesiredSize.X > LocalSize.X + 0.5 || DesiredSize.Y > LocalSize.Y + 0.5)
-		{
-			AddWarning(
-				Warnings,
-				TEXT("desired_size_exceeds_allocation"),
-				TEXT("info"),
-				FString::Printf(
-					TEXT("Desired size %.2fx%.2f exceeds allocated local size %.2fx%.2f; clipping or compression may occur."),
-					DesiredSize.X,
-					DesiredSize.Y,
-					LocalSize.X,
-					LocalSize.Y));
-		}
-		if (Sample.bHasCanvasSlot)
-		{
-			const bool bStretchX = !FMath::IsNearlyEqual(Sample.CanvasAnchors.Minimum.X, Sample.CanvasAnchors.Maximum.X);
-			const bool bStretchY = !FMath::IsNearlyEqual(Sample.CanvasAnchors.Minimum.Y, Sample.CanvasAnchors.Maximum.Y);
-			if (!Sample.bCanvasAutoSize && bStretchX && !FMath::IsNearlyZero(Sample.CanvasOffsets.Right))
+			TSharedPtr<FJsonObject> ClipObj = MakeShared<FJsonObject>();
+			ClipObj->SetStringField(TEXT("authoredMode"), ClippingToString(Widget->GetClipping()));
+			ClipObj->SetBoolField(TEXT("hasDerivedEffectiveRect"), EffectiveClip.bHasRect);
+			ClipObj->SetBoolField(TEXT("alwaysClip"), EffectiveClip.bAlwaysClip);
+			if (EffectiveClip.bHasRect)
 			{
-				AddWarning(
-					Warnings,
-					TEXT("stretched_canvas_right_is_margin"),
-					TEXT("info"),
-					TEXT("This Canvas slot is horizontally stretched: Offsets.Right is a right margin, not a width."));
+				ClipObj->SetObjectField(TEXT("derivedEffectiveRect"), RectJson(EffectiveClip.Rect));
+				ClipObj->SetStringField(TEXT("sourcePath"), EffectiveClip.SourcePath);
+				bool bOverlapping = false;
+				const FSlateRect VisibleRect = RenderRect.IntersectionWith(EffectiveClip.Rect, bOverlapping);
+				const bool bFullyClipped = !bOverlapping || VisibleRect.IsEmpty();
+				const bool bPartiallyClipped = !bFullyClipped && VisibleRect.GetArea() + 0.05f < RenderRect.GetArea();
+				ClipObj->SetBoolField(TEXT("fullyClipped"), bFullyClipped);
+				ClipObj->SetBoolField(TEXT("partiallyClipped"), bPartiallyClipped);
+				ClipObj->SetObjectField(TEXT("visibleRect"), RectJson(VisibleRect));
 			}
-			if (!Sample.bCanvasAutoSize && bStretchY && !FMath::IsNearlyZero(Sample.CanvasOffsets.Bottom))
+			else
+			{
+				ClipObj->SetBoolField(TEXT("fullyClipped"), false);
+				ClipObj->SetBoolField(TEXT("partiallyClipped"), false);
+			}
+			ClipObj->SetStringField(
+				TEXT("derivation"),
+				TEXT("Computed from UMG clipping modes and cached render bounds; use a native Widget Reflector snapshot for paint-element clip stacks."));
+			Obj->SetObjectField(TEXT("clipping"), ClipObj);
+
+			TSharedPtr<FJsonObject> ViewportObj = MakeShared<FJsonObject>();
+			ViewportObj->SetBoolField(TEXT("available"), Ctx.ViewportRect.IsSet());
+			if (Ctx.ViewportRect.IsSet())
+			{
+				ViewportObj->SetObjectField(TEXT("rect"), RectJson(Ctx.ViewportRect.GetValue()));
+				bool bOverlapsViewport = false;
+				const FSlateRect ViewportIntersection =
+					RenderRect.IntersectionWith(Ctx.ViewportRect.GetValue(), bOverlapsViewport);
+				const bool bOutsideViewport = !bOverlapsViewport || ViewportIntersection.IsEmpty();
+				const bool bPartiallyOutsideViewport =
+					!bOutsideViewport && ViewportIntersection.GetArea() + 0.05f < RenderRect.GetArea();
+				ViewportObj->SetBoolField(TEXT("overlaps"), bOverlapsViewport);
+				ViewportObj->SetBoolField(TEXT("fullyOutside"), bOutsideViewport);
+				ViewportObj->SetBoolField(TEXT("partiallyOutside"), bPartiallyOutsideViewport);
+				ViewportObj->SetObjectField(TEXT("intersectionRect"), RectJson(ViewportIntersection));
+			}
+			Obj->SetObjectField(TEXT("viewport"), ViewportObj);
+
+			if (UPanelWidget* Parent = Widget->GetParent())
+			{
+				const FSlateRect ParentRect = Parent->GetCachedGeometry().GetRenderBoundingRect();
+				TSharedPtr<FJsonObject> ParentLayout = MakeShared<FJsonObject>();
+				ParentLayout->SetStringField(TEXT("name"), Parent->GetName());
+				ParentLayout->SetStringField(TEXT("class"), Parent->GetClass()->GetName());
+				ParentLayout->SetObjectField(TEXT("renderBoundingRect"), RectJson(ParentRect));
+				bool bOverlapsParent = false;
+				RenderRect.IntersectionWith(ParentRect, bOverlapsParent);
+				ParentLayout->SetBoolField(TEXT("overlapsParentBounds"), bOverlapsParent);
+				ParentLayout->SetBoolField(
+					TEXT("extendsOutsideParentBounds"),
+					RenderRect.Left < ParentRect.Left - 0.05f ||
+					RenderRect.Top < ParentRect.Top - 0.05f ||
+					RenderRect.Right > ParentRect.Right + 0.05f ||
+					RenderRect.Bottom > ParentRect.Bottom + 0.05f);
+				Obj->SetObjectField(TEXT("parentLayout"), ParentLayout);
+			}
+
+			FString SlotSignature;
+			if (TSharedPtr<FJsonObject> SlotObj = BuildSlotJson(Widget, SlotSignature))
+			{
+				Obj->SetObjectField(TEXT("slot"), SlotObj);
+			}
+
+			FRuntimeLayoutSample Sample;
+			Sample.DesiredSize = DesiredSize;
+			Sample.LocalSize = LocalSize;
+			Sample.AbsoluteSize = AbsoluteSize;
+			Sample.AbsolutePosition = AbsolutePosition;
+			Sample.RenderRect = RenderRect;
+			Sample.SlotSignature = SlotSignature;
+			if (UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(Widget->Slot))
+			{
+				Sample.bHasCanvasSlot = true;
+				Sample.bCanvasAutoSize = CanvasSlot->GetAutoSize();
+				Sample.CanvasAnchors = CanvasSlot->GetAnchors();
+				Sample.CanvasOffsets = CanvasSlot->GetOffsets();
+			}
+			Ctx.CurrentSamples.Add(WidgetPath, Sample);
+
+			TArray<TSharedPtr<FJsonValue>> Warnings;
+			if (!bHasCachedSlateWidget)
 			{
 				AddWarning(
 					Warnings,
-					TEXT("stretched_canvas_bottom_is_margin"),
+					TEXT("geometry_unavailable"),
 					TEXT("warning"),
-					TEXT("This Canvas slot is vertically stretched: Offsets.Bottom is a bottom margin, not a height. SetSize can therefore make height position-dependent."));
+					TEXT("The Slate widget has not been constructed or painted, so cached geometry may be empty or stale."));
 			}
-		}
-
-		TSharedPtr<FJsonObject> DeltaObj = MakeShared<FJsonObject>();
-		bool bChanged = false;
-		if (PreviousSamples)
-		{
-			if (const FRuntimeLayoutSample* Previous = PreviousSamples->Find(WidgetPath))
+			if (DesiredSize.X > LocalSize.X + 0.5 || DesiredSize.Y > LocalSize.Y + 0.5)
 			{
-				const FVector2D PositionDelta = Sample.AbsolutePosition - Previous->AbsolutePosition;
-				const FVector2D LocalSizeDelta = Sample.LocalSize - Previous->LocalSize;
-				const FVector2D AbsoluteSizeDelta = Sample.AbsoluteSize - Previous->AbsoluteSize;
-				const FVector2D DesiredSizeDelta = Sample.DesiredSize - Previous->DesiredSize;
-				const bool bSlotChanged = Sample.SlotSignature != Previous->SlotSignature;
-				bChanged =
-					!VectorNearlyEqual(PositionDelta, FVector2D::ZeroVector) ||
-					!VectorNearlyEqual(LocalSizeDelta, FVector2D::ZeroVector) ||
-					!VectorNearlyEqual(AbsoluteSizeDelta, FVector2D::ZeroVector) ||
-					!VectorNearlyEqual(DesiredSizeDelta, FVector2D::ZeroVector) ||
-					bSlotChanged;
-				DeltaObj->SetBoolField(TEXT("hasPreviousCapture"), true);
-				DeltaObj->SetBoolField(TEXT("changed"), bChanged);
-				DeltaObj->SetObjectField(TEXT("absolutePositionDelta"), VectorJson(PositionDelta));
-				DeltaObj->SetObjectField(TEXT("localSizeDelta"), VectorJson(LocalSizeDelta));
-				DeltaObj->SetObjectField(TEXT("absoluteSizeDelta"), VectorJson(AbsoluteSizeDelta));
-				DeltaObj->SetObjectField(TEXT("desiredSizeDelta"), VectorJson(DesiredSizeDelta));
-				DeltaObj->SetBoolField(TEXT("slotPropertiesChanged"), bSlotChanged);
-				if (bChanged)
+				AddWarning(
+					Warnings,
+					TEXT("desired_size_exceeds_allocation"),
+					TEXT("info"),
+					FString::Printf(
+						TEXT("Desired size %.2fx%.2f exceeds allocated local size %.2fx%.2f; clipping or compression may occur."),
+						DesiredSize.X,
+						DesiredSize.Y,
+						LocalSize.X,
+						LocalSize.Y));
+			}
+			if (Sample.bHasCanvasSlot)
+			{
+				const bool bStretchX = !FMath::IsNearlyEqual(Sample.CanvasAnchors.Minimum.X, Sample.CanvasAnchors.Maximum.X);
+				const bool bStretchY = !FMath::IsNearlyEqual(Sample.CanvasAnchors.Minimum.Y, Sample.CanvasAnchors.Maximum.Y);
+				if (!Sample.bCanvasAutoSize && bStretchX && !FMath::IsNearlyZero(Sample.CanvasOffsets.Right))
 				{
-					++InOutChangedNodeCount;
+					AddWarning(
+						Warnings,
+						TEXT("stretched_canvas_right_is_margin"),
+						TEXT("info"),
+						TEXT("This Canvas slot is horizontally stretched: Offsets.Right is a right margin, not a width."));
 				}
-
-				if (Sample.bHasCanvasSlot && Previous->bHasCanvasSlot)
+				if (!Sample.bCanvasAutoSize && bStretchY && !FMath::IsNearlyZero(Sample.CanvasOffsets.Bottom))
 				{
-					const bool bStretchY =
-						!FMath::IsNearlyEqual(Sample.CanvasAnchors.Minimum.Y, Sample.CanvasAnchors.Maximum.Y);
-					const bool bMovedVertically = !FMath::IsNearlyZero(PositionDelta.Y, 0.25);
-					const bool bHeightChanged = !FMath::IsNearlyZero(LocalSizeDelta.Y, 0.25);
-					const bool bInverseMovement =
-						FMath::IsNearlyEqual(LocalSizeDelta.Y, -PositionDelta.Y, 1.0);
-					if (bStretchY && !Sample.bCanvasAutoSize && bMovedVertically && bHeightChanged && bInverseMovement)
+					AddWarning(
+						Warnings,
+						TEXT("stretched_canvas_bottom_is_margin"),
+						TEXT("warning"),
+						TEXT("This Canvas slot is vertically stretched: Offsets.Bottom is a bottom margin, not a height. SetSize can therefore make height position-dependent."));
+				}
+			}
+
+			TSharedPtr<FJsonObject> DeltaObj = MakeShared<FJsonObject>();
+			bool bChanged = false;
+			if (Ctx.PreviousSamples)
+			{
+				if (const FRuntimeLayoutSample* Previous = Ctx.PreviousSamples->Find(WidgetPath))
+				{
+					const FVector2D PositionDelta = Sample.AbsolutePosition - Previous->AbsolutePosition;
+					const FVector2D LocalSizeDelta = Sample.LocalSize - Previous->LocalSize;
+					const FVector2D AbsoluteSizeDelta = Sample.AbsoluteSize - Previous->AbsoluteSize;
+					const FVector2D DesiredSizeDelta = Sample.DesiredSize - Previous->DesiredSize;
+					const bool bSlotChanged = Sample.SlotSignature != Previous->SlotSignature;
+					bChanged =
+						!VectorNearlyEqual(PositionDelta, FVector2D::ZeroVector) ||
+						!VectorNearlyEqual(LocalSizeDelta, FVector2D::ZeroVector) ||
+						!VectorNearlyEqual(AbsoluteSizeDelta, FVector2D::ZeroVector) ||
+						!VectorNearlyEqual(DesiredSizeDelta, FVector2D::ZeroVector) ||
+						bSlotChanged;
+					DeltaObj->SetBoolField(TEXT("hasPreviousCapture"), true);
+					DeltaObj->SetBoolField(TEXT("changed"), bChanged);
+					DeltaObj->SetObjectField(TEXT("absolutePositionDelta"), VectorJson(PositionDelta));
+					DeltaObj->SetObjectField(TEXT("localSizeDelta"), VectorJson(LocalSizeDelta));
+					DeltaObj->SetObjectField(TEXT("absoluteSizeDelta"), VectorJson(AbsoluteSizeDelta));
+					DeltaObj->SetObjectField(TEXT("desiredSizeDelta"), VectorJson(DesiredSizeDelta));
+					DeltaObj->SetBoolField(TEXT("slotPropertiesChanged"), bSlotChanged);
+					if (bChanged)
 					{
-						AddWarning(
-							Warnings,
-							TEXT("position_dependent_canvas_height"),
-							TEXT("error"),
-							FString::Printf(
-								TEXT("Moving the widget by %.2f px changed its height by %.2f px in the opposite direction. A vertically stretched Canvas slot is treating Bottom as a margin."),
-								PositionDelta.Y,
-								LocalSizeDelta.Y));
+						++Ctx.ChangedNodeCount;
 					}
+
+					if (Sample.bHasCanvasSlot && Previous->bHasCanvasSlot)
+					{
+						const bool bStretchY =
+							!FMath::IsNearlyEqual(Sample.CanvasAnchors.Minimum.Y, Sample.CanvasAnchors.Maximum.Y);
+						const bool bMovedVertically = !FMath::IsNearlyZero(PositionDelta.Y, 0.25);
+						const bool bHeightChanged = !FMath::IsNearlyZero(LocalSizeDelta.Y, 0.25);
+						const bool bInverseMovement =
+							FMath::IsNearlyEqual(LocalSizeDelta.Y, -PositionDelta.Y, 1.0);
+						if (bStretchY && !Sample.bCanvasAutoSize && bMovedVertically && bHeightChanged && bInverseMovement)
+						{
+							AddWarning(
+								Warnings,
+								TEXT("position_dependent_canvas_height"),
+								TEXT("error"),
+								FString::Printf(
+									TEXT("Moving the widget by %.2f px changed its height by %.2f px in the opposite direction. A vertically stretched Canvas slot is treating Bottom as a margin."),
+									PositionDelta.Y,
+									LocalSizeDelta.Y));
+						}
+					}
+				}
+				else
+				{
+					DeltaObj->SetBoolField(TEXT("hasPreviousCapture"), false);
+					DeltaObj->SetBoolField(TEXT("changed"), false);
+					DeltaObj->SetStringField(TEXT("reason"), TEXT("Widget path was not present in the previous capture."));
 				}
 			}
 			else
 			{
 				DeltaObj->SetBoolField(TEXT("hasPreviousCapture"), false);
 				DeltaObj->SetBoolField(TEXT("changed"), false);
-				DeltaObj->SetStringField(TEXT("reason"), TEXT("Widget path was not present in the previous capture."));
+				DeltaObj->SetStringField(TEXT("reason"), TEXT("This is the baseline capture for the runtime widget instance."));
 			}
+			Obj->SetObjectField(TEXT("deltaSincePreviousCapture"), DeltaObj);
+			Obj->SetNumberField(TEXT("effectiveRenderOpacity"), EffectiveOpacity);
+			Obj->SetArrayField(TEXT("diagnostics"), Warnings);
+			Ctx.WarningCount += Warnings.Num();
 		}
-		else
-		{
-			DeltaObj->SetBoolField(TEXT("hasPreviousCapture"), false);
-			DeltaObj->SetBoolField(TEXT("changed"), false);
-			DeltaObj->SetStringField(TEXT("reason"), TEXT("This is the baseline capture for the runtime widget instance."));
-		}
-		Obj->SetObjectField(TEXT("deltaSincePreviousCapture"), DeltaObj);
-		Obj->SetNumberField(TEXT("effectiveRenderOpacity"), EffectiveOpacity);
-		Obj->SetArrayField(TEXT("diagnostics"), Warnings);
-		InOutWarningCount += Warnings.Num();
 
 		if (Depth >= MaxDepth) return Obj;
 
@@ -1584,11 +1604,7 @@ namespace WidgetRuntime_Internal
 					ChildPath,
 					EffectiveClip,
 					EffectiveOpacity,
-					ViewportRect,
-					PreviousSamples,
-					CurrentSamples,
-					InOutWarningCount,
-					InOutChangedNodeCount);
+					Ctx);
 				if (ChildObj.IsValid())
 				{
 					ChildrenArr.Add(MakeShared<FJsonValueObject>(ChildObj));
@@ -1610,11 +1626,7 @@ namespace WidgetRuntime_Internal
 					RootPath,
 					EffectiveClip,
 					EffectiveOpacity,
-					ViewportRect,
-					PreviousSamples,
-					CurrentSamples,
-					InOutWarningCount,
-					InOutChangedNodeCount);
+					Ctx);
 				if (RootObj.IsValid())
 				{
 					Obj->SetObjectField(TEXT("root"), RootObj);
@@ -1699,6 +1711,7 @@ TSharedPtr<FJsonValue> FWidgetHandlers::GetRuntimeWidget(const TSharedPtr<FJsonO
 
 	const int32 MaxDepth = OptionalInt(Params, TEXT("maxDepth"), 6);
 	const FString ChildName = OptionalString(Params, TEXT("childName"), TEXT(""));
+	const bool bIncludeLayout = OptionalBool(Params, TEXT("includeLayout"), false);
 
 	UUserWidget* Found = nullptr;
 	for (TObjectIterator<UUserWidget> It; It; ++It)
@@ -1724,7 +1737,6 @@ TSharedPtr<FJsonValue> FWidgetHandlers::GetRuntimeWidget(const TSharedPtr<FJsonO
 	Result->SetStringField(TEXT("class"), Found->GetClass()->GetName());
 	Result->SetStringField(TEXT("visibility"), VisibilityToString(Found->GetVisibility()));
 	Result->SetBoolField(TEXT("inViewport"), Found->IsInViewport());
-	Result->SetNumberField(TEXT("instanceId"), Found->GetUniqueID());
 
 	UWidget* ScanRoot = Found;
 	if (!ChildName.IsEmpty())
@@ -1752,23 +1764,34 @@ TSharedPtr<FJsonValue> FWidgetHandlers::GetRuntimeWidget(const TSharedPtr<FJsonO
 		ScanRoot = Target;
 	}
 
-	const FString CaptureKey =
-		World->GetName() + TEXT("|") + Found->GetPathName() + TEXT("|") +
-		FString::FromInt(Found->GetUniqueID()) + TEXT("|") +
-		(ChildName.IsEmpty() ? TEXT("<root>") : ChildName);
-	const TMap<FString, FRuntimeLayoutSample>* PreviousSamples = PreviousLayoutCaptures.Find(CaptureKey);
-	const uint64* PreviousFrame = PreviousLayoutCaptureFrames.Find(CaptureKey);
-	TMap<FString, FRuntimeLayoutSample> CurrentSamples;
-	int32 WarningCount = 0;
-	int32 ChangedNodeCount = 0;
-	TOptional<FSlateRect> ViewportRect;
-	if (UGameViewportClient* ViewportClient = World->GetGameViewport())
+	FRuntimeScanContext Ctx;
+	Ctx.bIncludeLayout = bIncludeLayout;
+
+	FString CaptureKey;
+	TOptional<uint64> PreviousFrame;
+	if (bIncludeLayout)
 	{
-		if (TSharedPtr<SViewport> ViewportWidget = ViewportClient->GetGameViewportWidget())
+		Result->SetNumberField(TEXT("instanceId"), Found->GetUniqueID());
+
+		CaptureKey =
+			World->GetName() + TEXT("|") + Found->GetPathName() + TEXT("|") +
+			FString::FromInt(Found->GetUniqueID()) + TEXT("|") +
+			(ChildName.IsEmpty() ? TEXT("<root>") : ChildName);
+		Ctx.PreviousSamples = PreviousLayoutCaptures.Find(CaptureKey);
+		if (const uint64* Frame = PreviousLayoutCaptureFrames.Find(CaptureKey))
 		{
-			ViewportRect = ViewportWidget->GetCachedGeometry().GetRenderBoundingRect();
+			PreviousFrame = *Frame;
+		}
+
+		if (UGameViewportClient* ViewportClient = World->GetGameViewport())
+		{
+			if (TSharedPtr<SViewport> ViewportWidget = ViewportClient->GetGameViewportWidget())
+			{
+				Ctx.ViewportRect = ViewportWidget->GetCachedGeometry().GetRenderBoundingRect();
+			}
 		}
 	}
+
 	const FString ScanPath =
 		ScanRoot == Found
 			? Found->GetName()
@@ -1780,44 +1803,43 @@ TSharedPtr<FJsonValue> FWidgetHandlers::GetRuntimeWidget(const TSharedPtr<FJsonO
 		ScanPath,
 		ResolveAncestorClipState(ScanRoot),
 		ResolveAncestorOpacity(ScanRoot),
-		ViewportRect,
-		PreviousSamples,
-		CurrentSamples,
-		WarningCount,
-		ChangedNodeCount);
+		Ctx);
 	if (Tree.IsValid())
 	{
 		Result->SetObjectField(TEXT("tree"), Tree);
 	}
 
-	TSharedPtr<FJsonObject> Capture = MakeShared<FJsonObject>();
-	Capture->SetNumberField(TEXT("sequence"), ++LayoutCaptureSequence);
-	Capture->SetNumberField(TEXT("frame"), static_cast<double>(GFrameCounter));
-	Capture->SetNumberField(TEXT("timeSeconds"), FApp::GetCurrentTime());
-	Capture->SetBoolField(TEXT("isBaseline"), PreviousSamples == nullptr);
-	Capture->SetNumberField(TEXT("nodeCount"), CurrentSamples.Num());
-	Capture->SetNumberField(TEXT("changedNodeCount"), ChangedNodeCount);
-	Capture->SetNumberField(TEXT("diagnosticCount"), WarningCount);
-	Capture->SetBoolField(TEXT("hasViewportGeometry"), ViewportRect.IsSet());
-	if (ViewportRect.IsSet())
+	if (bIncludeLayout)
 	{
-		Capture->SetObjectField(TEXT("viewportRect"), RectJson(ViewportRect.GetValue()));
-	}
-	if (PreviousFrame)
-	{
-		Capture->SetNumberField(TEXT("previousFrame"), static_cast<double>(*PreviousFrame));
-	}
-	Capture->SetStringField(
-		TEXT("usage"),
-		TEXT("Call widget.get_runtime again after moving, resizing, toggling, or changing resolution to populate deltaSincePreviousCapture."));
-	Result->SetObjectField(TEXT("layoutCapture"), Capture);
+		TSharedPtr<FJsonObject> Capture = MakeShared<FJsonObject>();
+		Capture->SetNumberField(TEXT("sequence"), static_cast<double>(++LayoutCaptureSequence));
+		Capture->SetNumberField(TEXT("frame"), static_cast<double>(GFrameCounter));
+		Capture->SetNumberField(TEXT("timeSeconds"), FApp::GetCurrentTime());
+		Capture->SetBoolField(TEXT("isBaseline"), Ctx.PreviousSamples == nullptr);
+		Capture->SetNumberField(TEXT("nodeCount"), Ctx.CurrentSamples.Num());
+		Capture->SetNumberField(TEXT("changedNodeCount"), Ctx.ChangedNodeCount);
+		Capture->SetNumberField(TEXT("diagnosticCount"), Ctx.WarningCount);
+		Capture->SetBoolField(TEXT("hasViewportGeometry"), Ctx.ViewportRect.IsSet());
+		if (Ctx.ViewportRect.IsSet())
+		{
+			Capture->SetObjectField(TEXT("viewportRect"), RectJson(Ctx.ViewportRect.GetValue()));
+		}
+		if (PreviousFrame.IsSet())
+		{
+			Capture->SetNumberField(TEXT("previousFrame"), static_cast<double>(PreviousFrame.GetValue()));
+		}
+		Capture->SetStringField(
+			TEXT("usage"),
+			TEXT("Call widget.get_runtime again with includeLayout after moving, resizing, toggling, or changing resolution to populate deltaSincePreviousCapture."));
+		Result->SetObjectField(TEXT("layoutCapture"), Capture);
 
-	PreviousLayoutCaptures.Add(CaptureKey, MoveTemp(CurrentSamples));
-	PreviousLayoutCaptureFrames.Add(CaptureKey, GFrameCounter);
-	if (PreviousLayoutCaptures.Num() > 64)
-	{
-		PreviousLayoutCaptures.Reset();
-		PreviousLayoutCaptureFrames.Reset();
+		PreviousLayoutCaptures.Add(CaptureKey, MoveTemp(Ctx.CurrentSamples));
+		PreviousLayoutCaptureFrames.Add(CaptureKey, GFrameCounter);
+		if (PreviousLayoutCaptures.Num() > 64)
+		{
+			PreviousLayoutCaptures.Reset();
+			PreviousLayoutCaptureFrames.Reset();
+		}
 	}
 
 	return MCPResult(Result);
