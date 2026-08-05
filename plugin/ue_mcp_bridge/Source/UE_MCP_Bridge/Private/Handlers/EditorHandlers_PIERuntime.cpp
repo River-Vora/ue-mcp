@@ -14,6 +14,8 @@
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 #include "HandlerJsonProperty.h"
+#include "HandlerPropertyText.h"
+#include "JsonSerializer.h"
 
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/SkinnedMeshComponent.h"
@@ -385,6 +387,11 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 	}
 
 	TSharedPtr<FJsonObject> Props = MakeShared<FJsonObject>();
+	// #820: export text cannot carry a struct-keyed TMap back into a setter, so
+	// map-bearing properties are also reported structurally under `values`, in
+	// the shape set_property accepts. Only those: everything else round-trips
+	// as text and doubling the payload would cost more than it buys.
+	TSharedPtr<FJsonObject> StructuredValues = MakeShared<FJsonObject>();
 	TArray<TSharedPtr<FJsonValue>> Missing;
 	TSet<FString> Emitted;
 	int32 Count = 0;
@@ -412,14 +419,19 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 			++Skipped;
 			continue;
 		}
+		const void* PropValueAddr = P->ContainerPtrToValuePtr<void>(Target);
 		FString S;
-		P->ExportTextItem_Direct(S, P->ContainerPtrToValuePtr<void>(Target), nullptr, Target, PPF_None);
+		P->ExportTextItem_Direct(S, PropValueAddr, nullptr, Target, PPF_None);
 		if (S.Len() > MaxValueChars)
 		{
 			S = S.Left(MaxValueChars) + FString::Printf(TEXT("... [truncated, %d chars]"), S.Len());
 			++TruncatedValues;
 		}
 		Props->SetStringField(P->GetName(), S);
+		if (MCPPropertyText::ContainsMap(P))
+		{
+			StructuredValues->SetField(P->GetName(), FMCPJsonSerializer::SerializeValue(PropValueAddr, P));
+		}
 		Emitted.Add(P->GetName().ToLower());
 		++Count;
 	}
@@ -440,6 +452,10 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 	Result->SetNumberField(TEXT("skippedProperties"), Skipped);
 	Result->SetNumberField(TEXT("truncatedValues"), TruncatedValues);
 	Result->SetObjectField(TEXT("properties"), Props);
+	if (StructuredValues->Values.Num() > 0)
+	{
+		Result->SetObjectField(TEXT("values"), StructuredValues);
+	}
 	Result->SetArrayField(TEXT("missingProperties"), Missing);
 	if (Skipped > 0)
 	{

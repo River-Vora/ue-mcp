@@ -79,6 +79,7 @@
 #include "HAL/PlatformProcess.h"
 #include "Misc/MonitoredProcess.h"
 #include "HandlerJsonProperty.h"
+#include "HandlerPropertyText.h"
 #include "JsonSerializer.h"
 #include "Engine/Blueprint.h"
 #include "GameFramework/PlayerController.h"
@@ -152,6 +153,16 @@ namespace
 			FString ValueText;
 			Prop->ExportText_Direct(ValueText, ValuePtr, ValuePtr, Owner, PPF_None);
 			Obj->SetStringField(TEXT("valueText"), ValueText);
+
+			// #820: say outright whether this text can be copied back into a
+			// setter. A TMap with a struct key exports pairs that do not read
+			// back, and writing that text used to empty the map. `value` always
+			// round-trips; `valueText` does not always.
+			if (MCPPropertyText::ContainsMap(Prop))
+			{
+				Obj->SetBoolField(TEXT("valueTextRoundTrips"),
+					MCPPropertyText::ExportedTextRoundTrips(Prop, ValuePtr, Owner));
+			}
 		}
 
 		return Obj;
@@ -629,6 +640,24 @@ TSharedPtr<FJsonValue> FEditorHandlers::SetProperty(const TSharedPtr<FJsonObject
 	Result->SetStringField(TEXT("propertyName"), PropertyName);
 	Result->SetStringField(TEXT("type"), Property->GetCPPType());
 	Result->SetBoolField(TEXT("saved"), bSave);
+	// #820: report what actually landed for containers, so a caller can check
+	// the count without a second read.
+	if (FMapProperty* MapProp = CastField<FMapProperty>(Property))
+	{
+		Result->SetNumberField(TEXT("elementCount"), FScriptMapHelper(MapProp, PropertyValue).Num());
+	}
+	else if (FSetProperty* SetProp = CastField<FSetProperty>(Property))
+	{
+		Result->SetNumberField(TEXT("elementCount"), FScriptSetHelper(SetProp, PropertyValue).Num());
+	}
+	else if (FArrayProperty* ArrProp = CastField<FArrayProperty>(Property))
+	{
+		Result->SetNumberField(TEXT("elementCount"), FScriptArrayHelper(ArrProp, PropertyValue).Num());
+	}
+	else if (MCPPropertyText::ContainsMap(Property))
+	{
+		Result->SetNumberField(TEXT("mapPairCount"), MCPPropertyText::CountMapPairs(Property, PropertyValue));
+	}
 	return MCPResult(Result);
 }
 
@@ -673,6 +702,16 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetProperty(const TSharedPtr<FJsonObject
 	FString ValueText;
 	Property->ExportText_Direct(ValueText, ValuePtr, ValuePtr, LeafOwner ? LeafOwner : Object, PPF_None);
 	Result->SetStringField(TEXT("valueText"), ValueText);
+
+	// #820: `value` is always safe to hand back to set_property. `valueText` is
+	// only safe when the flag below says so - a struct-keyed TMap exports pairs
+	// that do not read back.
+	if (MCPPropertyText::ContainsMap(Property))
+	{
+		Result->SetBoolField(TEXT("valueTextRoundTrips"),
+			MCPPropertyText::ExportedTextRoundTrips(Property, ValuePtr, LeafOwner ? LeafOwner : Object));
+		Result->SetNumberField(TEXT("mapPairCount"), MCPPropertyText::CountMapPairs(Property, ValuePtr));
+	}
 	return MCPResult(Result);
 }
 
