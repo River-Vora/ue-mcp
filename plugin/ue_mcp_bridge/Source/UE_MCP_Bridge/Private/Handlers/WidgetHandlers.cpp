@@ -540,6 +540,46 @@ namespace MCPWidgetGuidMap
 	}
 }
 
+/**
+ * Compile state of a Widget Blueprint as a stable string (#799). A caller that
+ * gets `created: true` still needs to know whether the asset it just changed
+ * compiles, so the mutation handlers report this alongside the outcome.
+ */
+static FString WidgetCompileStatusString(const UWidgetBlueprint* WidgetBP)
+{
+	if (!WidgetBP) return TEXT("unknown");
+	switch (WidgetBP->Status.GetValue())
+	{
+	case BS_UpToDate:             return TEXT("upToDate");
+	case BS_UpToDateWithWarnings: return TEXT("upToDateWithWarnings");
+	case BS_Dirty:                return TEXT("dirty");
+	case BS_Error:                return TEXT("error");
+	case BS_BeingCreated:         return TEXT("beingCreated");
+	default:                      return TEXT("unknown");
+	}
+}
+
+/** Stamp compile state onto a mutation result, and withdraw the success claim
+ *  when the blueprint no longer compiles (#799). */
+static void MCPSetWidgetCompileOutcome(
+	TSharedPtr<FJsonObject> Result,
+	const UWidgetBlueprint* WidgetBP,
+	const FString& AssetPath,
+	const FString& WhatHappened)
+{
+	const FString CompileStatus = WidgetCompileStatusString(WidgetBP);
+	Result->SetStringField(TEXT("compileStatus"), CompileStatus);
+	if (CompileStatus == TEXT("error"))
+	{
+		// The mutation is already on disk, so keep reporting what landed, but a
+		// blueprint that no longer compiles is not a success.
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), FString::Printf(
+			TEXT("%s and saved, but '%s' no longer compiles - open the blueprint's compiler results for the cause."),
+			*WhatHappened, *AssetPath));
+	}
+}
+
 TSharedPtr<FJsonValue> FWidgetHandlers::AddWidget(const TSharedPtr<FJsonObject>& Params)
 {
 	// ── Required: assetPath ──
@@ -569,7 +609,18 @@ TSharedPtr<FJsonValue> FWidgetHandlers::AddWidget(const TSharedPtr<FJsonObject>&
 		return MCPError(TEXT("WidgetTree is null"));
 	}
 
-	// Idempotency: if widget with this name already exists, return existed
+	// ── Resolve the UClass ──
+	UClass* WClass = ResolveWidgetClass(WidgetClassName);
+	if (!WClass)
+	{
+		return MCPError(FString::Printf(TEXT("Unknown widget class '%s'. Use short names like TextBlock, CanvasPanel, Image, Button, etc."), *WidgetClassName));
+	}
+
+	// Idempotency by assetPath + widgetName: a caller that retries after an
+	// ambiguous result (a client-side timeout on a call the editor actually
+	// completed) gets the same answer instead of a duplicate widget (#799).
+	// The class is compared too, so a name that already belongs to something
+	// else is reported rather than passed off as the requested widget.
 	if (!WidgetName.IsEmpty())
 	{
 		UWidget* Existing = nullptr;
@@ -579,20 +630,28 @@ TSharedPtr<FJsonValue> FWidgetHandlers::AddWidget(const TSharedPtr<FJsonObject>&
 		});
 		if (Existing)
 		{
+			if (Existing->GetClass() != WClass)
+			{
+				return MCPError(FString::Printf(
+					TEXT("Widget '%s' already exists in '%s' as a %s, not a %s. Pick another widgetName or remove the existing widget first."),
+					*WidgetName, *AssetPath, *Existing->GetClass()->GetName(), *WClass->GetName()));
+			}
+
 			auto ExistingResult = MCPSuccess();
 			MCPSetExisted(ExistingResult);
 			ExistingResult->SetStringField(TEXT("widgetName"), WidgetName);
+			ExistingResult->SetStringField(TEXT("requestedWidgetName"), WidgetName);
+			ExistingResult->SetStringField(TEXT("persistedWidgetName"), WidgetName);
+			ExistingResult->SetBoolField(TEXT("renamed"), false);
 			ExistingResult->SetStringField(TEXT("widgetClass"), Existing->GetClass()->GetName());
 			ExistingResult->SetStringField(TEXT("assetPath"), AssetPath);
+			if (UPanelWidget* ExistingParent = Existing->GetParent())
+			{
+				ExistingResult->SetStringField(TEXT("parentWidgetName"), ExistingParent->GetName());
+			}
+			ExistingResult->SetBoolField(TEXT("isRoot"), WidgetBP->WidgetTree->RootWidget == Existing);
 			return MCPResult(ExistingResult);
 		}
-	}
-
-	// ── Resolve the UClass ──
-	UClass* WClass = ResolveWidgetClass(WidgetClassName);
-	if (!WClass)
-	{
-		return MCPError(FString::Printf(TEXT("Unknown widget class '%s'. Use short names like TextBlock, CanvasPanel, Image, Button, etc."), *WidgetClassName));
 	}
 
 	// ── Construct the widget ──
@@ -661,7 +720,10 @@ TSharedPtr<FJsonValue> FWidgetHandlers::AddWidget(const TSharedPtr<FJsonObject>&
 	MCPWidgetGuidMap::PruneStale(WidgetBP);
 
 	// ── Save ──
+	// Read the name back off the widget after the compile, not before: the
+	// compile is what settles the name the asset is saved with (#799).
 	TWeakObjectPtr<UWidget> AddedWidget(NewWidget);
+	FString PersistedName = NewWidget->GetName();
 
 	WidgetBP->MarkPackageDirty();
 	FKismetEditorUtilities::CompileBlueprint(WidgetBP);
@@ -671,6 +733,7 @@ TSharedPtr<FJsonValue> FWidgetHandlers::AddWidget(const TSharedPtr<FJsonObject>&
 	// the name that reaches disk is the name that owns the GUID (#799).
 	if (AddedWidget.IsValid())
 	{
+		PersistedName = AddedWidget->GetName();
 		MCPWidgetGuidMap::Register(WidgetBP, AddedWidget->GetFName());
 	}
 	MCPWidgetGuidMap::PruneStale(WidgetBP);
@@ -679,17 +742,28 @@ TSharedPtr<FJsonValue> FWidgetHandlers::AddWidget(const TSharedPtr<FJsonObject>&
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
-	Result->SetStringField(TEXT("widgetName"), NewWidget->GetName());
+	Result->SetStringField(TEXT("widgetName"), PersistedName);
+	// Both names, always: the requested one is what a caller retries with, the
+	// persisted one is what the asset actually holds (#799).
+	Result->SetStringField(TEXT("persistedWidgetName"), PersistedName);
+	if (!WidgetName.IsEmpty())
+	{
+		Result->SetStringField(TEXT("requestedWidgetName"), WidgetName);
+		Result->SetBoolField(TEXT("renamed"), !WidgetName.Equals(PersistedName, ESearchCase::CaseSensitive));
+	}
+	Result->SetStringField(TEXT("assetPath"), AssetPath);
 	Result->SetStringField(TEXT("widgetClass"), WClass->GetName());
 	Result->SetBoolField(TEXT("isRoot"), bIsRoot);
 	if (!ParentWidgetName.IsEmpty())
 	{
 		Result->SetStringField(TEXT("parentWidgetName"), ParentWidgetName);
 	}
+	MCPSetWidgetCompileOutcome(Result, WidgetBP, AssetPath,
+		FString::Printf(TEXT("Widget '%s' was added"), *PersistedName));
 
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("assetPath"), AssetPath);
-	Payload->SetStringField(TEXT("widgetName"), NewWidget->GetName());
+	Payload->SetStringField(TEXT("widgetName"), PersistedName);
 	MCPSetRollback(Result, TEXT("remove_widget"), Payload);
 
 	return MCPResult(Result);
@@ -768,7 +842,10 @@ TSharedPtr<FJsonValue> FWidgetHandlers::RemoveWidget(const TSharedPtr<FJsonObjec
 	Result->SetBoolField(TEXT("deleted"), true);
 	Result->SetStringField(TEXT("widgetName"), WidgetName);
 	Result->SetStringField(TEXT("widgetClass"), RemovedClass);
+	Result->SetStringField(TEXT("assetPath"), AssetPath);
 	Result->SetNumberField(TEXT("prunedGuidEntries"), PrunedGuids);
+	MCPSetWidgetCompileOutcome(Result, WidgetBP, AssetPath,
+		FString::Printf(TEXT("Widget '%s' was removed"), *WidgetName));
 	// No rollback: remove_widget is destructive (would need to snapshot widget tree to reverse).
 
 	return MCPResult(Result);
