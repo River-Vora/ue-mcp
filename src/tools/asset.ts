@@ -55,6 +55,7 @@ export const assetTool: ToolDef = categoryTool(
     save:           bp("Save one asset, or every dirty asset under /Game when assetPath is omitted. force=true saves regardless of the dirty flag - several edits (OFPA level actors, some subsystem property writes) never mark their package dirty, so a dirty-only save skipped them and still reported success. Returns the package name plus on-disk file path, size and mtime so the write can be verified rather than trusted (#768). Params: assetPath?, force?", "save_asset", (p) => ({ assetPath: p.assetPath ?? p.path, force: p.force })),
     save_all_dirty: bp("Flush every dirty package to disk in one call. Reports the packages it attempted, which ones reached disk (with file path, size and mtime) and which are still dirty afterwards, because a bare savedAll boolean has come back true while packages were never written (#768). Params: saveMapPackages? (default true), saveContentPackages? (default true)", "save_all_dirty", (p) => ({ saveMapPackages: p.saveMapPackages, saveContentPackages: p.saveContentPackages })),
     set_mesh_material:    bp("Assign material to static mesh slot. Params: assetPath, materialPath, slotIndex?", "set_mesh_material"),
+    set_mesh_materials_batch: bp("Assign materials across many meshes and slots in one call, so an N mesh x M slot kit costs one round trip instead of N*M. StaticMesh and SkeletalMesh both work. Address a slot by slotName (survives a reimport reordering slot indices) or by slotIndex (default 0); passing both is rejected when they disagree. Every submitted assignment returns its own index/ok/status/error, status being ok|updated|unchanged|invalid|protected|duplicate|not_found|slot_not_found|failed|skipped. Default is all-or-nothing: any preflight rejection aborts before a mesh is touched. Pass continueOnError to apply the assignments that did pass and keep the rejects reported alongside them. Each mesh is written and saved once no matter how many of its slots the batch names, and the rollback payload restores only the writes that landed. Params: assignments ([{assetPath, materialPath, slotName? | slotIndex?}], max 500), save? (default true), dryRun? (default false), continueOnError? (default false) (#822)", "set_mesh_materials_batch", (p) => ({ assignments: p.assignments, save: p.save, dryRun: p.dryRun, continueOnError: p.continueOnError })),
     recenter_pivot:       { description: "Move static mesh pivot to geometry center. Params: assetPath OR assetPaths", bridge: "recenter_pivot", mapParams: (p) => {
       const paths = p.assetPaths as string[] | undefined;
       if (paths && paths.length > 0) return { assetPaths: paths };
@@ -254,7 +255,7 @@ export const assetTool: ToolDef = categoryTool(
     value: z.unknown().optional().describe("Property value for set_property — scalar, object/array, or asset-path string. Goes through MCPJsonProperty (#420/#531)"),
     elements: z.array(z.unknown()).min(1).optional().describe("append_array_elements: one or more values to append after full prevalidation"),
     includeValues: z.boolean().optional().describe("Include property values in read_properties/list_properties/get_properties"),
-    continueOnError: z.boolean().optional().describe("bulk_set_properties: apply the items that passed preflight instead of aborting the whole batch (default false). Rejected items are still reported in items[]"),
+    continueOnError: z.boolean().optional().describe("bulk_set_properties / set_mesh_materials_batch: apply the items that passed preflight instead of aborting the whole batch (default false). Rejected items are still reported in items[]"),
     dryRun: z.boolean().optional().describe("migrate: resolve and report without copying (#760). bulk_upsert_data_assets: run the full preflight and report planned statuses without writing"),
     allowDirty: z.boolean().optional().describe("migrate: migrate the on-disk version of an asset with unsaved edits (#760)"),
     destinationContentDir: z.string().optional().describe("migrate: the TARGET project's Content folder (#760)"),
@@ -299,6 +300,13 @@ export const assetTool: ToolDef = categoryTool(
       slotIndex: z.number().optional(),
       materialPath: z.string(),
     })).optional().describe("Per-slot material assignments for set_sk_material_slots"),
+    // #822
+    assignments: z.array(z.object({
+      assetPath: z.string().min(1),
+      materialPath: z.string().min(1),
+      slotName: z.string().optional(),
+      slotIndex: z.number().int().optional(),
+    })).min(1).max(500).optional().describe("set_mesh_materials_batch entries: [{assetPath, materialPath, slotName? | slotIndex?}] (max 500). slotName is preferred for imported kits because slot indices are not stable across reimports"),
     path: z.string().optional().describe("Content path (e.g. /Game/Foo) - used by diagnose_registry, create_folder"),
     op: z.string().optional().describe("edit_user_defined_enum op: add_value | rename_value | remove_value. edit_user_defined_struct op: add_field | rename_field | set_field_type | remove_field"),
     values: z.array(z.string()).optional().describe("create_user_defined_enum: initial value display names"),

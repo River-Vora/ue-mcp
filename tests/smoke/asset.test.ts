@@ -215,6 +215,96 @@ describe("asset — write (with cleanup)", () => {
     const forced = await callBridge(bridge, "delete_folder", { path: folder, force: true });
     expect(forced.ok, forced.error).toBe(true);
   });
+
+  it("set_mesh_materials_batch reports every rejected assignment and mutates nothing", async () => {
+    const r = await callBridge(bridge, "set_mesh_materials_batch", {
+      assignments: [
+        { assetPath: "/Game/DoesNotExist_MeshMaterialSmoke", materialPath: "/Engine/EngineMaterials/WorldGridMaterial" },
+        { assetPath: "/Game/AlsoDoesNotExist_MeshMaterialSmoke", materialPath: "/Engine/EngineMaterials/WorldGridMaterial", slotName: "Trim" },
+      ],
+    });
+    expect(r.method).toBe("set_mesh_materials_batch");
+    expect(r.ok, r.error).toBe(true);
+    const result = r.result as {
+      success?: boolean;
+      error?: string;
+      preflightPassed?: boolean;
+      preflightFailedCount?: number;
+      updatedCount?: number;
+      items?: Array<{ index?: number; assetPath?: string; ok?: boolean; status?: string; error?: string }>;
+    };
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Preflight failed");
+    expect(result.preflightPassed).toBe(false);
+    expect(result.preflightFailedCount).toBe(2);
+    expect(result.updatedCount).toBe(0);
+    // Both bad entries are accounted for individually, in submission order.
+    expect(result.items).toHaveLength(2);
+    expect(result.items?.map((i) => i.index)).toEqual([0, 1]);
+    for (const item of result.items ?? []) {
+      expect(item.ok).toBe(false);
+      expect(item.status).toBe("not_found");
+      expect(item.error).toContain("no StaticMesh or SkeletalMesh");
+    }
+  });
+
+  it("set_mesh_materials_batch reports a protected mount per item rather than aborting", async () => {
+    const r = await callBridge(bridge, "set_mesh_materials_batch", {
+      assignments: [{ assetPath: "/Engine/BasicShapes/Cube", materialPath: "/Engine/EngineMaterials/WorldGridMaterial" }],
+      continueOnError: true,
+      dryRun: true,
+    });
+    expect(r.method).toBe("set_mesh_materials_batch");
+    expect(r.ok, r.error).toBe(true);
+    const result = r.result as { updatedCount?: number; items?: Array<{ status?: string }> };
+    expect(result.updatedCount).toBe(0);
+    expect(result.items).toHaveLength(1);
+    expect(result.items?.[0]?.status).toBe("protected");
+  });
+
+  it("set_mesh_materials_batch resolves a slot by name on a real mesh", async ({ skip }) => {
+    const search = await callBridge(bridge, "search_assets", { query: "StaticMesh", maxResults: 20 });
+    const assets = resultArray(search.result, "assets") ?? [];
+    let meshPath: string | undefined;
+    let slotName: string | undefined;
+    let slotIndex: number | undefined;
+    let materialPath: string | undefined;
+    for (const asset of assets) {
+      const path = ((asset as Record<string, unknown>).path ?? (asset as Record<string, unknown>).objectPath) as string | undefined;
+      if (!path || path.startsWith("/Engine/")) continue;
+      const info = await callBridge(bridge, "get_mesh_info", { assetPath: path });
+      if (!info.ok) continue;
+      const slots = (info.result as { materialSlots?: Array<{ index?: number; slotName?: string; materialPath?: string }> })?.materialSlots ?? [];
+      const usable = slots.find((s) => s.slotName && s.materialPath);
+      if (usable) {
+        meshPath = path;
+        slotName = usable.slotName;
+        slotIndex = usable.index;
+        materialPath = usable.materialPath;
+        break;
+      }
+    }
+    if (!meshPath || !slotName || !materialPath) skip();
+
+    // dryRun: the point is that slotName resolves to the right index without
+    // the caller ever passing one, which is what survives a reimport.
+    const r = await callBridge(bridge, "set_mesh_materials_batch", {
+      assignments: [{ assetPath: meshPath, materialPath, slotName }],
+      dryRun: true,
+    });
+    expect(r.ok, r.error).toBe(true);
+    const result = r.result as {
+      success?: boolean;
+      items?: Array<{ ok?: boolean; status?: string; slotIndex?: number; slotName?: string; wouldChange?: boolean }>;
+    };
+    expect(result.success).toBe(true);
+    expect(result.items?.[0]?.ok).toBe(true);
+    expect(result.items?.[0]?.status).toBe("ok");
+    expect(result.items?.[0]?.slotIndex).toBe(slotIndex);
+    expect(result.items?.[0]?.slotName).toBe(slotName);
+    // Re-assigning the material already in the slot is not a change.
+    expect(result.items?.[0]?.wouldChange).toBe(false);
+  });
 });
 
 // The bulk upsert's whole point is that a batch either preflights clean or

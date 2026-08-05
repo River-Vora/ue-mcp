@@ -202,6 +202,7 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 
 	// Mesh handlers
 	Registry.RegisterHandler(TEXT("set_mesh_material"), &SetMeshMaterial);
+	Registry.RegisterHandler(TEXT("set_mesh_materials_batch"), &SetMeshMaterialsBatch);
 	Registry.RegisterHandler(TEXT("recenter_pivot"), &RecenterPivot);
 
 	// Socket handlers

@@ -93,6 +93,541 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetMeshMaterial(const TSharedPtr<FJsonObj
 	return MCPResult(Result);
 }
 
+// ─── #822 set_mesh_materials_batch ──────────────────────────────────
+// Batch counterpart to set_mesh_material. Assigning materials to an imported
+// kit is N meshes x M slots, and one call per pair made material assignment
+// the only step in the import path that scales with kit size.
+//
+// Slots are addressable by NAME as well as by index. A reimport is free to
+// reorder slot indices while the imported slot names stay put, so a batch
+// keyed on index alone silently writes the wrong material after a reimport.
+// Static and skeletal meshes are both accepted; the handler reads the
+// material array that matches the asset it loaded.
+namespace
+{
+	constexpr int32 MaxMeshMaterialAssignments = 500;
+
+	// Per-item outcome vocabulary. Every submitted assignment gets exactly one
+	// of these back, so a caller can always account for all N entries it sent.
+	const TCHAR* const MeshMatStatusOk           = TEXT("ok");
+	const TCHAR* const MeshMatStatusInvalid      = TEXT("invalid");
+	const TCHAR* const MeshMatStatusProtected    = TEXT("protected");
+	const TCHAR* const MeshMatStatusDuplicate    = TEXT("duplicate");
+	const TCHAR* const MeshMatStatusNotFound     = TEXT("not_found");
+	const TCHAR* const MeshMatStatusSlotNotFound = TEXT("slot_not_found");
+	const TCHAR* const MeshMatStatusUpdated      = TEXT("updated");
+	const TCHAR* const MeshMatStatusUnchanged    = TEXT("unchanged");
+	const TCHAR* const MeshMatStatusFailed       = TEXT("failed");
+	const TCHAR* const MeshMatStatusSkipped      = TEXT("skipped");
+
+	// Mirrors IsProtectedAssetPath in AssetHandlers.cpp, which is file-local to
+	// that translation unit. Keep the two rule sets identical: a write path that
+	// enforces a weaker rule than its neighbours is how engine content gets
+	// mutated through the bridge.
+	bool IsProtectedMeshMaterialPath(const FString& Path)
+	{
+		FString Normalized = Path;
+		Normalized.TrimStartAndEndInline();
+		if (Normalized.IsEmpty()) return false;
+		if (!Normalized.StartsWith(TEXT("/"))) Normalized = TEXT("/") + Normalized;
+		const FString Lower = Normalized.ToLower();
+		if (Lower.StartsWith(TEXT("/engine/"))) return true;
+		if (Lower.StartsWith(TEXT("/memory/"))) return true;
+		if (Lower.StartsWith(TEXT("/temp/"))) return true;
+		if (Lower.Contains(TEXT("/script/"))) return true;
+		return false;
+	}
+
+	struct FPreparedMeshMaterialAssignment
+	{
+		int32 ItemIndex = 0;
+		FString AssetPath;
+		FString MaterialPath;
+		/** Slot addressing exactly as submitted, echoed back on rejection. */
+		FString RequestedSlotName;
+		int32 RequestedSlotIndex = INDEX_NONE;
+		bool bHasSlotName = false;
+		bool bHasSlotIndex = false;
+		/** Slot the preflight resolved the request to. */
+		int32 SlotIndex = INDEX_NONE;
+		FString SlotName;
+		FString PreviousMaterialPath;
+		UMaterialInterface* Material = nullptr;
+		int32 TargetIndex = INDEX_NONE;
+		/** Preflight verdict. An empty error means the item is eligible to apply. */
+		FString Status;
+		FString Error;
+		bool bWouldChange = false;
+		bool bApplied = false;
+		bool bChanged = false;
+		bool PassedPreflight() const { return Error.IsEmpty(); }
+	};
+
+	/** One mesh asset plus every assignment aimed at it, so a mesh is loaded,
+	 *  written and saved once no matter how many of its slots the batch names. */
+	struct FPreparedMeshTarget
+	{
+		UStaticMesh* StaticMesh = nullptr;
+		USkeletalMesh* SkeletalMesh = nullptr;
+		/** Working copy for skeletal meshes; USkeletalMesh has no per-slot setter. */
+		TArray<FSkeletalMaterial> SkeletalMaterials;
+		TArray<int32> AssignmentIndices;
+		bool bChanged = false;
+		bool bSaved = false;
+	};
+
+	/** Human-readable slot inventory, so a slotName miss says what WAS there. */
+	FString DescribeMeshSlots(const FPreparedMeshTarget& Target)
+	{
+		TArray<FString> Names;
+		if (Target.StaticMesh)
+		{
+			for (const FStaticMaterial& Slot : Target.StaticMesh->GetStaticMaterials())
+			{
+				Names.Add(Slot.MaterialSlotName.ToString());
+			}
+		}
+		else
+		{
+			for (const FSkeletalMaterial& Slot : Target.SkeletalMaterials)
+			{
+				Names.Add(Slot.MaterialSlotName.ToString());
+			}
+		}
+		return FString::Join(Names, TEXT(", "));
+	}
+
+	/** Per-item record. Shape matches the other batch handlers: index, ok,
+	 *  status, error, plus the resolved addressing so the caller can diff. */
+	TSharedPtr<FJsonObject> MakeMeshMaterialItemResult(
+		const FPreparedMeshMaterialAssignment& Item,
+		const TCHAR* Status,
+		bool bOk,
+		bool bDryRun,
+		bool bSaved)
+	{
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetNumberField(TEXT("index"), Item.ItemIndex);
+		Entry->SetBoolField(TEXT("ok"), bOk);
+		Entry->SetStringField(TEXT("status"), Status);
+		Entry->SetStringField(TEXT("assetPath"), Item.AssetPath);
+		Entry->SetStringField(TEXT("materialPath"), Item.MaterialPath);
+		if (Item.SlotIndex != INDEX_NONE)
+		{
+			Entry->SetNumberField(TEXT("slotIndex"), Item.SlotIndex);
+			Entry->SetStringField(TEXT("slotName"), Item.SlotName);
+			Entry->SetStringField(TEXT("previousMaterialPath"), Item.PreviousMaterialPath);
+		}
+		Entry->SetBoolField(TEXT("changed"), Item.bChanged);
+		Entry->SetBoolField(TEXT("wouldChange"), bDryRun && Item.bWouldChange);
+		Entry->SetBoolField(TEXT("saved"), bSaved);
+		if (!Item.Error.IsEmpty()) Entry->SetStringField(TEXT("error"), Item.Error);
+		return Entry;
+	}
+}
+
+// Every submitted assignment comes back with its own ok/status/index/error.
+// The default is all-or-nothing: a preflight rejection anywhere aborts before
+// a single mesh is touched. continueOnError applies the assignments that did
+// pass and reports the rejects alongside them. The apply pass never
+// early-returns, so writes that already landed are always described.
+TSharedPtr<FJsonValue> FAssetHandlers::SetMeshMaterialsBatch(const TSharedPtr<FJsonObject>& Params)
+{
+	const TArray<TSharedPtr<FJsonValue>>* Assignments = nullptr;
+	if (!Params->TryGetArrayField(TEXT("assignments"), Assignments) || !Assignments)
+	{
+		return MCPError(TEXT("Missing 'assignments' array"));
+	}
+	if (Assignments->Num() == 0)
+	{
+		return MCPError(TEXT("'assignments' must contain at least one entry"));
+	}
+	if (Assignments->Num() > MaxMeshMaterialAssignments)
+	{
+		return MCPError(FString::Printf(
+			TEXT("'assignments' exceeds the maximum batch size of %d (received %d)"),
+			MaxMeshMaterialAssignments, Assignments->Num()));
+	}
+
+	const bool bSave = OptionalBool(Params, TEXT("save"), true);
+	const bool bDryRun = OptionalBool(Params, TEXT("dryRun"), false);
+	const bool bContinueOnError = OptionalBool(Params, TEXT("continueOnError"), false);
+
+	TArray<FPreparedMeshMaterialAssignment> Prepared;
+	Prepared.Reserve(Assignments->Num());
+	TArray<FPreparedMeshTarget> Targets;
+	TMap<FString, int32> TargetByPath;
+	TSet<FString> ClaimedSlots;
+	int32 PreflightFailedCount = 0;
+	FString FirstPreflightError;
+
+	// Preflight: resolve every mesh, material and slot without mutating
+	// anything. Rejections are recorded on the item rather than returned, so
+	// the caller sees all of them at once instead of only the first.
+	for (int32 ItemIndex = 0; ItemIndex < Assignments->Num(); ++ItemIndex)
+	{
+		FPreparedMeshMaterialAssignment Item;
+		Item.ItemIndex = ItemIndex;
+
+		auto Reject = [&Item, &PreflightFailedCount, &FirstPreflightError]
+			(const TCHAR* Status, const FString& Message)
+		{
+			Item.Status = Status;
+			Item.Error = Message;
+			++PreflightFailedCount;
+			if (FirstPreflightError.IsEmpty()) FirstPreflightError = Message;
+		};
+
+		const TSharedPtr<FJsonObject>* ItemObject = nullptr;
+		if (!(*Assignments)[ItemIndex].IsValid()
+			|| !(*Assignments)[ItemIndex]->TryGetObject(ItemObject)
+			|| !ItemObject || !(*ItemObject).IsValid())
+		{
+			Reject(MeshMatStatusInvalid, FString::Printf(TEXT("assignments[%d] must be an object"), ItemIndex));
+			Prepared.Add(MoveTemp(Item));
+			continue;
+		}
+
+		FString AssetPath;
+		if (!(*ItemObject)->TryGetStringField(TEXT("assetPath"), AssetPath) || AssetPath.IsEmpty())
+		{
+			Reject(MeshMatStatusInvalid, FString::Printf(TEXT("assignments[%d].assetPath must be a non-empty string"), ItemIndex));
+			Prepared.Add(MoveTemp(Item));
+			continue;
+		}
+		Item.AssetPath = AssetPath;
+
+		if (IsProtectedMeshMaterialPath(AssetPath))
+		{
+			Reject(MeshMatStatusProtected, FString::Printf(
+				TEXT("Refusing to mutate protected mount: %s. Engine, /Script/, /Memory/, /Temp/ are read-only via the bridge."),
+				*AssetPath));
+			Prepared.Add(MoveTemp(Item));
+			continue;
+		}
+
+		FString MaterialPath;
+		if (!(*ItemObject)->TryGetStringField(TEXT("materialPath"), MaterialPath) || MaterialPath.IsEmpty())
+		{
+			Reject(MeshMatStatusInvalid, FString::Printf(TEXT("assignments[%d].materialPath must be a non-empty string"), ItemIndex));
+			Prepared.Add(MoveTemp(Item));
+			continue;
+		}
+		Item.MaterialPath = MaterialPath;
+
+		double RawSlotIndex = 0;
+		Item.bHasSlotIndex = (*ItemObject)->TryGetNumberField(TEXT("slotIndex"), RawSlotIndex);
+		if (Item.bHasSlotIndex) Item.RequestedSlotIndex = (int32)RawSlotIndex;
+		FString RequestedSlotName;
+		Item.bHasSlotName = (*ItemObject)->TryGetStringField(TEXT("slotName"), RequestedSlotName) && !RequestedSlotName.IsEmpty();
+		Item.RequestedSlotName = RequestedSlotName;
+
+		UStaticMesh* AsStaticMesh = LoadAssetByPath<UStaticMesh>(AssetPath);
+		USkeletalMesh* AsSkeletalMesh = AsStaticMesh ? nullptr : LoadAssetByPath<USkeletalMesh>(AssetPath);
+		if (!AsStaticMesh && !AsSkeletalMesh)
+		{
+			Reject(MeshMatStatusNotFound, FString::Printf(
+				TEXT("Preflight failed: no StaticMesh or SkeletalMesh at '%s'"), *AssetPath));
+			Prepared.Add(MoveTemp(Item));
+			continue;
+		}
+
+		UMaterialInterface* Material = LoadAssetByPath<UMaterialInterface>(MaterialPath);
+		if (!Material)
+		{
+			Reject(MeshMatStatusNotFound, FString::Printf(
+				TEXT("Preflight failed: could not load material '%s'"), *MaterialPath));
+			Prepared.Add(MoveTemp(Item));
+			continue;
+		}
+		Item.Material = Material;
+
+		// Group on the loaded object's path so two spellings of the same asset
+		// ("/Game/A/SM_X" and "/Game/A/SM_X.SM_X") land in one target.
+		const FString CanonicalPath = AsStaticMesh ? AsStaticMesh->GetPathName() : AsSkeletalMesh->GetPathName();
+		if (const int32* Existing = TargetByPath.Find(CanonicalPath))
+		{
+			Item.TargetIndex = *Existing;
+		}
+		else
+		{
+			FPreparedMeshTarget Target;
+			Target.StaticMesh = AsStaticMesh;
+			Target.SkeletalMesh = AsSkeletalMesh;
+			if (AsSkeletalMesh) Target.SkeletalMaterials = AsSkeletalMesh->GetMaterials();
+			Item.TargetIndex = Targets.Add(MoveTemp(Target));
+			TargetByPath.Add(CanonicalPath, Item.TargetIndex);
+		}
+		const FPreparedMeshTarget& Target = Targets[Item.TargetIndex];
+		const int32 SlotCount = AsStaticMesh ? AsStaticMesh->GetStaticMaterials().Num() : Target.SkeletalMaterials.Num();
+
+		auto SlotNameAt = [&Target, AsStaticMesh](int32 Index) -> FName
+		{
+			return AsStaticMesh
+				? AsStaticMesh->GetStaticMaterials()[Index].MaterialSlotName
+				: Target.SkeletalMaterials[Index].MaterialSlotName;
+		};
+
+		int32 ResolvedSlot = INDEX_NONE;
+		if (Item.bHasSlotName)
+		{
+			const FName Wanted(*Item.RequestedSlotName);
+			for (int32 Slot = 0; Slot < SlotCount; ++Slot)
+			{
+				if (SlotNameAt(Slot) == Wanted) { ResolvedSlot = Slot; break; }
+			}
+			if (ResolvedSlot == INDEX_NONE)
+			{
+				Reject(MeshMatStatusSlotNotFound, FString::Printf(
+					TEXT("slotName '%s' not found on '%s' (slots: %s)"),
+					*Item.RequestedSlotName, *AssetPath, *DescribeMeshSlots(Target)));
+				Prepared.Add(MoveTemp(Item));
+				continue;
+			}
+			// Both forms given and disagreeing is ambiguous. Silently honouring
+			// one of them is how the wrong slot gets overwritten.
+			if (Item.bHasSlotIndex && Item.RequestedSlotIndex != ResolvedSlot)
+			{
+				Reject(MeshMatStatusInvalid, FString::Printf(
+					TEXT("slotName '%s' resolves to index %d on '%s' but slotIndex %d was also passed. Pass one, or make them agree."),
+					*Item.RequestedSlotName, ResolvedSlot, *AssetPath, Item.RequestedSlotIndex));
+				Prepared.Add(MoveTemp(Item));
+				continue;
+			}
+		}
+		else
+		{
+			// Matches set_mesh_material: slotIndex defaults to 0.
+			ResolvedSlot = Item.bHasSlotIndex ? Item.RequestedSlotIndex : 0;
+			if (ResolvedSlot < 0 || ResolvedSlot >= SlotCount)
+			{
+				Reject(MeshMatStatusSlotNotFound, FString::Printf(
+					TEXT("slotIndex %d out of range on '%s' (mesh has %d slots: %s)"),
+					ResolvedSlot, *AssetPath, SlotCount, *DescribeMeshSlots(Target)));
+				Prepared.Add(MoveTemp(Item));
+				continue;
+			}
+		}
+
+		const FString SlotKey = FString::Printf(TEXT("%s#%d"), *CanonicalPath, ResolvedSlot);
+		if (ClaimedSlots.Contains(SlotKey))
+		{
+			Reject(MeshMatStatusDuplicate, FString::Printf(
+				TEXT("Duplicate target in batch: '%s' slot %d is assigned more than once. Keep one assignment per slot so the write order is unambiguous."),
+				*AssetPath, ResolvedSlot));
+			Prepared.Add(MoveTemp(Item));
+			continue;
+		}
+		ClaimedSlots.Add(SlotKey);
+
+		Item.SlotIndex = ResolvedSlot;
+		Item.SlotName = SlotNameAt(ResolvedSlot).ToString();
+		UMaterialInterface* PreviousMaterial = AsStaticMesh
+			? AsStaticMesh->GetStaticMaterials()[ResolvedSlot].MaterialInterface
+			: Target.SkeletalMaterials[ResolvedSlot].MaterialInterface;
+		if (PreviousMaterial) Item.PreviousMaterialPath = PreviousMaterial->GetPathName();
+		Item.bWouldChange = PreviousMaterial != Material;
+
+		Targets[Item.TargetIndex].AssignmentIndices.Add(Prepared.Num());
+		Prepared.Add(MoveTemp(Item));
+	}
+
+	// All-or-nothing default: report every verdict, mutate nothing.
+	if (PreflightFailedCount > 0 && !bContinueOnError)
+	{
+		TArray<TSharedPtr<FJsonValue>> RejectResults;
+		RejectResults.Reserve(Prepared.Num());
+		for (const FPreparedMeshMaterialAssignment& Item : Prepared)
+		{
+			const bool bPassed = Item.PassedPreflight();
+			RejectResults.Add(MakeShared<FJsonValueObject>(MakeMeshMaterialItemResult(
+				Item, bPassed ? MeshMatStatusSkipped : *Item.Status, bPassed, bDryRun, false)));
+		}
+
+		auto Rejected = MCPSuccess();
+		Rejected->SetBoolField(TEXT("success"), false);
+		Rejected->SetStringField(TEXT("error"), FString::Printf(
+			TEXT("Preflight failed for %d of %d assignments; no meshes were modified. First failure: %s. Pass continueOnError=true to apply the assignments that did pass."),
+			PreflightFailedCount, Prepared.Num(), *FirstPreflightError));
+		Rejected->SetBoolField(TEXT("dryRun"), bDryRun);
+		Rejected->SetBoolField(TEXT("continueOnError"), false);
+		Rejected->SetBoolField(TEXT("preflightPassed"), false);
+		Rejected->SetNumberField(TEXT("requestedCount"), Prepared.Num());
+		Rejected->SetNumberField(TEXT("meshCount"), Targets.Num());
+		Rejected->SetNumberField(TEXT("preflightFailedCount"), PreflightFailedCount);
+		Rejected->SetNumberField(TEXT("updatedCount"), 0);
+		Rejected->SetNumberField(TEXT("unchangedCount"), 0);
+		Rejected->SetNumberField(TEXT("failedCount"), PreflightFailedCount);
+		Rejected->SetNumberField(TEXT("skippedCount"), Prepared.Num() - PreflightFailedCount);
+		Rejected->SetNumberField(TEXT("savedMeshCount"), 0);
+		Rejected->SetNumberField(TEXT("saveFailedCount"), 0);
+		Rejected->SetArrayField(TEXT("items"), RejectResults);
+		return MCPResult(Rejected);
+	}
+
+	// Apply, one mesh at a time so each package is written and saved once.
+	// A failure here is recorded on its item; the remaining meshes still run.
+	int32 SavedMeshCount = 0;
+	int32 SaveFailedCount = 0;
+	if (!bDryRun)
+	{
+		for (FPreparedMeshTarget& Target : Targets)
+		{
+			for (const int32 PreparedIndex : Target.AssignmentIndices)
+			{
+				FPreparedMeshMaterialAssignment& Item = Prepared[PreparedIndex];
+				if (!Item.PassedPreflight()) continue;
+
+				if (Target.StaticMesh)
+				{
+					if (!Target.StaticMesh->GetStaticMaterials().IsValidIndex(Item.SlotIndex))
+					{
+						Item.Status = MeshMatStatusFailed;
+						Item.Error = FString::Printf(
+							TEXT("Apply failed after preflight for '%s' slot %d: the slot no longer exists"),
+							*Item.AssetPath, Item.SlotIndex);
+						continue;
+					}
+					// UStaticMesh::SetMaterial owns its own transaction and
+					// property-change notification, so no manual PostEditChange.
+					Target.StaticMesh->SetMaterial(Item.SlotIndex, Item.Material);
+					if (Target.StaticMesh->GetStaticMaterials()[Item.SlotIndex].MaterialInterface != Item.Material)
+					{
+						Item.Status = MeshMatStatusFailed;
+						Item.Error = FString::Printf(
+							TEXT("Apply failed after preflight for '%s' slot %d: the mesh did not accept '%s'"),
+							*Item.AssetPath, Item.SlotIndex, *Item.MaterialPath);
+						continue;
+					}
+				}
+				else
+				{
+					if (!Target.SkeletalMaterials.IsValidIndex(Item.SlotIndex))
+					{
+						Item.Status = MeshMatStatusFailed;
+						Item.Error = FString::Printf(
+							TEXT("Apply failed after preflight for '%s' slot %d: the slot no longer exists"),
+							*Item.AssetPath, Item.SlotIndex);
+						continue;
+					}
+					Target.SkeletalMaterials[Item.SlotIndex].MaterialInterface = Item.Material;
+				}
+
+				Item.bApplied = true;
+				Item.bChanged = Item.bWouldChange;
+				Target.bChanged |= Item.bChanged;
+			}
+
+			// USkeletalMesh has no per-slot setter; the whole array goes back at
+			// once, after every assignment for this mesh has been folded in.
+			if (Target.SkeletalMesh && Target.bChanged)
+			{
+				Target.SkeletalMesh->Modify();
+				Target.SkeletalMesh->SetMaterials(Target.SkeletalMaterials);
+				Target.SkeletalMesh->PostEditChange();
+				Target.SkeletalMesh->MarkPackageDirty();
+			}
+
+			if (bSave && Target.bChanged)
+			{
+				UObject* Mesh = Target.StaticMesh
+					? static_cast<UObject*>(Target.StaticMesh)
+					: static_cast<UObject*>(Target.SkeletalMesh);
+				Target.bSaved = UEditorAssetLibrary::SaveLoadedAsset(Mesh, /*bOnlyIfIsDirty=*/false);
+				if (Target.bSaved) ++SavedMeshCount;
+				else ++SaveFailedCount;
+			}
+		}
+	}
+
+	TArray<TSharedPtr<FJsonValue>> ItemResults;
+	TArray<TSharedPtr<FJsonValue>> RollbackAssignments;
+	ItemResults.Reserve(Prepared.Num());
+	int32 UpdatedCount = 0;
+	int32 UnchangedCount = 0;
+	int32 FailedCount = 0;
+	int32 RollbackSkippedCount = 0;
+
+	for (const FPreparedMeshMaterialAssignment& Item : Prepared)
+	{
+		const bool bSaved = Item.bApplied && Item.TargetIndex != INDEX_NONE && Targets[Item.TargetIndex].bSaved;
+		const TCHAR* Status = MeshMatStatusUnchanged;
+		bool bOk = true;
+		if (!Item.Error.IsEmpty())
+		{
+			Status = *Item.Status;
+			bOk = false;
+			++FailedCount;
+		}
+		else if (bDryRun)
+		{
+			Status = MeshMatStatusOk;
+		}
+		else if (Item.bChanged)
+		{
+			Status = MeshMatStatusUpdated;
+			++UpdatedCount;
+		}
+		else
+		{
+			++UnchangedCount;
+		}
+
+		ItemResults.Add(MakeShared<FJsonValueObject>(MakeMeshMaterialItemResult(Item, Status, bOk, bDryRun, bSaved)));
+
+		if (!bDryRun && Item.bApplied && Item.bChanged)
+		{
+			// A slot that was empty before cannot be restored through a handler
+			// that requires a materialPath, so it is counted rather than faked.
+			if (Item.PreviousMaterialPath.IsEmpty())
+			{
+				++RollbackSkippedCount;
+			}
+			else
+			{
+				TSharedPtr<FJsonObject> Undo = MakeShared<FJsonObject>();
+				Undo->SetStringField(TEXT("assetPath"), Item.AssetPath);
+				Undo->SetNumberField(TEXT("slotIndex"), Item.SlotIndex);
+				Undo->SetStringField(TEXT("materialPath"), Item.PreviousMaterialPath);
+				RollbackAssignments.Add(MakeShared<FJsonValueObject>(Undo));
+			}
+		}
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetBoolField(TEXT("success"), FailedCount == 0);
+	if (FailedCount > 0)
+	{
+		Result->SetStringField(TEXT("error"), FString::Printf(
+			TEXT("%d of %d assignments failed; see items[] for the per-item status."),
+			FailedCount, Prepared.Num()));
+	}
+	Result->SetBoolField(TEXT("dryRun"), bDryRun);
+	Result->SetBoolField(TEXT("continueOnError"), bContinueOnError);
+	Result->SetBoolField(TEXT("preflightPassed"), PreflightFailedCount == 0);
+	Result->SetNumberField(TEXT("requestedCount"), Prepared.Num());
+	Result->SetNumberField(TEXT("meshCount"), Targets.Num());
+	Result->SetNumberField(TEXT("preflightFailedCount"), PreflightFailedCount);
+	Result->SetNumberField(TEXT("updatedCount"), UpdatedCount);
+	Result->SetNumberField(TEXT("unchangedCount"), UnchangedCount);
+	Result->SetNumberField(TEXT("failedCount"), FailedCount);
+	Result->SetNumberField(TEXT("savedMeshCount"), SavedMeshCount);
+	Result->SetNumberField(TEXT("saveFailedCount"), SaveFailedCount);
+	Result->SetArrayField(TEXT("items"), ItemResults);
+	if (!bDryRun) Result->SetNumberField(TEXT("rollbackSkippedCount"), RollbackSkippedCount);
+	if (!bDryRun && UpdatedCount > 0) MCPSetUpdated(Result);
+	if (RollbackAssignments.Num() > 0)
+	{
+		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetArrayField(TEXT("assignments"), RollbackAssignments);
+		Payload->SetBoolField(TEXT("save"), bSave);
+		Payload->SetBoolField(TEXT("dryRun"), false);
+		Payload->SetBoolField(TEXT("continueOnError"), true);
+		MCPSetRollback(Result, TEXT("set_mesh_materials_batch"), Payload);
+	}
+	return MCPResult(Result);
+}
+
 TSharedPtr<FJsonValue> FAssetHandlers::RecenterPivot(const TSharedPtr<FJsonObject>& Params)
 {
 	// Support single assetPath or array of assetPaths

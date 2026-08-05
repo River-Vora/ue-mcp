@@ -70,6 +70,9 @@ private:
 
 	// Mesh material handlers
 	static TSharedPtr<FJsonValue> SetMeshMaterial(const TSharedPtr<FJsonObject>& Params);
+	// #822: batch counterpart to SetMeshMaterial. Slots are addressable by name
+	// as well as index, for static and skeletal meshes alike.
+	static TSharedPtr<FJsonValue> SetMeshMaterialsBatch(const TSharedPtr<FJsonObject>& Params);
 
 	// Mesh pivot handlers
 	static TSharedPtr<FJsonValue> RecenterPivot(const TSharedPtr<FJsonObject>& Params);
