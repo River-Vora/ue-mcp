@@ -153,6 +153,7 @@ private:
 	static TSharedPtr<FJsonValue> SetMovementMode(const TSharedPtr<FJsonObject>& Params);
 	// #802: locate live UObject instances, and write to one.
 	static TSharedPtr<FJsonValue> FindLiveObjects(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetObjectProperty(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> PieGetRuntimeValue(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> BuildLighting(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> BuildAll(const TSharedPtr<FJsonObject>& Params);

@@ -104,7 +104,7 @@ describe("editor — open_asset safety (#17)", () => {
   });
 });
 
-describe("editor — live object access (#802)", () => {
+describe("editor - live object access (#802)", () => {
   it("find_object resolves an exact path", async () => {
     const r = await callBridge(bridge, "find_object", { objectPath: "/Engine/BasicShapes/Cube.Cube" });
     expect(r.ok, r.error).toBe(true);
@@ -135,5 +135,42 @@ describe("editor — live object access (#802)", () => {
     expect(r.ok, r.error).toBe(true);
     const result = r.result as Record<string, unknown>;
     expect(result.success).toBe(false);
+  });
+});
+
+describe("editor - live instance writes (#802)", () => {
+  it("find_object then set_object_property writes the instance it resolved", async () => {
+    const found = await callBridge(bridge, "find_object", { className: "WorldSettings", world: "editor", limit: 1 });
+    expect(found.ok, found.error).toBe(true);
+    const matches = (found.result as Record<string, unknown>).matches as Array<Record<string, unknown>>;
+    expect(matches.length).toBeGreaterThan(0);
+    const objectPath = matches[0].objectPath as string;
+
+    const r = await callBridge(bridge, "set_object_property", {
+      objectPath,
+      propertyName: "TimeDilation",
+      value: 1.0,
+      world: "editor",
+    });
+    expect(r.ok, r.error).toBe(true);
+    const result = r.result as Record<string, unknown>;
+    expect(result.success).toBe(true);
+    expect(result.previousValue).toBeDefined();
+    expect(result.persisted).toBe(false);
+  });
+
+  it("set_object_property lists the available properties when the name is wrong", async () => {
+    const found = await callBridge(bridge, "find_object", { className: "WorldSettings", world: "editor", limit: 1 });
+    const matches = (found.result as Record<string, unknown>).matches as Array<Record<string, unknown>>;
+    const r = await callBridge(bridge, "set_object_property", {
+      objectPath: matches[0].objectPath as string,
+      propertyName: "NoSuchVariableOnThisClass",
+      value: 1,
+      world: "editor",
+    });
+    expect(r.ok, r.error).toBe(true);
+    const result = r.result as Record<string, unknown>;
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain("Available:");
   });
 });

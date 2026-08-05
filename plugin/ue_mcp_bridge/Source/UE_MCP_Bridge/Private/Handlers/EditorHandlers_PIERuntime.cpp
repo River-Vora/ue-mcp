@@ -1058,3 +1058,131 @@ TSharedPtr<FJsonValue> FEditorHandlers::FindLiveObjects(const TSharedPtr<FJsonOb
 	}
 	return MCPResult(Result);
 }
+
+namespace
+{
+	/**
+	 * #802: rewrite the leading token of a dotted property path to the reflected
+	 * name when the caller used the Details-panel spelling. Only the leading
+	 * token needs it: that is the one an agent copies out of the editor UI, and
+	 * the rest of the path is typed against what this handler reports back.
+	 */
+	FString CanonicalizeLeadingToken(UStruct* Owner, const FString& PropertyPath)
+	{
+		if (!Owner) return PropertyPath;
+
+		FString Head = PropertyPath;
+		FString Tail;
+		int32 DotPos = INDEX_NONE;
+		if (PropertyPath.FindChar(TEXT('.'), DotPos))
+		{
+			Head = PropertyPath.Left(DotPos);
+			Tail = PropertyPath.RightChop(DotPos);
+		}
+
+		FString Bare = Head;
+		FString IndexSuffix;
+		int32 BracketPos = INDEX_NONE;
+		if (Bare.FindChar(TEXT('['), BracketPos))
+		{
+			IndexSuffix = Bare.RightChop(BracketPos);
+			Bare = Bare.Left(BracketPos);
+		}
+
+		if (Owner->FindPropertyByName(FName(*Bare))) return PropertyPath;
+		for (TFieldIterator<FProperty> It(Owner, EFieldIteratorFlags::IncludeSuper); It; ++It)
+		{
+			if (PropertyNameMatches(*It, Bare))
+			{
+				return It->GetName() + IndexSuffix + Tail;
+			}
+		}
+		return PropertyPath;
+	}
+}
+
+// #802: write a reflected property on a live UObject instance, with the same
+// targeting as invoke_object_function. editor(set_property) is the asset path:
+// it marks the package dirty and saves it, which is wrong for a PIE actor or a
+// spawned widget, so setting a variable on a live instance to reproduce or
+// unblock a bug went through Python.
+TSharedPtr<FJsonValue> FEditorHandlers::SetObjectProperty(const TSharedPtr<FJsonObject>& Params)
+{
+	FString PropertyName;
+	if (auto Err = RequireString(Params, TEXT("propertyName"), PropertyName)) return Err;
+
+	TSharedPtr<FJsonValue> NewValue = Params->TryGetField(TEXT("value"));
+	if (!NewValue.IsValid()) return MCPError(TEXT("Missing 'value' parameter"));
+
+	UWorld* World = ResolveWorldFromParams(Params, TEXT("auto"));
+
+	FString Description, Error;
+	UObject* Target = ResolveRuntimeObject(Params, World, Description, Error);
+	if (!Target) return MCPError(Error);
+
+	const FString ResolvedName = CanonicalizeLeadingToken(Target->GetClass(), PropertyName);
+
+	FProperty* Prop = nullptr;
+	void* ValueAddr = nullptr;
+	UObject* LeafOwner = nullptr;
+	FString ResolveError;
+	if (!MCPJsonProperty::ResolveDottedPath(Target, ResolvedName, Prop, ValueAddr, LeafOwner, ResolveError))
+	{
+		// Guessing a variable name is the main failure mode, exactly as it is
+		// for a function name, so answer with what the class does have.
+		TArray<FString> Names;
+		for (TFieldIterator<FProperty> It(Target->GetClass(), EFieldIteratorFlags::IncludeSuper); It && Names.Num() < 40; ++It)
+		{
+			Names.Add(It->GetName());
+		}
+		return MCPError(FString::Printf(
+			TEXT("%s on %s. Available: [%s]"),
+			*ResolveError, *Target->GetClass()->GetName(), *FString::Join(Names, TEXT(", "))));
+	}
+
+	UObject* ExportOwner = LeafOwner ? LeafOwner : Target;
+	FString PreviousValue;
+	Prop->ExportTextItem_Direct(PreviousValue, ValueAddr, nullptr, ExportOwner, PPF_None);
+
+	FString SetError;
+	if (!MCPJsonProperty::SetJsonOnProperty(Prop, ValueAddr, NewValue, SetError))
+	{
+		return MCPError(FString::Printf(TEXT("Failed to set '%s': %s"), *ResolvedName, *SetError));
+	}
+
+	// Read back rather than echoing the request: a clamped or coerced write
+	// otherwise reports the value the caller asked for and not the one the
+	// object now holds.
+	FString CurrentValue;
+	Prop->ExportTextItem_Direct(CurrentValue, ValueAddr, nullptr, ExportOwner, PPF_None);
+
+	// Deliberately no Modify/MarkPackageDirty/save. A live instance is not an
+	// asset, and dirtying a PIE package or a spawned widget's outer would ask
+	// the editor to save something that does not exist on disk. Asset writes
+	// belong in editor(set_property).
+	const bool bPostEditChange = OptionalBool(Params, TEXT("postEditChange"), false);
+	if (bPostEditChange)
+	{
+		FPropertyChangedEvent ChangeEvent(Prop);
+		ExportOwner->PostEditChangeProperty(ChangeEvent);
+	}
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("objectPath"), Description);
+	Result->SetStringField(TEXT("objectClass"), Target->GetClass()->GetName());
+	Result->SetStringField(TEXT("propertyName"), PropertyName);
+	Result->SetStringField(TEXT("resolvedPropertyName"), ResolvedName);
+	Result->SetStringField(TEXT("leafPropertyName"), Prop->GetName());
+	Result->SetStringField(TEXT("type"), Prop->GetCPPType());
+	Result->SetStringField(TEXT("previousValue"), PreviousValue);
+	Result->SetStringField(TEXT("value"), CurrentValue);
+	Result->SetBoolField(TEXT("persisted"), false);
+	if (World)
+	{
+		Result->SetStringField(TEXT("world"), World->GetPathName());
+		Result->SetStringField(TEXT("netMode"), DescribePIENetMode(World));
+	}
+	Result->SetStringField(TEXT("note"), TEXT("Written to the live instance only. It is not saved and does not survive PIE ending or the object being destroyed; use editor(set_property) to write an asset."));
+	return MCPResult(Result);
+}
