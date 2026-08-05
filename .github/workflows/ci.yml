@@ -94,18 +94,66 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Check if version changed
+      - name: Check whether this version is already published
         id: version
         run: |
+          set -euo pipefail
           LOCAL=$(node -p "require('./package.json').version")
-          PUBLISHED=$(npm view ue-mcp version 2>/dev/null || echo "0.0.0")
           echo "local=$LOCAL" >> "$GITHUB_OUTPUT"
-          echo "published=$PUBLISHED" >> "$GITHUB_OUTPUT"
-          if [ "$LOCAL" != "$PUBLISHED" ]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
+
+          # Ask whether THIS EXACT version exists on the registry, not whether
+          # it differs from the `latest` dist-tag. `npm view ue-mcp version`
+          # reports only `latest`, so once a prerelease publishes under its own
+          # tag `latest` stops tracking the repo: every later push would see a
+          # difference, retry the publish, and fail on npm refusing to replace
+          # an existing version. That failure never clears on its own.
+          #
+          # Retried a few times because a registry blip here would otherwise
+          # decide the release.
+          VERSIONS=""
+          for attempt in 1 2 3; do
+            if VERSIONS=$(npm view ue-mcp versions --json 2>/dev/null); then break; fi
+            VERSIONS=""
+            echo "npm view attempt $attempt failed; retrying in 5s"
+            sleep 5
+          done
+
+          # An empty payload fails the step by design. Reading an unreachable
+          # registry as "not published yet" would publish blind.
+          ALREADY=$(node scripts/release-version.mjs --version "$LOCAL" --published-in "$VERSIONS" \
+            | sed -n 's/^published=//p')
+          echo "already_published=$ALREADY" >> "$GITHUB_OUTPUT"
+
+          if [ "$ALREADY" = "true" ]; then
+            # Clean skip, not a failure: re-running main after a release is
+            # normal and every publish step below is gated on this output.
+            echo "ue-mcp@$LOCAL is already on the registry. Nothing to publish."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
           else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "ue-mcp@$LOCAL is not on the registry. Publishing."
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Resolve release channel
+        # Derives the npm dist-tag and the prerelease flag from the version
+        # itself. A plain X.Y.Z owns `latest`; a prerelease owns the tag named
+        # by its first prerelease identifier (1.2.0-beta and 1.2.0-beta.2 to
+        # `beta`, 1.3.0-rc.1 to `rc`).
+        #
+        # The rules live in scripts/release-version.mjs, under unit test in
+        # tests/unit/release-version.test.ts, because YAML cannot be tested and
+        # the failure mode here is silent: a prerelease published without a tag
+        # becomes the default install for everyone running `npx ue-mcp`.
+        #
+        # Outputs:
+        #   dist_tag   - the npm tag to publish under
+        #   prerelease - true/false, consumed by the Promote step
+        if: steps.version.outputs.should_publish == 'true'
+        id: channel
+        run: |
+          set -euo pipefail
+          node scripts/release-version.mjs --version "${{ steps.version.outputs.local }}" \
+            | tee -a "$GITHUB_OUTPUT"
 
       - name: Validate release inputs
         # Single required pre-publish input: a draft release tagged vX.Y.Z
@@ -121,7 +169,7 @@ jobs:
         #   HEADLINE  - the joined ` · ` string posted as the landing/headline status
         #   BODY_PATH - path to a temp file containing the frontmatter-stripped body,
         #               used by the Promote step to update the published release body
-        if: steps.version.outputs.changed == 'true'
+        if: steps.version.outputs.should_publish == 'true'
         id: release_inputs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -155,7 +203,7 @@ jobs:
           printf '%s' "$DRAFT_BODY" | node scripts/release-headline.mjs >> "$GITHUB_OUTPUT"
 
       - name: Install & Build
-        if: steps.version.outputs.changed == 'true'
+        if: steps.version.outputs.should_publish == 'true'
         # See note on the build job's Install step re: the rollup
         # optional-deps bug.
         run: |
@@ -164,7 +212,7 @@ jobs:
           npx tsc
 
       - name: Verify build output
-        if: steps.version.outputs.changed == 'true'
+        if: steps.version.outputs.should_publish == 'true'
         run: |
           # Fail loud if prepublishOnly's output is missing or empty - a
           # broken publish is very hard to retract, so we stop here.
@@ -173,7 +221,7 @@ jobs:
           test -s dist/update.js || (echo "dist/update.js missing or empty" && exit 1)
 
       - name: Tag release (before publish)
-        if: steps.version.outputs.changed == 'true'
+        if: steps.version.outputs.should_publish == 'true'
         run: |
           # Create and push the tag BEFORE publishing to npm. If the tag push
           # fails (network / permissions), we have not yet stranded a live
@@ -191,11 +239,17 @@ jobs:
         # GitHub Actions OIDC token from the runner and exchanges it with
         # npmjs.org under the trusted-publisher config bound to this repo
         # and workflow. `id-token: write` on the job is required (set above).
-        if: steps.version.outputs.changed == 'true'
-        run: npm publish --access public --provenance
+        #
+        # --tag is always passed explicitly. npm defaults to `latest`, so
+        # omitting it would point every `npx ue-mcp` at a prerelease the moment
+        # one is published.
+        if: steps.version.outputs.should_publish == 'true'
+        env:
+          DIST_TAG: ${{ steps.channel.outputs.dist_tag }}
+        run: npm publish --access public --provenance --tag "$DIST_TAG"
 
       - name: Package tarball
-        if: steps.version.outputs.changed == 'true'
+        if: steps.version.outputs.should_publish == 'true'
         run: tar czf ue-mcp.tar.gz dist/ plugin/ package.json package-lock.json README.md LICENSE
 
       - name: Promote draft release
@@ -204,25 +258,39 @@ jobs:
         #   1. Attach the tarball.
         #   2. Replace the body with the frontmatter-stripped version so the
         #      published release page renders clean markdown.
-        #   3. Flip draft=false to publish.
+        #   3. Flip draft=false to publish, marking it prerelease or latest to
+        #      match the channel the npm publish used.
         #   4. Post the landing/headline commit status using the validated,
         #      ` · `-joined string from the step output. CI authors the
         #      status itself - releasers no longer post it manually.
-        if: steps.version.outputs.changed == 'true'
+        if: steps.version.outputs.should_publish == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
           VERSION: ${{ steps.version.outputs.local }}
+          PRERELEASE: ${{ steps.channel.outputs.prerelease }}
           HEADLINE: ${{ steps.release_inputs.outputs.HEADLINE }}
           BODY_PATH: ${{ steps.release_inputs.outputs.BODY_PATH }}
         run: |
           set -euo pipefail
           gh release upload "v$VERSION" ue-mcp.tar.gz --clobber
+
+          # Both flags are set explicitly in both directions. Leaving them off
+          # hands the repo's "Latest" badge to whatever was promoted last, so a
+          # beta would present itself as the current stable release on the
+          # releases page and in the GitHub API's /releases/latest.
+          if [ "$PRERELEASE" = "true" ]; then
+            CHANNEL_FLAGS=(--prerelease --latest=false)
+          else
+            CHANNEL_FLAGS=(--prerelease=false --latest)
+          fi
+
           gh release edit "v$VERSION" \
             --notes-file "$BODY_PATH" \
             --draft=false \
-            --tag "v$VERSION"
+            --tag "v$VERSION" \
+            "${CHANNEL_FLAGS[@]}"
           gh api -X POST "repos/$REPO/statuses/$SHA" \
             -f state=success \
             -f context=landing/headline \
