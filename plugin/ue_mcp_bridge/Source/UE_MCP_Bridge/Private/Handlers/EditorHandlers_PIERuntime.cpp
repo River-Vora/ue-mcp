@@ -14,6 +14,8 @@
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 #include "HandlerJsonProperty.h"
+#include "HandlerPropertyText.h"
+#include "JsonSerializer.h"
 
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/SkinnedMeshComponent.h"
@@ -535,6 +537,13 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 	}
 
 	TSharedPtr<FJsonObject> Props = MakeShared<FJsonObject>();
+	// #820: export text cannot carry a struct-keyed TMap back into a setter, so
+	// map-bearing properties are also reported structurally under `values`, in
+	// the shape set_property accepts. Only those: everything else round-trips
+	// as text and doubling the payload would cost more than it buys.
+	TSharedPtr<FJsonObject> StructuredValues = MakeShared<FJsonObject>();
+	TArray<TSharedPtr<FJsonValue>> OversizedValues;
+	const int32 MaxStructuredPairs = 500;
 	TArray<TSharedPtr<FJsonValue>> Missing;
 	// Tracked per requested name rather than per emitted name: a request spelled
 	// the way the Details panel spells it ("World Context Object") resolves to a
@@ -571,14 +580,32 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 			++Skipped;
 			continue;
 		}
+		const void* PropValueAddr = P->ContainerPtrToValuePtr<void>(Target);
 		FString S;
-		P->ExportTextItem_Direct(S, P->ContainerPtrToValuePtr<void>(Target), nullptr, Target, PPF_None);
+		P->ExportTextItem_Direct(S, PropValueAddr, nullptr, Target, PPF_None);
 		if (S.Len() > MaxValueChars)
 		{
 			S = S.Left(MaxValueChars) + FString::Printf(TEXT("... [truncated, %d chars]"), S.Len());
 			++TruncatedValues;
 		}
 		Props->SetStringField(P->GetName(), S);
+		if (MCPPropertyText::ContainsMap(P))
+		{
+			// Bounded for the same reason the text form is truncated: a map with
+			// thousands of pairs builds a payload big enough to drop the bridge.
+			// Past the cap the property is named rather than serialized, so the
+			// caller reads it on its own with get_property.
+			const int32 Pairs = MCPPropertyText::CountMapPairs(P, PropValueAddr);
+			if (Pairs <= MaxStructuredPairs)
+			{
+				StructuredValues->SetField(P->GetName(), FMCPJsonSerializer::SerializeValue(PropValueAddr, P));
+			}
+			else
+			{
+				OversizedValues.Add(MakeShared<FJsonValueString>(P->GetName()));
+			}
+		}
+		Emitted.Add(P->GetName().ToLower());
 		++Count;
 	}
 	// Name a requested property that does not exist, so a typo is reported
@@ -598,6 +625,14 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 	Result->SetNumberField(TEXT("skippedProperties"), Skipped);
 	Result->SetNumberField(TEXT("truncatedValues"), TruncatedValues);
 	Result->SetObjectField(TEXT("properties"), Props);
+	if (StructuredValues->Values.Num() > 0)
+	{
+		Result->SetObjectField(TEXT("values"), StructuredValues);
+	}
+	if (OversizedValues.Num() > 0)
+	{
+		Result->SetArrayField(TEXT("valuesOmitted"), OversizedValues);
+	}
 	Result->SetArrayField(TEXT("missingProperties"), Missing);
 	if (Skipped > 0)
 	{

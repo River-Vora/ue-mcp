@@ -11,16 +11,79 @@
 #include "GameplayTagContainer.h"
 #include "GameplayTagsManager.h"
 #include "Engine/Blueprint.h"
+#include "HandlerPropertyText.h"
 
 // Shared recursive JSON→FProperty setter. Originally written for PCG
 // set_pcg_node_settings (#149); also used by set_component_property on
 // Blueprint component templates (#152) and set_water_body_property (#151-ish).
 //
-// Handles TArray, TSet, nested struct objects, UObject/class references by
-// path, and soft references. Falls back to ImportText for scalars.
+// Handles TArray, TSet, TMap, nested struct objects, UObject/class references
+// by path, and soft references. Falls back to export-text import for scalars.
 namespace MCPJsonProperty
 {
-	inline bool SetJsonOnProperty(FProperty* Prop, void* ValueAddr, const TSharedPtr<FJsonValue>& InValue, FString& OutError)
+	inline bool SetJsonOnProperty(FProperty* Prop, void* ValueAddr, const TSharedPtr<FJsonValue>& InValue, FString& OutError);
+
+	// One (key, value) write for a TMap, in whichever JSON shape the caller
+	// used. `KeyJson` is null for the object shape, where the field name is the
+	// key text.
+	struct FMapPairInput
+	{
+		FString KeyText;
+		TSharedPtr<FJsonValue> KeyJson;
+		TSharedPtr<FJsonValue> ValueJson;
+	};
+
+	// Rebuild a TMap from parsed pairs, keys first, straight onto the key and
+	// value properties. #820: the old path could only name keys as JSON object
+	// fields, so a struct key had to travel as export text and was dropped in
+	// silence. Every pair is now checked in: a duplicate key, an unusable key,
+	// or a final element count that does not match what the caller asked for is
+	// an error, and the caller's snapshot restores the previous map.
+	inline bool SetMapPairs(FMapProperty* MapProp, void* ValueAddr, const TArray<FMapPairInput>& Pairs, FString& OutError)
+	{
+		FScriptMapHelper Helper(MapProp, ValueAddr);
+		Helper.EmptyValues();
+
+		for (const FMapPairInput& Pair : Pairs)
+		{
+			FDefaultConstructedPropertyElement TempKey(MapProp->KeyProp);
+			TSharedPtr<FJsonValue> KeyValue = Pair.KeyJson;
+			if (!KeyValue.IsValid())
+			{
+				KeyValue = MakeShared<FJsonValueString>(Pair.KeyText);
+			}
+
+			FString E;
+			if (!SetJsonOnProperty(MapProp->KeyProp, TempKey.GetObjAddress(), KeyValue, E))
+			{
+				OutError = FString::Printf(TEXT("map key '%s': %s"), *Pair.KeyText, *E);
+				return false;
+			}
+			if (Helper.Num() > 0 && Helper.FindValueFromHash(TempKey.GetObjAddress()) != nullptr)
+			{
+				OutError = FString::Printf(TEXT("map key '%s' appears twice"), *Pair.KeyText);
+				return false;
+			}
+
+			void* ValuePtr = Helper.FindOrAdd(TempKey.GetObjAddress());
+			if (!SetJsonOnProperty(MapProp->ValueProp, ValuePtr, Pair.ValueJson, E))
+			{
+				OutError = FString::Printf(TEXT("map value for key '%s': %s"), *Pair.KeyText, *E);
+				return false;
+			}
+		}
+
+		if (Helper.Num() != Pairs.Num())
+		{
+			OutError = FString::Printf(
+				TEXT("map would have lost entries: %d pair(s) given, %d stored. Refusing the write"),
+				Pairs.Num(), Helper.Num());
+			return false;
+		}
+		return true;
+	}
+
+	inline bool SetJsonOnPropertyImpl(FProperty* Prop, void* ValueAddr, const TSharedPtr<FJsonValue>& InValue, FString& OutError)
 	{
 		if (!Prop || !InValue.IsValid() || !ValueAddr) { OutError = TEXT("null property/value/addr"); return false; }
 
@@ -125,44 +188,75 @@ namespace MCPJsonProperty
 					if (!SetJsonOnProperty(SetProp->ElementProp, ElemAddr, V, E)) { OutError = E; return false; }
 				}
 				H.Rehash();
+				// #820: same count guard the map path uses - a set that stored
+				// fewer elements than it was handed is a failed write, not a
+				// quiet partial one.
+				if (H.Num() != Items->Num())
+				{
+					OutError = FString::Printf(
+						TEXT("set would have lost entries: %d given, %d stored (duplicate elements?). Refusing the write"),
+						Items->Num(), H.Num());
+					return false;
+				}
 				return true;
 			}
 			// else: fall through to ImportText fallback below.
 		}
 
-		// TMap. JSON object fields become map keys; field values recurse through
-		// the same setter, so tag/name/string keys and object/struct values work.
+		// TMap. Two shapes are accepted, and the read handlers emit whichever one
+		// the map's key type needs (#820):
+		//   { "Key": Value }                         - keys that are text
+		//   [ { "key": <any>, "value": <any> } ]     - any key, struct keys included
+		// Both recurse through this setter for keys and values alike, so struct
+		// keys, tag keys, object refs and nested containers all land natively
+		// instead of travelling as export text.
 		else if (FMapProperty* MapProp = CastField<FMapProperty>(Prop))
 		{
 			const TSharedPtr<FJsonObject>* Obj = nullptr;
+			const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
 			if (Value->TryGetObject(Obj) && Obj && (*Obj).IsValid())
 			{
-				FScriptMapHelper H(MapProp, ValueAddr);
-				H.EmptyValues();
-				for (const auto& Pair : (*Obj)->Values)
+				TArray<FMapPairInput> Pairs;
+				Pairs.Reserve((*Obj)->Values.Num());
+				for (const auto& Field : (*Obj)->Values)
 				{
-					const FString Key(*Pair.Key);
-					const int32 Idx = H.AddDefaultValue_Invalid_NeedsRehash();
-					FString E;
-					if (!SetJsonOnProperty(MapProp->KeyProp, H.GetKeyPtr(Idx), MakeShared<FJsonValueString>(Key), E))
-					{
-						H.EmptyValues();
-						H.Rehash();
-						OutError = FString::Printf(TEXT("map key '%s': %s"), *Key, *E);
-						return false;
-					}
-					if (!SetJsonOnProperty(MapProp->ValueProp, H.GetValuePtr(Idx), Pair.Value, E))
-					{
-						H.EmptyValues();
-						H.Rehash();
-						OutError = FString::Printf(TEXT("map value '%s': %s"), *Key, *E);
-						return false;
-					}
+					FMapPairInput Pair;
+					Pair.KeyText = Field.Key;
+					Pair.ValueJson = Field.Value;
+					Pairs.Add(MoveTemp(Pair));
 				}
-				H.Rehash();
-				return true;
+				return SetMapPairs(MapProp, ValueAddr, Pairs, OutError);
 			}
-			// else: fall through to ImportText fallback below.
+			if (Value->TryGetArray(Items) && Items)
+			{
+				TArray<FMapPairInput> Pairs;
+				Pairs.Reserve(Items->Num());
+				for (int32 i = 0; i < Items->Num(); ++i)
+				{
+					const TSharedPtr<FJsonObject>* Entry = nullptr;
+					if (!(*Items)[i].IsValid() || !(*Items)[i]->TryGetObject(Entry) || !Entry || !(*Entry).IsValid())
+					{
+						OutError = FString::Printf(TEXT("map entry [%d] must be an object with 'key' and 'value'"), i);
+						return false;
+					}
+					const TSharedPtr<FJsonValue> KeyJson = (*Entry)->TryGetField(TEXT("key"));
+					const TSharedPtr<FJsonValue> ValueJson = (*Entry)->TryGetField(TEXT("value"));
+					if (!KeyJson.IsValid() || !ValueJson.IsValid())
+					{
+						OutError = FString::Printf(TEXT("map entry [%d] is missing 'key' or 'value'"), i);
+						return false;
+					}
+					FMapPairInput Pair;
+					Pair.KeyJson = KeyJson;
+					Pair.ValueJson = ValueJson;
+					KeyJson->TryGetString(Pair.KeyText);
+					if (Pair.KeyText.IsEmpty()) Pair.KeyText = FString::Printf(TEXT("[%d]"), i);
+					Pairs.Add(MoveTemp(Pair));
+				}
+				return SetMapPairs(MapProp, ValueAddr, Pairs, OutError);
+			}
+			// else: fall through to the export-text import below, which parses
+			// map pairs itself and verifies the stored count.
 		}
 
 		// Struct: recurse on JSON object fields; otherwise fall through to ImportText
@@ -173,16 +267,21 @@ namespace MCPJsonProperty
 			// portable path. Coerce a plain string ("X.Y") or array of strings
 			// into the right runtime tag value via the GameplayTagsManager so
 			// callers don't have to format ImportText themselves.
-			static const FName GameplayTagName(TEXT("GameplayTag"));
-			static const FName GameplayTagContainerName(TEXT("GameplayTagContainer"));
-			const FName StructName = StructProp->Struct->GetFName();
-			if (StructName == GameplayTagName)
+			// #820: match derived tag structs too (a USTRUCT deriving from
+			// FGameplayTag is the common way to type a tag field, and such a
+			// struct is exactly what a struct-keyed TMap tends to be keyed on).
+			// The tag lives in the FGameplayTag base, which starts at offset 0.
+			const bool bIsTag = StructProp->Struct->IsChildOf(FGameplayTag::StaticStruct());
+			const bool bIsTagContainer = StructProp->Struct->IsChildOf(FGameplayTagContainer::StaticStruct());
+			if (bIsTag)
 			{
 				FString TagStr;
 				if (Value->TryGetString(TagStr))
 				{
 					FGameplayTag* TagPtr = static_cast<FGameplayTag*>(ValueAddr);
-					if (TagStr.IsEmpty())
+					// "None" is what an unset FName prints as, so accept it as
+					// the same "no tag" the empty string means (#820).
+					if (TagStr.IsEmpty() || TagStr == TEXT("None"))
 					{
 						*TagPtr = FGameplayTag();
 						return true;
@@ -197,7 +296,7 @@ namespace MCPJsonProperty
 					return true;
 				}
 			}
-			else if (StructName == GameplayTagContainerName)
+			else if (bIsTagContainer)
 			{
 				const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
 				FString SingleStr;
@@ -403,16 +502,54 @@ namespace MCPJsonProperty
 			}
 		}
 
-		// Fallback: coerce JSON to string, run ImportText_Direct
+		// Fallback: coerce JSON to string and import it as UE export text.
+		// #820: map-bearing text goes through MCPPropertyText, which reads the
+		// pairs itself and refuses a write that would store fewer entries than
+		// the text listed. The engine importer used to accept such text, drop
+		// every pair, and report success.
 		FString Str;
 		if (Value->TryGetString(Str)) {}
 		else if (Value->Type == EJson::Number) Str = FString::SanitizeFloat(Value->AsNumber());
 		else if (Value->Type == EJson::Boolean) Str = Value->AsBool() ? TEXT("true") : TEXT("false");
 		else Str = Value->AsString();
 
-		const TCHAR* R = Prop->ImportText_Direct(*Str, ValueAddr, nullptr, PPF_None);
-		if (R == nullptr) { OutError = FString::Printf(TEXT("ImportText failed for '%s'"), *Str); return false; }
-		return true;
+		return MCPPropertyText::ImportTextIntoProperty(Prop, ValueAddr, Str, nullptr, OutError);
+	}
+
+	// #820: a rejected write must leave the previous value exactly as it was.
+	// Container and struct writes mutate in place (EmptyValues, Resize,
+	// field-by-field assignment), so a failure part way through would otherwise
+	// leave a half-written or empty container behind, which is how a struct-keyed
+	// TMap used to end up wiped. Snapshot the destination on the outermost call
+	// and restore it if anything underneath reports an error.
+	inline bool SetJsonOnProperty(FProperty* Prop, void* ValueAddr, const TSharedPtr<FJsonValue>& InValue, FString& OutError)
+	{
+		static thread_local int32 NestDepth = 0;
+
+		const bool bSnapshot = NestDepth == 0 && Prop && ValueAddr &&
+			(Prop->IsA<FMapProperty>() || Prop->IsA<FSetProperty>() ||
+			 Prop->IsA<FArrayProperty>() || Prop->IsA<FStructProperty>());
+
+		if (!bSnapshot)
+		{
+			++NestDepth;
+			const bool bOk = SetJsonOnPropertyImpl(Prop, ValueAddr, InValue, OutError);
+			--NestDepth;
+			return bOk;
+		}
+
+		FDefaultConstructedPropertyElement Backup(Prop);
+		Prop->CopyCompleteValue(Backup.GetObjAddress(), ValueAddr);
+
+		++NestDepth;
+		const bool bOk = SetJsonOnPropertyImpl(Prop, ValueAddr, InValue, OutError);
+		--NestDepth;
+
+		if (!bOk)
+		{
+			Prop->CopyCompleteValue(ValueAddr, Backup.GetObjAddress());
+		}
+		return bOk;
 	}
 
 	// Resolve a dotted property path that may index arrays ("Traits[2]") and

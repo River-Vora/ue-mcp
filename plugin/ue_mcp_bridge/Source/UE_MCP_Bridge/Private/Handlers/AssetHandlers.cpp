@@ -2,6 +2,7 @@
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 #include "HandlerJsonProperty.h"
+#include "HandlerPropertyText.h"
 #include "HandlerAssetCreate.h"
 #include "JsonSerializer.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -17,6 +18,7 @@
 #include "Editor.h"
 #include "FileHelpers.h"
 #include "ObjectTools.h"
+#include "PackageTools.h"
 #include "Exporters/Exporter.h"
 #include "AssetExportTask.h"
 #include "UObject/UObjectGlobals.h"
@@ -782,6 +784,21 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReadAssetProperties(const TSharedPtr<FJso
 			Result->SetStringField(TEXT("value"), ValueStr);
 		}
 
+		// #820: export text cannot carry a struct-keyed TMap back into a setter,
+		// so a text-format read of a map-bearing property also hands back the
+		// structured form set_property accepts, and says whether the text form
+		// may be reused at all.
+		if (MCPPropertyText::ContainsMap(Prop))
+		{
+			Result->SetNumberField(TEXT("mapPairCount"), MCPPropertyText::CountMapPairs(Prop, ValuePtr));
+			Result->SetBoolField(TEXT("valueTextRoundTrips"),
+				MCPPropertyText::ExportedTextRoundTrips(Prop, ValuePtr, LeafOwner));
+			if (!bJsonValues)
+			{
+				Result->SetField(TEXT("valueJson"), FMCPJsonSerializer::SerializeValue(ValuePtr, Prop));
+			}
+		}
+
 		// When the path lands on an array of instanced subobjects, also
 		// enumerate each element's index and concrete class so callers can
 		// pick a trait to descend into next (#527).
@@ -854,6 +871,12 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReadAssetProperties(const TSharedPtr<FJso
 					FString ValueStr;
 					Prop->ExportText_Direct(ValueStr, ValuePtr, ValuePtr, Asset, PPF_None);
 					P->SetStringField(TEXT("value"), ValueStr);
+					// #820: a TMap does not survive the text round trip, so the
+					// structured form rides along for those properties only.
+					if (MCPPropertyText::ContainsMap(Prop))
+					{
+						P->SetField(TEXT("valueJson"), FMCPJsonSerializer::SerializeValue(ValuePtr, Prop));
+					}
 				}
 			}
 
@@ -2861,28 +2884,88 @@ TSharedPtr<FJsonValue> FAssetHandlers::ForceReload(const TSharedPtr<FJsonObject>
 		}
 	}
 
-	// Reset loaders on the existing package (if any) and force a GC pass so
-	// the in-memory pointer is genuinely released before reload. Without
-	// this, LoadObject hands back the same broken instance.
-	if (UPackage* ExistingPkg = FindPackage(nullptr, *PackageName))
+	// #820: a Blueprint's generated class and CDO survive ResetLoaders, so the
+	// old path handed back the same CDO and container properties (a TMap above
+	// all) still read their pre-reload contents while scalars looked restored.
+	// UPackageTools::ReloadPackages is the editor's own re-read: it rebuilds the
+	// package, recompiles the Blueprint and reinstances against the new class.
+	// A package the editor refuses to release is reported, not papered over.
+	UPackage* ExistingPkg = FindPackage(nullptr, *PackageName);
+	UObject* PreviousObject = StaticFindObject(UObject::StaticClass(), nullptr, *AssetPath);
+	const TWeakObjectPtr<UObject> PreviousWeak(PreviousObject);
+	const bool bWasDirty = ExistingPkg != nullptr && ExistingPkg->IsDirty();
+	const bool bDiscardUnsaved = OptionalBool(Params, TEXT("discardUnsaved"), false);
+	if (bWasDirty && !bDiscardUnsaved)
 	{
-		ResetLoaders(ExistingPkg);
-		ExistingPkg->ClearFlags(RF_WasLoaded);
+		return MCPError(FString::Printf(
+			TEXT("Package '%s' has unsaved changes; reloading would discard them. Save it first, or pass discardUnsaved=true."),
+			*PackageName));
 	}
-	CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+
+	FString ReloadMethod = TEXT("load");
+	FString ReloadError;
+	if (ExistingPkg)
+	{
+		FText PackageToolsError;
+		TArray<UPackage*> ToReload;
+		ToReload.Add(ExistingPkg);
+		const bool bChanged = UPackageTools::ReloadPackages(
+			ToReload, PackageToolsError, EReloadPackagesInteractionMode::AssumePositive);
+		ReloadMethod = TEXT("reloadPackages");
+		if (!PackageToolsError.IsEmpty())
+		{
+			ReloadError = PackageToolsError.ToString();
+		}
+
+		if (!bChanged)
+		{
+			// Fall back to the loader reset, which recovers the half-shutdown
+			// state ReloadPackages will not touch (#279).
+			if (UPackage* StillThere = FindPackage(nullptr, *PackageName))
+			{
+				ResetLoaders(StillThere);
+				StillThere->ClearFlags(RF_WasLoaded);
+			}
+			CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+			ReloadMethod = TEXT("resetLoaders");
+		}
+	}
+	else
+	{
+		CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+	}
 
 	UObject* Reloaded = LoadObject<UObject>(nullptr, *AssetPath, nullptr, LOAD_None);
 	const bool bSuccess = Reloaded != nullptr;
+	// A package that was already in memory must come back as a new object for
+	// the read to be trustworthy. Same pointer means the editor kept its copy.
+	const bool bReplaced = PreviousObject == nullptr || !PreviousWeak.IsValid() || Reloaded != PreviousObject;
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
 	Result->SetStringField(TEXT("packageName"), PackageName);
-	Result->SetBoolField(TEXT("reloaded"), bSuccess);
+	Result->SetBoolField(TEXT("reloaded"), bSuccess && bReplaced);
+	Result->SetStringField(TEXT("method"), ReloadMethod);
+	Result->SetBoolField(TEXT("wasLoaded"), PreviousObject != nullptr);
+	Result->SetBoolField(TEXT("objectReplaced"), bReplaced);
+	if (bWasDirty) Result->SetBoolField(TEXT("discardedUnsavedChanges"), true);
 	if (bClosedEditor) Result->SetBoolField(TEXT("closedOpenEditor"), true);
 	if (Reloaded) Result->SetStringField(TEXT("class"), Reloaded->GetClass()->GetName());
 	if (!bSuccess)
 	{
-		Result->SetStringField(TEXT("error"), TEXT("LoadObject returned null after reset; the package file may be corrupt or contain a class the editor cannot resolve."));
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), ReloadError.IsEmpty()
+			? TEXT("LoadObject returned null after reset; the package file may be corrupt or contain a class the editor cannot resolve.")
+			: ReloadError);
+	}
+	else if (!bReplaced)
+	{
+		// Loud rather than misleading: the caller would otherwise read stale
+		// container values and conclude the file on disk was wrong (#820).
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), FString::Printf(
+			TEXT("Package '%s' could not be released, so the object still holds its pre-reload state. Values read now may be stale. Close anything referencing it, or restart the editor.%s"),
+			*PackageName, ReloadError.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(" Editor reported: %s"), *ReloadError)));
 	}
 	return MCPResult(Result);
 }
@@ -2929,6 +3012,15 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetAssetProperty(const TSharedPtr<FJsonOb
 	FString PrevValue;
 	FinalProp->ExportText_Direct(PrevValue, ValuePtr, ValuePtr, nullptr, PPF_None);
 
+	// #820: a rollback built from export text replays as an empty map when the
+	// key is a struct. Keep the structured previous value for those properties.
+	const bool bMapBearing = MCPPropertyText::ContainsMap(FinalProp);
+	TSharedPtr<FJsonValue> PrevStructured;
+	if (bMapBearing)
+	{
+		PrevStructured = FMCPJsonSerializer::SerializeValue(ValuePtr, FinalProp);
+	}
+
 	Asset->Modify();
 	if (LeafOwner && LeafOwner != Asset) LeafOwner->Modify();
 	FString SetErr;
@@ -2950,11 +3042,23 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetAssetProperty(const TSharedPtr<FJsonOb
 	Result->SetStringField(TEXT("propertyName"), PropertyName);
 	Result->SetStringField(TEXT("previousValue"), PrevValue);
 	Result->SetStringField(TEXT("value"), NewValue);
+	if (bMapBearing)
+	{
+		Result->SetNumberField(TEXT("mapPairCount"), MCPPropertyText::CountMapPairs(FinalProp, ValuePtr));
+		Result->SetField(TEXT("valueJson"), FMCPJsonSerializer::SerializeValue(ValuePtr, FinalProp));
+	}
 
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("assetPath"), AssetPath);
 	Payload->SetStringField(TEXT("propertyName"), PropertyName);
-	Payload->SetStringField(TEXT("value"), PrevValue);
+	if (PrevStructured.IsValid())
+	{
+		Payload->SetField(TEXT("value"), PrevStructured);
+	}
+	else
+	{
+		Payload->SetStringField(TEXT("value"), PrevValue);
+	}
 	MCPSetRollback(Result, TEXT("set_asset_property"), Payload);
 	return MCPResult(Result);
 }
