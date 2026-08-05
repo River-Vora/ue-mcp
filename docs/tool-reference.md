@@ -20,6 +20,10 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 |--------|-------------|
 | `get_status` | Check server mode and editor connection. Also reports pluginBuildStale when the compiled bridge is older than its source, which is the real cause of 'Unknown method' on handlers that do exist (#785) |
 | `set_project` | Switch project: moves both path resolution and the editor connection to the new .uproject. Params: `projectPath` |
+| `list_editors` | List every editor session this server drives: name, project, bridge port, whether the socket is connected, whether anything is answering on that port, and which session untargeted calls fall through to (#817) |
+| `use_editor` | Make one editor session the default target for untargeted calls. Does not change the session set and never touches any editor process. Params: `editorTarget (session name, project name, or .uproject path) (#817)` |
+| `add_editor` | Register another project as an addressable editor session, with its own bridge connection and port. Optionally launch its editor. Every category then accepts editor="<name>" to run a call there. Params: `projectPath, editorName? (defaults to the project name), start? (launch the editor and wait for it to be ready), timeout? (seconds, default 300) (#817)` |
+| `drop_editor` | Forget an editor session and close its bridge socket. The editor process is LEFT RUNNING and untouched - this detaches, it does not stop anything (use editor(stop_editor) for that). Params: `editorTarget (#817)` |
 | `get_info` | Read .uproject file details |
 | `read_config` | Read INI config. Params: `configName (e.g. 'Engine', 'Game')` |
 | `search_config` | Search INI files. Params: `query` |
