@@ -18,6 +18,7 @@
 #include "Editor.h"
 #include "FileHelpers.h"
 #include "ObjectTools.h"
+#include "PackageTools.h"
 #include "Exporters/Exporter.h"
 #include "AssetExportTask.h"
 #include "UObject/UObjectGlobals.h"
@@ -2921,28 +2922,88 @@ TSharedPtr<FJsonValue> FAssetHandlers::ForceReload(const TSharedPtr<FJsonObject>
 		}
 	}
 
-	// Reset loaders on the existing package (if any) and force a GC pass so
-	// the in-memory pointer is genuinely released before reload. Without
-	// this, LoadObject hands back the same broken instance.
-	if (UPackage* ExistingPkg = FindPackage(nullptr, *PackageName))
+	// #820: a Blueprint's generated class and CDO survive ResetLoaders, so the
+	// old path handed back the same CDO and container properties (a TMap above
+	// all) still read their pre-reload contents while scalars looked restored.
+	// UPackageTools::ReloadPackages is the editor's own re-read: it rebuilds the
+	// package, recompiles the Blueprint and reinstances against the new class.
+	// A package the editor refuses to release is reported, not papered over.
+	UPackage* ExistingPkg = FindPackage(nullptr, *PackageName);
+	UObject* PreviousObject = StaticFindObject(UObject::StaticClass(), nullptr, *AssetPath);
+	const TWeakObjectPtr<UObject> PreviousWeak(PreviousObject);
+	const bool bWasDirty = ExistingPkg != nullptr && ExistingPkg->IsDirty();
+	const bool bDiscardUnsaved = OptionalBool(Params, TEXT("discardUnsaved"), false);
+	if (bWasDirty && !bDiscardUnsaved)
 	{
-		ResetLoaders(ExistingPkg);
-		ExistingPkg->ClearFlags(RF_WasLoaded);
+		return MCPError(FString::Printf(
+			TEXT("Package '%s' has unsaved changes; reloading would discard them. Save it first, or pass discardUnsaved=true."),
+			*PackageName));
 	}
-	CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+
+	FString ReloadMethod = TEXT("load");
+	FString ReloadError;
+	if (ExistingPkg)
+	{
+		FText PackageToolsError;
+		TArray<UPackage*> ToReload;
+		ToReload.Add(ExistingPkg);
+		const bool bChanged = UPackageTools::ReloadPackages(
+			ToReload, PackageToolsError, EReloadPackagesInteractionMode::AssumePositive);
+		ReloadMethod = TEXT("reloadPackages");
+		if (!PackageToolsError.IsEmpty())
+		{
+			ReloadError = PackageToolsError.ToString();
+		}
+
+		if (!bChanged)
+		{
+			// Fall back to the loader reset, which recovers the half-shutdown
+			// state ReloadPackages will not touch (#279).
+			if (UPackage* StillThere = FindPackage(nullptr, *PackageName))
+			{
+				ResetLoaders(StillThere);
+				StillThere->ClearFlags(RF_WasLoaded);
+			}
+			CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+			ReloadMethod = TEXT("resetLoaders");
+		}
+	}
+	else
+	{
+		CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+	}
 
 	UObject* Reloaded = LoadObject<UObject>(nullptr, *AssetPath, nullptr, LOAD_None);
 	const bool bSuccess = Reloaded != nullptr;
+	// A package that was already in memory must come back as a new object for
+	// the read to be trustworthy. Same pointer means the editor kept its copy.
+	const bool bReplaced = PreviousObject == nullptr || !PreviousWeak.IsValid() || Reloaded != PreviousObject;
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
 	Result->SetStringField(TEXT("packageName"), PackageName);
-	Result->SetBoolField(TEXT("reloaded"), bSuccess);
+	Result->SetBoolField(TEXT("reloaded"), bSuccess && bReplaced);
+	Result->SetStringField(TEXT("method"), ReloadMethod);
+	Result->SetBoolField(TEXT("wasLoaded"), PreviousObject != nullptr);
+	Result->SetBoolField(TEXT("objectReplaced"), bReplaced);
+	if (bWasDirty) Result->SetBoolField(TEXT("discardedUnsavedChanges"), true);
 	if (bClosedEditor) Result->SetBoolField(TEXT("closedOpenEditor"), true);
 	if (Reloaded) Result->SetStringField(TEXT("class"), Reloaded->GetClass()->GetName());
 	if (!bSuccess)
 	{
-		Result->SetStringField(TEXT("error"), TEXT("LoadObject returned null after reset; the package file may be corrupt or contain a class the editor cannot resolve."));
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), ReloadError.IsEmpty()
+			? TEXT("LoadObject returned null after reset; the package file may be corrupt or contain a class the editor cannot resolve.")
+			: ReloadError);
+	}
+	else if (!bReplaced)
+	{
+		// Loud rather than misleading: the caller would otherwise read stale
+		// container values and conclude the file on disk was wrong (#820).
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), FString::Printf(
+			TEXT("Package '%s' could not be released, so the object still holds its pre-reload state. Values read now may be stale. Close anything referencing it, or restart the editor.%s"),
+			*PackageName, ReloadError.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(" Editor reported: %s"), *ReloadError)));
 	}
 	return MCPResult(Result);
 }
