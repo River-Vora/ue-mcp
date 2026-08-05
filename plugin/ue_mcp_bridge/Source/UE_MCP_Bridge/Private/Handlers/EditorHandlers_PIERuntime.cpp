@@ -33,6 +33,7 @@
 #include "Subsystems/EngineSubsystem.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Subsystems/WorldSubsystem.h"
+#include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
 #include "UObject/GCObjectScopeGuard.h"
 
@@ -191,6 +192,27 @@ namespace
 
 		OutError = FString::Printf(TEXT("Unknown target '%s'. Use gameinstance|gamemode|gamestate|playercontroller|playerpawn|subsystem, or pass objectPath."), *Target);
 		return nullptr;
+	}
+
+	/**
+	 * #802: match a requested property name against a reflected one, accepting
+	 * the spelling the Details panel shows. A Blueprint variable declared as
+	 * WorldContextObject is displayed (and asked for) as "World Context Object",
+	 * and a bool bIsActive is displayed as "Is Active", so an exact-name filter
+	 * reports a property that plainly exists as missing.
+	 */
+	bool PropertyNameMatches(const FProperty* Prop, const FString& Requested)
+	{
+		if (!Prop) return false;
+		const FString Actual = Prop->GetName();
+		if (Actual.Equals(Requested, ESearchCase::IgnoreCase)) return true;
+
+		const FString Squashed = Requested.Replace(TEXT(" "), TEXT(""));
+		if (Squashed.IsEmpty()) return false;
+		if (Actual.Equals(Squashed, ESearchCase::IgnoreCase)) return true;
+		// The display name of a bool drops the Unreal "b" prefix.
+		if (Prop->IsA<FBoolProperty>() && Actual.Equals(TEXT("b") + Squashed, ESearchCase::IgnoreCase)) return true;
+		return false;
 	}
 
 	/** Marshal JSON args into a UFunction frame, call it, and read outputs back. */
@@ -506,7 +528,12 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 
 	TSharedPtr<FJsonObject> Props = MakeShared<FJsonObject>();
 	TArray<TSharedPtr<FJsonValue>> Missing;
-	TSet<FString> Emitted;
+	// Tracked per requested name rather than per emitted name: a request spelled
+	// the way the Details panel spells it ("World Context Object") resolves to a
+	// property whose reflected name is different, and comparing the two strings
+	// afterwards would report the match as missing.
+	TArray<bool> WantedMatched;
+	WantedMatched.Init(false, Wanted.Num());
 	int32 Count = 0;
 	// Bound the response. Exporting every reflected property of something like
 	// a GameState with replicated arrays builds a payload big enough to drop
@@ -519,16 +546,20 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 	{
 		FProperty* P = *It;
 		if (!P) continue;
-		if (Wanted.Num() > 0 && !Wanted.ContainsByPredicate(
-				[&](const FString& N) { return N.Equals(P->GetName(), ESearchCase::IgnoreCase); }))
+		if (Wanted.Num() > 0)
 		{
-			continue;
+			int32 WantedIndex = INDEX_NONE;
+			for (int32 i = 0; i < Wanted.Num(); ++i)
+			{
+				if (PropertyNameMatches(P, Wanted[i])) { WantedIndex = i; break; }
+			}
+			if (WantedIndex == INDEX_NONE) continue;
+			// Marked before the cap check so a capped-but-real property is not
+			// reported under missingProperties, which means "no such property".
+			WantedMatched[WantedIndex] = true;
 		}
 		if (Count >= MaxProperties)
 		{
-			// Record it as seen so a capped-but-real property is not reported
-			// under missingProperties, which means "no such property".
-			Emitted.Add(P->GetName().ToLower());
 			++Skipped;
 			continue;
 		}
@@ -540,16 +571,15 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetObjectProperties(const TSharedPtr<FJs
 			++TruncatedValues;
 		}
 		Props->SetStringField(P->GetName(), S);
-		Emitted.Add(P->GetName().ToLower());
 		++Count;
 	}
 	// Name a requested property that does not exist, so a typo is reported
 	// rather than quietly returning an empty object.
-	for (const FString& N : Wanted)
+	for (int32 i = 0; i < Wanted.Num(); ++i)
 	{
-		if (!Emitted.Contains(N.ToLower()))
+		if (!WantedMatched[i])
 		{
-			Missing.Add(MakeShared<FJsonValueString>(N));
+			Missing.Add(MakeShared<FJsonValueString>(Wanted[i]));
 		}
 	}
 
@@ -1010,5 +1040,332 @@ TSharedPtr<FJsonValue> FEditorHandlers::SetMovementMode(const TSharedPtr<FJsonOb
 		Result->SetStringField(TEXT("modeNote"),
 			TEXT("This is the mode as of this call. CharacterMovement re-evaluates on the next tick and can leave it (e.g. Swimming outside a water volume falls back to Falling) - sample it again after a tick to confirm it held."));
 	}
+	return MCPResult(Result);
+}
+
+namespace
+{
+	/** Resolve a class from a short name, a /Script path, or a Blueprint asset
+	 *  path. A Blueprint path names the asset, not the class it generates, so
+	 *  "/Game/UI/WBP_Hud" is retried as "/Game/UI/WBP_Hud.WBP_Hud_C". */
+	UClass* ResolveClassSpec(const FString& Spec)
+	{
+		if (Spec.IsEmpty()) return nullptr;
+		if (Spec.Contains(TEXT("/")))
+		{
+			if (UClass* Direct = LoadObject<UClass>(nullptr, *Spec)) return Direct;
+			if (!Spec.EndsWith(TEXT("_C")))
+			{
+				FString Path = Spec;
+				if (!Path.Contains(TEXT(".")))
+				{
+					FString Leaf;
+					Path.Split(TEXT("/"), nullptr, &Leaf, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+					Path = Path + TEXT(".") + Leaf;
+				}
+				if (UClass* Generated = LoadObject<UClass>(nullptr, *(Path + TEXT("_C")))) return Generated;
+			}
+			return nullptr;
+		}
+		if (UClass* ByName = FindFirstObject<UClass>(*Spec, EFindFirstObjectOptions::None)) return ByName;
+		return FindClassByShortName(Spec);
+	}
+
+	/** World kind as a short string, so a caller can tell an editor-world hit
+	 *  from a PIE-world one without parsing the UEDPIE prefix out of the path. */
+	FString DescribeWorldType(const UWorld* World)
+	{
+		if (!World) return FString();
+		switch (World->WorldType)
+		{
+			case EWorldType::Editor:        return TEXT("editor");
+			case EWorldType::PIE:           return TEXT("pie");
+			case EWorldType::Game:          return TEXT("game");
+			case EWorldType::EditorPreview: return TEXT("editorPreview");
+			case EWorldType::GamePreview:   return TEXT("gamePreview");
+			case EWorldType::Inactive:      return TEXT("inactive");
+			default:                        return TEXT("none");
+		}
+	}
+
+	TSharedPtr<FJsonObject> DescribeLiveObject(UObject* Obj)
+	{
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("objectPath"), Obj->GetPathName());
+		Entry->SetStringField(TEXT("name"), Obj->GetName());
+		Entry->SetStringField(TEXT("class"), Obj->GetClass()->GetName());
+		Entry->SetStringField(TEXT("classPath"), Obj->GetClass()->GetPathName());
+		Entry->SetStringField(TEXT("outerPath"), Obj->GetOuter() ? Obj->GetOuter()->GetPathName() : FString());
+		Entry->SetBoolField(TEXT("isDefaultObject"), Obj->HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject));
+		if (UWorld* OwningWorld = Obj->GetTypedOuter<UWorld>())
+		{
+			Entry->SetStringField(TEXT("world"), OwningWorld->GetPathName());
+			Entry->SetStringField(TEXT("worldType"), DescribeWorldType(OwningWorld));
+		}
+		if (AActor* Actor = Cast<AActor>(Obj))
+		{
+			Entry->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
+		}
+		return Entry;
+	}
+}
+
+// #802: find a live UObject and report the path that addresses it.
+// invoke_object_function and get_object_properties both accept an objectPath,
+// but nothing produced one. An instance that only exists at runtime (an editor
+// utility widget just spawned, a UMG widget, a component subobject) has a path
+// no caller can guess, so every session that needed one called
+// unreal.find_object from Python to get it.
+TSharedPtr<FJsonValue> FEditorHandlers::FindLiveObjects(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString ObjectPath = OptionalString(Params, TEXT("objectPath"));
+	const FString ClassSpec = OptionalString(Params, TEXT("className"));
+	const FString NameContains = OptionalString(Params, TEXT("nameContains"));
+	const FString OuterPath = OptionalString(Params, TEXT("outerPath"));
+	const bool bIncludeDefaults = OptionalBool(Params, TEXT("includeDefaults"), false);
+	const bool bExactClass = OptionalBool(Params, TEXT("exactClass"), false);
+	const int32 Limit = FMath::Clamp(OptionalInt(Params, TEXT("limit"), 50), 1, 1000);
+
+	// An exact path is a lookup, not a search: report whether it resolves
+	// rather than failing the call, because "is this instance still there" is
+	// half of what the path is asked about.
+	if (!ObjectPath.IsEmpty())
+	{
+		// FindObject first: in PIE the live instance already exists, and loading
+		// would resolve the editor-world asset of the same name instead.
+		UObject* Found = FindObject<UObject>(nullptr, *ObjectPath);
+		if (!Found) Found = LoadObject<UObject>(nullptr, *ObjectPath);
+
+		auto Result = MCPSuccess();
+		Result->SetStringField(TEXT("objectPath"), ObjectPath);
+		Result->SetBoolField(TEXT("found"), Found != nullptr);
+		if (!Found)
+		{
+			Result->SetStringField(TEXT("note"), TEXT("No object at that path. Search for it with className and/or nameContains instead."));
+			return MCPResult(Result);
+		}
+		// A pending-kill object still answers to its path, and calling into it
+		// is the crash the caller is walking towards. Report it here.
+		Result->SetBoolField(TEXT("isValid"), IsValid(Found));
+		Result->SetObjectField(TEXT("object"), DescribeLiveObject(Found));
+		return MCPResult(Result);
+	}
+
+	if (ClassSpec.IsEmpty() && NameContains.IsEmpty())
+	{
+		return MCPError(TEXT("Provide 'objectPath' to resolve one object, or 'className' and/or 'nameContains' to search."));
+	}
+
+	UClass* FilterClass = nullptr;
+	if (!ClassSpec.IsEmpty())
+	{
+		FilterClass = ResolveClassSpec(ClassSpec);
+		if (!FilterClass)
+		{
+			return MCPError(FString::Printf(
+				TEXT("Class not found: %s. Use a short name (StaticMeshActor), a /Script path (/Script/Engine.StaticMeshActor), a generated class name (WBP_Hud_C) or a Blueprint asset path. A Blueprint class only exists once its asset is loaded."),
+				*ClassSpec));
+		}
+	}
+
+	// world defaults to every world. A scope is a filter here, and defaulting it
+	// would hide the editor-world instance an agent is looking for whenever PIE
+	// happens to be running.
+	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("any"));
+	UWorld* ScopeWorld = nullptr;
+	const bool bScopeToWorld = !WorldScope.Equals(TEXT("any"), ESearchCase::IgnoreCase);
+	if (bScopeToWorld)
+	{
+		ScopeWorld = ResolveWorldFromParams(Params, TEXT("editor"));
+		if (!ScopeWorld)
+		{
+			return MCPError(FString::Printf(TEXT("No world for scope '%s'. Use world=any to search every world."), *WorldScope));
+		}
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Matches;
+	int32 TotalMatches = 0;
+	auto Consider = [&](UObject* Obj)
+	{
+		if (!IsValid(Obj)) return;
+		if (!bIncludeDefaults && Obj->HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject)) return;
+		if (!NameContains.IsEmpty() && !Obj->GetName().Contains(NameContains)) return;
+		if (!OuterPath.IsEmpty())
+		{
+			bool bUnderOuter = false;
+			for (UObject* Outer = Obj->GetOuter(); Outer; Outer = Outer->GetOuter())
+			{
+				if (Outer->GetPathName() == OuterPath) { bUnderOuter = true; break; }
+			}
+			if (!bUnderOuter) return;
+		}
+		if (bScopeToWorld && Obj->GetTypedOuter<UWorld>() != ScopeWorld) return;
+
+		++TotalMatches;
+		if (Matches.Num() < Limit)
+		{
+			Matches.Add(MakeShared<FJsonValueObject>(DescribeLiveObject(Obj)));
+		}
+	};
+
+	if (FilterClass)
+	{
+		// Hash lookup rather than a full object scan: a loaded editor holds
+		// millions of live UObjects and a class filter is the common case.
+		TArray<UObject*> Candidates;
+		GetObjectsOfClass(FilterClass, Candidates, !bExactClass,
+			bIncludeDefaults ? RF_NoFlags : RF_ClassDefaultObject);
+		for (UObject* Obj : Candidates) Consider(Obj);
+	}
+	else
+	{
+		for (TObjectIterator<UObject> It; It; ++It) Consider(*It);
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetArrayField(TEXT("matches"), Matches);
+	Result->SetNumberField(TEXT("count"), Matches.Num());
+	Result->SetNumberField(TEXT("totalMatches"), TotalMatches);
+	Result->SetBoolField(TEXT("truncated"), TotalMatches > Matches.Num());
+	if (FilterClass)
+	{
+		Result->SetStringField(TEXT("resolvedClass"), FilterClass->GetPathName());
+	}
+	if (ScopeWorld)
+	{
+		Result->SetStringField(TEXT("world"), ScopeWorld->GetPathName());
+	}
+	if (TotalMatches == 0)
+	{
+		Result->SetStringField(TEXT("note"), TEXT("Nothing matched. A Blueprint class only exists once its asset is loaded, and an instance only exists once something spawns it. Pass includeDefaults=true to include class default objects."));
+	}
+	return MCPResult(Result);
+}
+
+namespace
+{
+	/**
+	 * #802: rewrite the leading token of a dotted property path to the reflected
+	 * name when the caller used the Details-panel spelling. Only the leading
+	 * token needs it: that is the one an agent copies out of the editor UI, and
+	 * the rest of the path is typed against what this handler reports back.
+	 */
+	FString CanonicalizeLeadingToken(UStruct* Owner, const FString& PropertyPath)
+	{
+		if (!Owner) return PropertyPath;
+
+		FString Head = PropertyPath;
+		FString Tail;
+		int32 DotPos = INDEX_NONE;
+		if (PropertyPath.FindChar(TEXT('.'), DotPos))
+		{
+			Head = PropertyPath.Left(DotPos);
+			Tail = PropertyPath.RightChop(DotPos);
+		}
+
+		FString Bare = Head;
+		FString IndexSuffix;
+		int32 BracketPos = INDEX_NONE;
+		if (Bare.FindChar(TEXT('['), BracketPos))
+		{
+			IndexSuffix = Bare.RightChop(BracketPos);
+			Bare = Bare.Left(BracketPos);
+		}
+
+		if (Owner->FindPropertyByName(FName(*Bare))) return PropertyPath;
+		for (TFieldIterator<FProperty> It(Owner, EFieldIteratorFlags::IncludeSuper); It; ++It)
+		{
+			if (PropertyNameMatches(*It, Bare))
+			{
+				return It->GetName() + IndexSuffix + Tail;
+			}
+		}
+		return PropertyPath;
+	}
+}
+
+// #802: write a reflected property on a live UObject instance, with the same
+// targeting as invoke_object_function. editor(set_property) is the asset path:
+// it marks the package dirty and saves it, which is wrong for a PIE actor or a
+// spawned widget, so setting a variable on a live instance to reproduce or
+// unblock a bug went through Python.
+TSharedPtr<FJsonValue> FEditorHandlers::SetObjectProperty(const TSharedPtr<FJsonObject>& Params)
+{
+	FString PropertyName;
+	if (auto Err = RequireString(Params, TEXT("propertyName"), PropertyName)) return Err;
+
+	TSharedPtr<FJsonValue> NewValue = Params->TryGetField(TEXT("value"));
+	if (!NewValue.IsValid()) return MCPError(TEXT("Missing 'value' parameter"));
+
+	UWorld* World = ResolveWorldFromParams(Params, TEXT("auto"));
+
+	FString Description, Error;
+	UObject* Target = ResolveRuntimeObject(Params, World, Description, Error);
+	if (!Target) return MCPError(Error);
+
+	const FString ResolvedName = CanonicalizeLeadingToken(Target->GetClass(), PropertyName);
+
+	FProperty* Prop = nullptr;
+	void* ValueAddr = nullptr;
+	UObject* LeafOwner = nullptr;
+	FString ResolveError;
+	if (!MCPJsonProperty::ResolveDottedPath(Target, ResolvedName, Prop, ValueAddr, LeafOwner, ResolveError))
+	{
+		// Guessing a variable name is the main failure mode, exactly as it is
+		// for a function name, so answer with what the class does have.
+		TArray<FString> Names;
+		for (TFieldIterator<FProperty> It(Target->GetClass(), EFieldIteratorFlags::IncludeSuper); It && Names.Num() < 40; ++It)
+		{
+			Names.Add(It->GetName());
+		}
+		return MCPError(FString::Printf(
+			TEXT("%s on %s. Available: [%s]"),
+			*ResolveError, *Target->GetClass()->GetName(), *FString::Join(Names, TEXT(", "))));
+	}
+
+	UObject* ExportOwner = LeafOwner ? LeafOwner : Target;
+	FString PreviousValue;
+	Prop->ExportTextItem_Direct(PreviousValue, ValueAddr, nullptr, ExportOwner, PPF_None);
+
+	FString SetError;
+	if (!MCPJsonProperty::SetJsonOnProperty(Prop, ValueAddr, NewValue, SetError))
+	{
+		return MCPError(FString::Printf(TEXT("Failed to set '%s': %s"), *ResolvedName, *SetError));
+	}
+
+	// Read back rather than echoing the request: a clamped or coerced write
+	// otherwise reports the value the caller asked for and not the one the
+	// object now holds.
+	FString CurrentValue;
+	Prop->ExportTextItem_Direct(CurrentValue, ValueAddr, nullptr, ExportOwner, PPF_None);
+
+	// Deliberately no Modify/MarkPackageDirty/save. A live instance is not an
+	// asset, and dirtying a PIE package or a spawned widget's outer would ask
+	// the editor to save something that does not exist on disk. Asset writes
+	// belong in editor(set_property).
+	const bool bPostEditChange = OptionalBool(Params, TEXT("postEditChange"), false);
+	if (bPostEditChange)
+	{
+		FPropertyChangedEvent ChangeEvent(Prop);
+		ExportOwner->PostEditChangeProperty(ChangeEvent);
+	}
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("objectPath"), Description);
+	Result->SetStringField(TEXT("objectClass"), Target->GetClass()->GetName());
+	Result->SetStringField(TEXT("propertyName"), PropertyName);
+	Result->SetStringField(TEXT("resolvedPropertyName"), ResolvedName);
+	Result->SetStringField(TEXT("leafPropertyName"), Prop->GetName());
+	Result->SetStringField(TEXT("type"), Prop->GetCPPType());
+	Result->SetStringField(TEXT("previousValue"), PreviousValue);
+	Result->SetStringField(TEXT("value"), CurrentValue);
+	Result->SetBoolField(TEXT("persisted"), false);
+	if (World)
+	{
+		Result->SetStringField(TEXT("world"), World->GetPathName());
+		Result->SetStringField(TEXT("netMode"), DescribePIENetMode(World));
+	}
+	Result->SetStringField(TEXT("note"), TEXT("Written to the live instance only. It is not saved and does not survive PIE ending or the object being destroyed; use editor(set_property) to write an asset."));
 	return MCPResult(Result);
 }
