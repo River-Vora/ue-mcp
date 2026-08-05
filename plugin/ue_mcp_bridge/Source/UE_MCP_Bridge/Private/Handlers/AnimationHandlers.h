@@ -86,6 +86,13 @@ private:
 	static TSharedPtr<FJsonValue> SetMontageSlot(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AddMontageSection(const TSharedPtr<FJsonObject>& Params);
 
+	// #826: multi-segment montage authoring. UAnimMontage::SlotAnimTracks is not
+	// reachable from script, so appending a second animation to a slot has to
+	// happen here.
+	static TSharedPtr<FJsonValue> AddMontageSegment(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> RemoveMontageSegment(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ListMontageSegments(const TSharedPtr<FJsonObject>& Params);
+
 	// IK Rig (#93)
 	static TSharedPtr<FJsonValue> CreateIKRig(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadIKRig(const TSharedPtr<FJsonObject>& Params);
