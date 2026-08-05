@@ -5,8 +5,15 @@ import type { EditorBridge } from "../../src/bridge.js";
 const SOURCE_MESH = "/Engine/EngineMeshes/SkeletalCube";
 const TEST_MESH = `${TEST_PREFIX}/SKM_ReadBoneRelative`;
 const ACTOR_LABEL = "MCPTest_ReadBoneRelative";
+const UNSCALED_ACTOR_LABEL = "MCPTest_ReadBoneRelativeUnscaled";
 const SAMPLE_SOCKET = "MCPTest_Sample";
 const REFERENCE_SOCKET = "MCPTest_Reference";
+
+function socketLocation(result: unknown): Record<string, number> {
+  const samples = resultArray(result, "samples") as Array<Record<string, unknown>> | undefined;
+  const transform = samples?.[0]?.transform as Record<string, unknown> | undefined;
+  return (transform?.location ?? {}) as Record<string, number>;
+}
 
 let bridge: EditorBridge;
 let rootBone = "root";
@@ -14,6 +21,7 @@ let rootBone = "root";
 beforeAll(async () => {
   bridge = await getBridge();
   await callBridge(bridge, "delete_actor", { actorLabel: ACTOR_LABEL });
+  await callBridge(bridge, "delete_actor", { actorLabel: UNSCALED_ACTOR_LABEL });
   await callBridge(bridge, "delete_asset", { assetPath: TEST_MESH, force: true });
 
   const duplicate = await callBridge(bridge, "duplicate_asset", {
@@ -45,10 +53,22 @@ beforeAll(async () => {
     scale: { x: 2, y: 3, z: 1 },
   });
   expect(spawned.ok, spawned.error).toBe(true);
+
+  // Same mesh, uniform scale, somewhere else entirely. Component space is
+  // defined to be independent of both, so the two actors must read identically.
+  const spawnedUnscaled = await callBridge(bridge, "spawn_skeletal_mesh_actor", {
+    skeletalMesh: TEST_MESH,
+    label: UNSCALED_ACTOR_LABEL,
+    location: { x: -640, y: 55, z: 12 },
+    rotation: { pitch: -23, yaw: 133, roll: 61 },
+    scale: { x: 1, y: 1, z: 1 },
+  });
+  expect(spawnedUnscaled.ok, spawnedUnscaled.error).toBe(true);
 });
 
 afterAll(async () => {
   await callBridge(bridge, "delete_actor", { actorLabel: ACTOR_LABEL });
+  await callBridge(bridge, "delete_actor", { actorLabel: UNSCALED_ACTOR_LABEL });
   await callBridge(bridge, "delete_asset", { assetPath: TEST_MESH, force: true });
   disconnectBridge();
 });
@@ -90,6 +110,31 @@ describe("editor.read_bone_transforms relativeTo", () => {
     expect(boneLocation?.x).toBeCloseTo(10, 3);
     expect(boneLocation?.y).toBeCloseTo(2, 3);
     expect(boneLocation?.z).toBeCloseTo(0, 3);
+  });
+
+  it("reports socket component space free of the component's non-uniform scale", async () => {
+    const scaled = await callBridge(bridge, "read_bone_transforms", {
+      actorLabel: ACTOR_LABEL,
+      bones: [SAMPLE_SOCKET],
+      space: "component",
+      world: "editor",
+    });
+    expect(scaled.ok, scaled.error).toBe(true);
+    expect((scaled.result as Record<string, unknown>).space).toBe("component");
+
+    const unscaled = await callBridge(bridge, "read_bone_transforms", {
+      actorLabel: UNSCALED_ACTOR_LABEL,
+      bones: [SAMPLE_SOCKET],
+      space: "component",
+      world: "editor",
+    });
+    expect(unscaled.ok, unscaled.error).toBe(true);
+
+    const scaledLocation = socketLocation(scaled.result);
+    const unscaledLocation = socketLocation(unscaled.result);
+    expect(scaledLocation.x).toBeCloseTo(unscaledLocation.x, 3);
+    expect(scaledLocation.y).toBeCloseTo(unscaledLocation.y, 3);
+    expect(scaledLocation.z).toBeCloseTo(unscaledLocation.z, 3);
   });
 
   it("fails clearly when relativeTo is unknown", async () => {
