@@ -85,7 +85,8 @@
     "generate": "tsx scripts/generate-default-config.ts",
     "generate:metadata": "tsx scripts/generate-tool-metadata.ts",
     "prepublishOnly": "npx tsc && tsx scripts/generate-default-config.ts && tsx scripts/generate-tool-metadata.ts",
-    "gen:epic-docs": "npx tsc && node scripts/gen-epic-docs.mjs"
+    "gen:epic-docs": "npx tsc && node scripts/gen-epic-docs.mjs",
+    "prepare": "husky"
   },
   "dependencies": {
     "@db-lyon/flowkit": "~0.5.3",
@@ -98,6 +99,7 @@
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
+    "husky": "^9.1.7",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.2.4"

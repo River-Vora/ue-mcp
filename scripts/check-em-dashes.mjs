@@ -200,6 +200,22 @@ function main() {
   }
 
   const files = named ?? trackedFiles();
+
+  // A tracked file that vanished between `ls-files` and here is a race worth
+  // ignoring. A file named explicitly on the command line is not: the caller
+  // asked for it, and silently skipping an unreadable one reports a pass for
+  // something that was never read. The git hooks depend on this distinction,
+  // because they pass paths and trust the exit code.
+  if (named) {
+    const unreadable = named.filter((f) => readTextFile(`${process.cwd()}/${f}`) === null);
+    if (unreadable.length > 0) {
+      for (const f of unreadable) {
+        console.error(`::error::Could not read '${f}'. Paths are resolved relative to the repository root.`);
+      }
+      process.exit(2);
+    }
+  }
+
   const findings = scanFiles(files);
   if (range) findings.push(...scanCommitMessages(range));
 

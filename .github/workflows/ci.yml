@@ -17,9 +17,11 @@ concurrency:
 permissions:
   contents: read
 
-# The em dash gate used to be a job here. It moved to em-dash.yml so it can
-# run on every branch push without dragging this workflow's install, tests and
-# audit along with it. It is still not in `needs:` for publish.
+# The em dash gate is not here, and no longer has a workflow of its own. It is
+# a two-second check that was costing a hosted-runner slot on every branch push,
+# and when runners are unavailable that turns a release into a fifteen-minute
+# wait on a queue. It runs in .husky/pre-commit and .husky/commit-msg instead,
+# which rejects the character before the commit exists.
 jobs:
   build:
     runs-on: ubuntu-latest

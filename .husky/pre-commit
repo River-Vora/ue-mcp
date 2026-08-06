@@ -1,0 +1,19 @@
+# Local gates, so a bad commit never costs a CI runner.
+#
+# Both of these used to run (or belonged) in CI, where a queued hosted runner
+# turned a two-second check into a fifteen-minute wait on a release. They are
+# cheap enough to run here, on the way in.
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+
+# Em dashes, scoped to what is actually staged.
+if [ -n "$staged" ]; then
+  # shellcheck disable=SC2086
+  node scripts/check-em-dashes.mjs --files $staged || exit 1
+fi
+
+# Duplicate file-local helpers, which the unity build turns into a redefinition
+# on somebody else's machine. Only worth running when plugin sources changed.
+if echo "$staged" | grep -q '^plugin/.*\.cpp$'; then
+  node scripts/audit-unity-collisions.mjs || exit 1
+fi
