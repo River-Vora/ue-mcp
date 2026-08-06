@@ -120,24 +120,6 @@ namespace
 	const TCHAR* const MeshMatStatusFailed       = TEXT("failed");
 	const TCHAR* const MeshMatStatusSkipped      = TEXT("skipped");
 
-	// Mirrors IsProtectedAssetPath in AssetHandlers.cpp, which is file-local to
-	// that translation unit. Keep the two rule sets identical: a write path that
-	// enforces a weaker rule than its neighbours is how engine content gets
-	// mutated through the bridge.
-	bool IsProtectedMeshMaterialPath(const FString& Path)
-	{
-		FString Normalized = Path;
-		Normalized.TrimStartAndEndInline();
-		if (Normalized.IsEmpty()) return false;
-		if (!Normalized.StartsWith(TEXT("/"))) Normalized = TEXT("/") + Normalized;
-		const FString Lower = Normalized.ToLower();
-		if (Lower.StartsWith(TEXT("/engine/"))) return true;
-		if (Lower.StartsWith(TEXT("/memory/"))) return true;
-		if (Lower.StartsWith(TEXT("/temp/"))) return true;
-		if (Lower.Contains(TEXT("/script/"))) return true;
-		return false;
-	}
-
 	struct FPreparedMeshMaterialAssignment
 	{
 		int32 ItemIndex = 0;
@@ -297,7 +279,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetMeshMaterialsBatch(const TSharedPtr<FJ
 		}
 		Item.AssetPath = AssetPath;
 
-		if (IsProtectedMeshMaterialPath(AssetPath))
+		if (MCPIsProtectedAssetPath(AssetPath))
 		{
 			Reject(MeshMatStatusProtected, FString::Printf(
 				TEXT("Refusing to mutate protected mount: %s. Engine, /Script/, /Memory/, /Temp/ are read-only via the bridge."),

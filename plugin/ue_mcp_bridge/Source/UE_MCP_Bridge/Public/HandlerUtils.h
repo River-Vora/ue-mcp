@@ -135,6 +135,36 @@ inline TSharedPtr<FJsonValue> MCPCheckAssetExists(
 	return TSharedPtr<FJsonValue>();
 }
 
+/** Protected mount guardrail. Engine-shipped content (/Engine/, /Script/,
+ *  /Memory/, /Temp/) and Verse runtime classes must never be mutated through
+ *  the bridge: UEditorAssetLibrary::DeleteAsset will happily destroy files
+ *  under <engineRoot>/Engine/Content/ if not stopped. Every handler that
+ *  deletes, moves, renames or writes an asset calls this. Plugin content roots
+ *  (mounted under /<PluginName>/) are NOT protected; per-project plugin content
+ *  is expected to be writable.
+ *
+ *  This lives here rather than as a file-local copy per translation unit
+ *  because the asset handlers are split across several files that share one
+ *  unity blob: duplicate definitions collide at compile time, and independent
+ *  copies drift, which is how a write path ends up enforcing a weaker rule
+ *  than its neighbours. */
+inline bool MCPIsProtectedAssetPath(const FString& Path)
+{
+	FString Normalized = Path;
+	Normalized.TrimStartAndEndInline();
+	if (Normalized.IsEmpty()) return false;
+	// Tolerate the surface form, which may arrive without a leading slash.
+	if (!Normalized.StartsWith(TEXT("/"))) Normalized = TEXT("/") + Normalized;
+	const FString Lower = Normalized.ToLower();
+	if (Lower.StartsWith(TEXT("/engine/"))) return true;
+	if (Lower.StartsWith(TEXT("/memory/"))) return true;
+	if (Lower.StartsWith(TEXT("/temp/"))) return true;
+	// Verse runtime objects surface as /Script/CoreUObject.* etc, so /Script/
+	// is rejected wherever it appears, not just as a prefix.
+	if (Lower.Contains(TEXT("/script/"))) return true;
+	return false;
+}
+
 /** Emit the standard delete_asset rollback record on a create result. */
 inline void MCPSetDeleteAssetRollback(TSharedPtr<FJsonObject> Result, const FString& AssetPath)
 {
