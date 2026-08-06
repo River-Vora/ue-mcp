@@ -30,6 +30,8 @@ flow(action="run", flowName="build_and_check")
 
 That's it. The config is **hot-reloaded on every call** - edit the YAML and run again without restarting the MCP server.
 
+The response carries a `summary` line per step plus a `steps` array holding what each step answered, so an action called inside a flow returns the same data it returns when called directly.
+
 ## Concepts
 
 ### Tasks
@@ -339,7 +341,7 @@ Filter to a specific run with `?runId=<id>`. The runId is returned in the `flow(
 | `step_failed` | When a step errors (in addition to `step_completed`) | `runId`, `flowName`, `step`, `error: { message, name }`, `timestamp` |
 | `run_completed` | After the whole flow finishes (including hook phases + rollback) | `runId`, `flowName`, `success`, `duration`, `stepCount`, `failedStep?`, `timestamp` |
 
-`step_completed` deliberately omits `result.data` because shell outputs and CSV rows can be large. The full data is in the `flow.run` response or in handler returns. If you need live stdout from a long-running shell step, the `shell` task streams chunks through the task logger - that's a separate channel from the SSE event bus.
+`step_completed` deliberately omits `result.data` because shell outputs and CSV rows can be large. The full data is in the `steps` array of the `flow.run` response. If you need live stdout from a long-running shell step, the `shell` task streams chunks through the task logger - that's a separate channel from the SSE event bus.
 
 Keepalive comment lines (`: keepalive <ts>`) fire every 30s during quiet periods so proxies and load balancers don't drop the connection.
 

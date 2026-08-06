@@ -188,6 +188,32 @@ file was in (missing, malformed, or stale with a dead pid), and every port it
 tried. `--port` on the runner and `UE_MCP_TEST_PORT` for the Vitest suites still
 pin the port for unusual setups, and neither weakens the project check above.
 
+### Live Tier
+
+The live tier drives a real editor through the shipped server: the advertised
+surface with an editor attached, per-path dispatch, addressing, gating, and the
+records the bridge publishes.
+
+```bash
+npm run test:live
+```
+
+It attaches to an editor that is **already running** and never starts or stops
+one. The preflight finds the bridge, asks the editor which project it has open,
+prints the target, and aborts with the ports it tried when nothing answers, so
+"no editor" is one message rather than a wall of failed assertions. Like the
+smoke runner, it drives `tests/ue_mcp` and refuses every other project.
+
+- **One editor is enough.** Cases that need more than one editor use a second
+  session for a throwaway project whose editor is not running: a session is
+  registered for every project regardless of editor state, and the session
+  count is what arms targeting, gating and the union refusal.
+- **The leak assertions need the parameter echo**, which can only be armed when
+  the editor process starts. Launch the editor with `UE_MCP_PARAM_ECHO=1` in its
+  environment to include them; without it they skip and the runner says so.
+- `tests/live/matrix.ts` records, case by case, where each assertion lives, and
+  `tests/live/coverage.test.ts` checks every reference still resolves.
+
 ### Test Suites
 
 | Suite | What It Tests |

@@ -58,7 +58,17 @@ The merge style follows the commit count, and writing five commits only to squas
 - **A failure is not automatically a bug.** It says the startup contract moved. Read the diff.
 - **Re-record intentionally** with `npm run golden:record`, then review the diff before committing it. Never edit the JSON by hand.
 - The recording is hermetic: a throwaway project in a temp directory, `UE_MCP_PORT=1` so nothing can be listening, every inherited `UE_MCP_*` variable dropped, and the user-scoped config/state/auth files redirected. Absolute paths are rewritten before serialization and asserted absent, so the file verifies on any machine.
-- Only the editor-down half exists. Plan item 1.10 of #817 also wants the editor-connected half, which needs an Unreal install and therefore cannot live in this tier.
+- The `epic_*` actions enrichment injects are **sorted in the recording**, alongside the path, port and timestamp rewrites. Unreal's toolset registry promises the set of tools, not the sequence, and a restart that reshuffles it would otherwise report a surface change on a healthy editor. Only the snapshot is normalised; the server advertises exactly what it always did. A category's own actions keep their declared order, which is authored and does carry meaning.
+- The editor-connected half (`tests/golden/editor-connected.json`) is the same recording made with a live editor attached, guarded by `tests/live/golden-connected.test.ts` in the live tier because it needs a running editor. Re-record it with `npm run golden:record -- --connected`. The recorder asserts the surface really was enriched from the live editor rather than a cache or the baked snapshot, so the two baselines cannot be recorded from the same source by accident.
+
+### Live tier
+
+`npm run test:live` runs `tests/live/` against an editor that is **already running**, through the shipped server: the connected golden baseline, per-path dispatch and leak assertions, addressing, gating, the union surface, and the records the bridge publishes. It never starts or stops an editor.
+
+- Targets `tests/ue_mcp` only, verified by asking the editor which project it has open, and aborts before sending anything otherwise.
+- One editor is enough. Cases needing more than one use a second session for a project whose editor is not running, since the session count is what arms targeting and gating.
+- The leak assertions need the parameter echo, which is armed at editor startup: launch with `UE_MCP_PARAM_ECHO=1` to include them. Without it they skip and say why.
+- `tests/live/matrix.ts` is the written form of plan item 7.3 of #817: every case, and where its assertion lives (live, engine-free and referenced, owned by the C++ tier, or pending on unshipped work). `tests/live/coverage.test.ts` fails when a reference stops resolving.
 
 ### Clean plugin rebuild recipe
 
@@ -159,6 +169,7 @@ npm run up:build        # Stop editor, build plugin, relaunch
 npm run build           # Build the UE C++ plugin only
 npx tsc --noEmit        # Type-check TS
 npm run test:smoke      # Live smoke tests (tests/ue_mcp only)
+npm run test:live       # Live tier against a running editor (tests/ue_mcp only)
 npm run golden:record   # Re-record tests/golden/editor-down.json (review the diff)
 npm run release:notes   # Compose cumulative stable notes from a version's prereleases
 npm test                # Vitest unit tests
