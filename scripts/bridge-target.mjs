@@ -259,6 +259,71 @@ export function assertTestProjectDir(reportedDir) {
 }
 
 /**
+ * Every checkout on this machine that could be holding the live test project.
+ *
+ * Normally exactly one: this checkout's own `tests/ue_mcp`. A linked worktree
+ * adds the main checkout's copy, because a worktree has no `Saved/` of its own
+ * and no compiled plugin, so the editor a developer has running against this
+ * repo is always the main checkout's project. Discovering it keeps the live
+ * tier runnable from a feature worktree without loosening the guard: every
+ * candidate is still a `tests/ue_mcp` directory holding `ue_mcp.uproject`
+ * inside a checkout of this repository, so no other project can ever qualify.
+ */
+export function liveTestProjectDirs() {
+  const dirs = [];
+  const add = (dir) => {
+    if (!dir) return;
+    const uproject = path.join(dir, "ue_mcp.uproject");
+    if (!fs.existsSync(uproject)) return;
+    if (dirs.some((d) => normalizeProjectRoot(d) === normalizeProjectRoot(dir))) return;
+    dirs.push(dir);
+  };
+
+  add(TEST_PROJECT_DIR);
+
+  // A linked worktree's `.git` is a file pointing at
+  // <main>/.git/worktrees/<name>. Three levels up from that is the checkout
+  // that owns the repository, and therefore the editor.
+  try {
+    const dotGit = path.join(REPO_ROOT, ".git");
+    if (fs.statSync(dotGit).isFile()) {
+      const match = /^gitdir:\s*(.+)$/m.exec(fs.readFileSync(dotGit, "utf8"));
+      if (match) {
+        const mainRoot = path.resolve(match[1].trim(), "..", "..", "..");
+        add(path.join(mainRoot, "tests", "ue_mcp"));
+      }
+    }
+  } catch {
+    // No .git, or an unreadable one: this checkout's own project is the only
+    // candidate, which is the ordinary case anyway.
+  }
+
+  return dirs;
+}
+
+/** True when `reportedDir` is one of the permitted test project directories. */
+export function isLiveTestProjectDir(reportedDir, allowed = liveTestProjectDirs()) {
+  if (!reportedDir) return false;
+  const needle = normalizeProjectRoot(reportedDir);
+  return allowed.some((dir) => normalizeProjectRoot(dir) === needle);
+}
+
+/**
+ * Hard guard for the live tier, with the same contract as
+ * `assertTestProjectDir`: nothing is sent to an editor that has any project
+ * but this repository's test project open.
+ */
+export function assertLiveTestProjectDir(reportedDir, allowed = liveTestProjectDirs()) {
+  if (isLiveTestProjectDir(reportedDir, allowed)) return reportedDir;
+  throw new Error(
+    "Aborting: the connected editor is not this repository's test project.\n" +
+    `  Expected : ${allowed.join("\n             ")}\n` +
+    `  Reported : ${reportedDir ?? "(unknown, is the Python plugin enabled?)"}\n` +
+    "The live tier drives a real editor, so it only ever talks to tests/ue_mcp. Nothing was sent.",
+  );
+}
+
+/**
  * Run the guard over any RPC caller. `call` takes (method, params) and resolves
  * to the raw handler result (or anything containing it); the identity marker is
  * matched out of the stringified value.
