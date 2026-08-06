@@ -114,6 +114,16 @@ export const MATRIX_CASES: MatrixCase[] = [
         title: "records sessions that collapse onto one port, because they cannot be told apart",
       },
       {
+        kind: "engine-free",
+        file: "tests/unit/session.test.ts",
+        title: "folds the case of the path and of the extension, where the filesystem does",
+      },
+      {
+        kind: "engine-free",
+        file: "tests/unit/session.test.ts",
+        title: "keeps projects that differ by more than spelling apart",
+      },
+      {
         kind: "cpp",
         reason:
           "two editors of one project binding two ports is a socket-exclusivity result (plan 0.2), and " +
