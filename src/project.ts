@@ -77,13 +77,27 @@ export interface UeMcpConfig {
 }
 
 /**
+ * True when a path names a `.uproject` file, whatever case the extension is
+ * written in.
+ *
+ * The extension is the only thing telling a project file from the directory
+ * holding one, and every other project-keyed part of the server folds case
+ * (the session key, the derived bridge port, the lockfile path). Reading it
+ * case-sensitively here made `C:\PROJ\GAME.UPROJECT` resolve as a directory,
+ * which fails as "project directory not found" on a path that exists.
+ */
+export function isUProjectPath(candidate: string): boolean {
+  return path.extname(candidate).toLowerCase() === ".uproject";
+}
+
+/**
  * Resolve a user-supplied path (a .uproject, or a directory holding one) to an
  * absolute .uproject path. Pure: it touches no state, so a caller that has to
  * move several things at once can validate the target first and leave
  * everything where it was when the path is bad.
  */
 export function resolveUProjectPath(inputPath: string): string {
-  if (inputPath.endsWith(".uproject")) {
+  if (isUProjectPath(inputPath)) {
     const resolved = path.resolve(inputPath);
     if (!fs.existsSync(resolved)) {
       throw new McpError(ErrorCode.NOT_FOUND, `No .uproject file at ${resolved}`);
@@ -97,7 +111,7 @@ export function resolveUProjectPath(inputPath: string): string {
   } catch {
     throw new McpError(ErrorCode.NOT_FOUND, `Project directory not found: ${inputPath}`);
   }
-  const files = entries.filter((f) => f.endsWith(".uproject"));
+  const files = entries.filter(isUProjectPath);
   if (files.length === 0) {
     throw new McpError(ErrorCode.NOT_FOUND, `No .uproject file found in ${inputPath}`);
   }
@@ -132,7 +146,10 @@ export class ProjectContext {
 
   setProject(inputPath: string): void {
     this.projectPath = resolveUProjectPath(inputPath);
-    this.projectName = path.basename(this.projectPath, ".uproject");
+    // Strip whatever case the extension actually carries: basename() compares
+    // the suffix byte for byte, so a hardcoded ".uproject" leaves the whole
+    // "Game.UPROJECT" standing as the project name.
+    this.projectName = path.basename(this.projectPath, path.extname(this.projectPath));
     this.contentDir = path.join(path.dirname(this.projectPath), "Content");
     // The cache is keyed to nothing but the process, so a switch would keep
     // resolving /MyPlugin/ paths against the project we just left.

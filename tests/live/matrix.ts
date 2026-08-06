@@ -114,6 +114,16 @@ export const MATRIX_CASES: MatrixCase[] = [
         title: "records sessions that collapse onto one port, because they cannot be told apart",
       },
       {
+        kind: "engine-free",
+        file: "tests/unit/session.test.ts",
+        title: "folds the case of the path and of the extension, where the filesystem does",
+      },
+      {
+        kind: "engine-free",
+        file: "tests/unit/session.test.ts",
+        title: "keeps projects that differ by more than spelling apart",
+      },
+      {
         kind: "cpp",
         reason:
           "two editors of one project binding two ports is a socket-exclusivity result (plan 0.2), and " +
@@ -241,7 +251,14 @@ export const SINGLE_EDITOR_CHANGES: MatrixCase[] = [
   {
     id: "attach-no-dangling-entry",
     text: "attach() no longer writes a dangling .uproject entry for an absent bridge.",
-    coverage: [{ kind: "live", file: LIVE_SINGLE, title: "writes no dangling plugin entry into a project that has no bridge" }],
+    coverage: [
+      { kind: "live", file: LIVE_SINGLE, title: "writes no dangling plugin entry into a project that has no bridge" },
+      {
+        kind: "engine-free",
+        file: "tests/unit/deployer-attach.test.ts",
+        title: "writes nothing into a project that has no bridge installed",
+      },
+    ],
   },
   {
     id: "staleness-against-package",
@@ -378,7 +395,14 @@ export const SINGLE_EDITOR_CHANGES: MatrixCase[] = [
   {
     id: "flow-context-complete",
     text: "Flows receive the full context: elicit, getFlows, getPlugins.",
-    coverage: [{ kind: "live", file: LIVE_SINGLE, title: "hands a flow the whole context, including flows and plugins" }],
+    coverage: [
+      { kind: "live", file: LIVE_SINGLE, title: "hands a flow the whole context, including flows and plugins" },
+      {
+        kind: "engine-free",
+        file: "tests/unit/flow-run-result.test.ts",
+        title: "hands the step the accessors the context had, not a rebuilt subset",
+      },
+    ],
   },
   {
     id: "default-config-categories",

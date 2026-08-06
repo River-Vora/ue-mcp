@@ -58,6 +58,46 @@ describe("SessionRegistry", () => {
     expect(registry.size).toBe(1);
   });
 
+  it("folds the case of the path and of the extension, where the filesystem does", () => {
+    // Windows and macOS hand the same file back for either spelling, so two
+    // sessions for it would be two handles competing for one editor. The
+    // extension is part of that: an upper-cased ".UPROJECT" used to be read as
+    // a directory name and failed as "project directory not found".
+    if (process.platform !== "win32" && process.platform !== "darwin") return;
+    const uproject = makeProject("Alpha");
+    const registry = new SessionRegistry();
+
+    const a = registry.register({ projectPath: uproject });
+    expect(registry.register({ projectPath: uproject.toUpperCase() })).toBe(a);
+    expect(registry.register({ projectPath: path.dirname(uproject).toUpperCase() })).toBe(a);
+    expect(registry.size).toBe(1);
+    // The name comes off the file, so the shouted spelling must not rename it.
+    expect(a.project.projectName).toBe("Alpha");
+  });
+
+  it("keeps projects that differ by more than spelling apart", () => {
+    // The other half of folding case: a key that collapsed too far would hand
+    // one editor's session to another project's calls, which is worse than the
+    // duplicate it was avoiding.
+    const alpha = makeProject("Alpha");
+    const alphaTwo = makeProject("Alpha2");
+    // A project living inside another project's directory: same prefix, and
+    // its own root all the same.
+    const nestedDir = path.join(path.dirname(alpha), "Inner");
+    fs.mkdirSync(nestedDir, { recursive: true });
+    const nested = path.join(nestedDir, "Alpha.uproject");
+    fs.writeFileSync(nested, JSON.stringify({ FileVersion: 3, EngineAssociation: "5.6" }), "utf-8");
+    const registry = new SessionRegistry();
+
+    const a = registry.register({ projectPath: alpha });
+    const b = registry.register({ projectPath: alphaTwo });
+    const c = registry.register({ projectPath: nested });
+
+    expect(registry.size).toBe(3);
+    expect(new Set([a.key, b.key, c.key]).size).toBe(3);
+    expect(new Set([a.name, b.name, c.name]).size).toBe(3);
+  });
+
   it("gives every session its own bridge port and its own lockfile", () => {
     const alpha = makeProject("Alpha");
     const beta = makeProject("Beta");

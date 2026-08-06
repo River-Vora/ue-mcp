@@ -338,6 +338,25 @@ function formatFlowResult(result: FlowRunResult): Record<string, unknown> {
     duration: result.duration,
     stepCount: result.steps.length,
     failedStep: result.steps.find((s) => s.result?.success === false)?.name,
+    // What each step answered. The per-step events carry no data by design
+    // (an SSE subscriber does not want a shell log or an asset listing pushed
+    // at it), which left the run response as the only place the data could
+    // arrive, and it was dropping it too: a flow that read anything returned a
+    // summary line and nothing else, so the same action was strictly less
+    // useful inside a flow than called directly.
+    steps: result.steps.map((s) => ({
+      stepNumber: s.stepNumber,
+      name: s.name,
+      type: s.type,
+      skipped: s.skipped,
+      success: s.result?.success ?? false,
+      duration: s.duration,
+      attempts: s.attempts,
+      error: s.result?.error
+        ? { message: s.result.error.message, name: s.result.error.name }
+        : undefined,
+      data: s.result?.data,
+    })),
     rollback: result.rollback,
     hookErrors: result.hookErrors,
   };

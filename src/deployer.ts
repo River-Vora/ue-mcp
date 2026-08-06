@@ -64,9 +64,17 @@ export function deploySummary(r: DeployResult): string {
  * Unlike `deploy()`, this NEVER overwrites bridge source under
  * `Plugins/UE_MCP_Bridge/Source/` - so local forks/edits and
  * project-tracked bridge revisions are preserved. It only:
+ *   - detects whether the bridge plugin is installed in the project
  *   - ensures PythonScriptPlugin is listed in the .uproject
  *   - ensures UE_MCP_Bridge is listed in the .uproject
  *   - reports plugin presence + version for a warning-level check
+ *
+ * Detection comes first, and a project without the plugin installed is
+ * left byte-identical. Enabling a plugin that is not on disk turns the
+ * project's next launch in Unreal into a missing-plugin prompt, and
+ * PythonScriptPlugin is only enabled here because the bridge's
+ * `execute_python` handler needs it, so it has no reason to be written
+ * into a project the bridge is absent from.
  *
  * If the plugin is missing or a version mismatch is detected, callers
  * should surface that to the user and ask them to run `ue-mcp init`
@@ -84,9 +92,6 @@ export function attach(context: ProjectContext): AttachResult {
 
   try {
     const uprojectPath = context.projectPath!;
-    result.pythonPluginEnabled = ensurePythonPlugin(uprojectPath);
-    result.cppPluginEnabled = ensureCppPluginEnabled(uprojectPath);
-
     const projectDir = path.dirname(uprojectPath);
     const installedUplugin = path.join(
       projectDir,
@@ -94,6 +99,7 @@ export function attach(context: ProjectContext): AttachResult {
       "UE_MCP_Bridge",
       "UE_MCP_Bridge.uplugin",
     );
+
     result.cppPluginPresent = fs.existsSync(installedUplugin);
     result.installedVersion = readUpluginVersion(installedUplugin);
     result.packagedVersion = readUpluginVersion(packagedUpluginPath());
@@ -101,6 +107,11 @@ export function attach(context: ProjectContext): AttachResult {
     if (result.installedVersion && result.packagedVersion) {
       result.versionMatch = result.installedVersion === result.packagedVersion;
     }
+
+    if (!result.cppPluginPresent) return result;
+
+    result.pythonPluginEnabled = ensurePythonPlugin(uprojectPath);
+    result.cppPluginEnabled = ensureCppPluginEnabled(uprojectPath);
   } catch (e) {
     result.error = e instanceof Error ? e.message : String(e);
   }
