@@ -1,12 +1,20 @@
 /**
- * Records the editor-down half of the #817 plan item 1.10 golden corpus.
+ * Records the #817 plan item 1.10 golden corpus, both halves.
  *
  * The surface a client sees at startup has two legitimate shapes, because
  * Epic-toolset enrichment picks a live editor, then the project cache, then
  * the snapshot baked into the package (`src/index.ts`, `buildSessionLoad`).
  * One baseline therefore cannot tell a regression from a cold start, so the
- * corpus is recorded twice. This module records the cold half: a real server
- * process, a real project, and no editor listening anywhere.
+ * corpus is recorded twice:
+ *
+ *   - `editor-down.json`, with nothing listening. Needs only Node, so it is
+ *     guarded by `tests/unit/golden-editor-down.test.ts` in the unit tier.
+ *   - `editor-connected.json`, with a real editor answering. Guarded by
+ *     `tests/live/golden-connected.test.ts` in the live tier.
+ *
+ * One recorder produces both. A second implementation of the capture would
+ * make the two baselines prove that the two recorders agree with each other
+ * rather than that the server still hands a client the same thing.
  *
  * It drives the shipped entry point over stdio rather than reassembling the
  * surface in-process. A baseline built from a copy of the construction code
@@ -18,14 +26,27 @@
  *   - the project lives in a fresh temp directory, and its path is rewritten
  *     to `<PROJECT_DIR>` wherever it appears;
  *   - the repository root is rewritten to `<REPO>`;
- *   - `UE_MCP_PORT=1` guarantees the editor-down branch. Port 1 is privileged
- *     on every platform we run on, so nothing can be listening there, and the
- *     connection is refused immediately instead of burning the connect budget;
+ *   - the bridge port is rewritten to `<PORT>` and any ISO timestamp to
+ *     `<TIMESTAMP>`, so the connected half does not churn every time the
+ *     editor rebinds or restarts;
+ *   - the editor-down half pins `UE_MCP_PORT=1`, which guarantees its branch.
+ *     Port 1 is privileged on every platform we run on, so nothing can be
+ *     listening there and the connection is refused immediately instead of
+ *     burning the connect budget;
  *   - every other `UE_MCP_*` variable inherited from the recording shell is
  *     dropped, and the three user-scoped files the server reads (global
  *     config, user state, auth) are redirected into the temp directory so a
  *     developer's own settings never reach the baseline;
  *   - the update check is off, so no network call can change what is recorded.
+ *
+ * The connected half deliberately keeps the throwaway project rather than
+ * recording against the editor's own project directory. The only difference
+ * between the two recordings is then that a live bridge answers: same project,
+ * same config, same plugin set, and a temp project that has never been
+ * enriched cannot serve a cached catalog. That is what makes the connected
+ * baseline evidence about the live-editor path specifically, and it is
+ * asserted rather than assumed, because the recorder reads back the
+ * enrichment source the server logged.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -39,8 +60,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 /** Repository root, two levels up from `tests/golden/`. */
 export const REPO_ROOT = path.resolve(here, "..", "..");
 
-/** Where the committed baseline lives. */
+/** Where the committed baselines live. */
 export const GOLDEN_EDITOR_DOWN = path.join(here, "editor-down.json");
+export const GOLDEN_EDITOR_CONNECTED = path.join(here, "editor-connected.json");
 
 /**
  * Bumped whenever the shape of the snapshot document itself changes (not its
@@ -52,6 +74,14 @@ export const GOLDEN_SCHEMA_VERSION = 1;
 /** The project name every recording uses, so it is never machine-derived. */
 const PROJECT_NAME = "GoldenProject";
 
+/** Which half of the corpus a recording is. */
+export type GoldenScenario = "editor-down" | "editor-connected";
+
+/** The baseline file for each half. */
+export function goldenBaselinePath(scenario: GoldenScenario): string {
+  return scenario === "editor-down" ? GOLDEN_EDITOR_DOWN : GOLDEN_EDITOR_CONNECTED;
+}
+
 export interface GoldenTool {
   name: string;
   description: string;
@@ -60,7 +90,7 @@ export interface GoldenTool {
 
 export interface GoldenSurface {
   schemaVersion: number;
-  scenario: "editor-down";
+  scenario: GoldenScenario;
   server: { name: string; version: string };
   instructions: string;
   toolCount: number;
@@ -68,7 +98,7 @@ export interface GoldenSurface {
 }
 
 /** Environment variables the recording pins rather than inherits. */
-function recordingEnv(sandbox: string): NodeJS.ProcessEnv {
+function recordingEnv(sandbox: string, host: string, port: number): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     // Anything UE_MCP_* from the recording shell is a machine setting, and a
@@ -78,8 +108,8 @@ function recordingEnv(sandbox: string): NodeJS.ProcessEnv {
   }
   env.HOME = sandbox;
   env.USERPROFILE = sandbox;
-  env.UE_MCP_HOST = "127.0.0.1";
-  env.UE_MCP_PORT = "1";
+  env.UE_MCP_HOST = host;
+  env.UE_MCP_PORT = String(port);
   env.UE_MCP_GLOBAL_CONFIG = path.join(sandbox, "global-config.yml");
   env.UE_MCP_USER_STATE = path.join(sandbox, "state.json");
   env.UE_MCP_AUTH_DIR = path.join(sandbox, "auth");
@@ -122,6 +152,26 @@ function normalizePaths(text: string, projectDir: string, sandbox: string): stri
   return out;
 }
 
+/**
+ * Rewrite the two values that move on their own between runs against one
+ * unchanged server: the port the editor happened to bind, and any wall-clock
+ * timestamp. Left alone the connected baseline would show a diff after every
+ * editor restart, and a baseline that churns is one nobody reads.
+ *
+ * The port substitution is skipped for a privileged port number, which only
+ * the editor-down recording uses. `1` as a bare number occurs throughout a
+ * JSON schema document, and rewriting those would corrupt the file to remove
+ * a value that cannot vary anyway.
+ */
+function normalizeVolatileValues(text: string, port: number, host: string): string {
+  let out = text.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?/g, "<TIMESTAMP>");
+  if (port >= 1024) {
+    out = out.replace(new RegExp(`${escapeRegExp(host)}:${port}\\b`, "g"), `${host}:<PORT>`);
+    out = out.replace(new RegExp(`\\b${port}\\b`, "g"), "<PORT>");
+  }
+  return out;
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -152,25 +202,58 @@ export interface GoldenRecording {
   sandbox: string;
   projectDir: string;
   repoRoot: string;
+  /**
+   * Where the recorded server's Epic catalog came from, as it reported at
+   * startup: "live editor", "project cache", "baked snapshot", or null when
+   * it surfaced nothing. The connected half is only evidence about the live
+   * path when this says so.
+   */
+  enrichmentSource: string | null;
+  /** Tool actions Epic enrichment injected, from the same startup log. */
+  enrichmentCount: number;
+  /** Everything the recorded server wrote to stderr. Kept for diagnostics. */
+  log: string;
+}
+
+export interface CaptureOptions {
+  scenario: GoldenScenario;
+  /** Bridge port the recorded server is pointed at. */
+  port: number;
+  host?: string;
+}
+
+/** What the startup log says about Epic enrichment, if anything. */
+function readEnrichment(log: string): { source: string | null; count: number } {
+  const match = /Epic 5\.8 toolsets \(([^)]+)\): surfaced (\d+) tools/.exec(log);
+  if (!match) return { source: null, count: 0 };
+  return { source: match[1], count: Number(match[2]) };
 }
 
 /**
- * Start the shipped server against a throwaway project with no editor
- * running, and return its `initialize` instructions plus every tool from
- * `tools/list` with its full input schema.
+ * Start the shipped server against a throwaway project, and return its
+ * `initialize` instructions plus every tool from `tools/list` with its full
+ * input schema.
  */
-export async function captureEditorDownSurface(): Promise<GoldenRecording> {
+export async function captureSurface(options: CaptureOptions): Promise<GoldenRecording> {
+  const host = options.host ?? "127.0.0.1";
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "ue-mcp-golden-"));
   const uproject = writeFixtureProject(sandbox);
   const projectDir = path.dirname(uproject);
+
+  // The server's own startup narration is the only place the enrichment
+  // source is stated, and it is written before the client can ask anything,
+  // so it goes to a file the child inherits rather than a stream attached
+  // after the process is already running.
+  const logPath = path.join(sandbox, "server.log");
+  const logFd = fs.openSync(logPath, "a");
 
   const client = new Client({ name: "ue-mcp-golden-recorder", version: "1.0.0" }, { capabilities: {} });
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["--import", "tsx", path.join(REPO_ROOT, "src", "index.ts"), uproject],
     cwd: REPO_ROOT,
-    env: recordingEnv(sandbox) as Record<string, string>,
-    stderr: "ignore",
+    env: recordingEnv(sandbox, host, options.port) as Record<string, string>,
+    stderr: logFd,
   });
 
   try {
@@ -190,7 +273,7 @@ export async function captureEditorDownSurface(): Promise<GoldenRecording> {
 
     const surface: GoldenSurface = {
       schemaVersion: GOLDEN_SCHEMA_VERSION,
-      scenario: "editor-down",
+      scenario: options.scenario,
       server: { name: version?.name ?? "", version: version?.version ?? "" },
       instructions,
       toolCount: tools.length,
@@ -198,36 +281,81 @@ export async function captureEditorDownSurface(): Promise<GoldenRecording> {
     };
 
     // Normalize once, over the serialized form, so no field is missed.
+    const normalized = normalizeVolatileValues(
+      normalizePaths(JSON.stringify(surface), projectDir, sandbox),
+      options.port,
+      host,
+    );
+
+    const log = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf-8") : "";
+    const enrichment = readEnrichment(log);
+
     return {
-      surface: JSON.parse(normalizePaths(JSON.stringify(surface), projectDir, sandbox)) as GoldenSurface,
+      surface: JSON.parse(normalized) as GoldenSurface,
       sandbox,
       projectDir,
       repoRoot: REPO_ROOT,
+      enrichmentSource: enrichment.source,
+      enrichmentCount: enrichment.count,
+      log,
     };
   } finally {
     await client.close().catch(() => undefined);
     // The transport owns the child; close() above kills it. Belt and braces
     // for the case where connect() itself threw.
     await transport.close().catch(() => undefined);
+    try { fs.closeSync(logFd); } catch { /* already closed with the child */ }
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 }
 
+/** The cold half: a real server process, and no editor listening anywhere. */
+export async function captureEditorDownSurface(): Promise<GoldenRecording> {
+  return captureSurface({ scenario: "editor-down", port: 1 });
+}
+
 /**
- * Read the committed baseline. Returns null when it has never been recorded.
+ * The connected half. `port` is the port a verified editor is answering on;
+ * the live tier discovers it and refuses anything but the test project before
+ * this is called.
+ */
+export async function captureEditorConnectedSurface(
+  port: number,
+  host = "127.0.0.1",
+): Promise<GoldenRecording> {
+  return captureSurface({ scenario: "editor-connected", port, host });
+}
+
+/**
+ * Read a committed baseline. Returns null when it has never been recorded.
  *
  * CRLF is folded to LF on the way in. `.gitattributes` already pins `*.json`
  * to `eol=lf`, so this only covers a checkout that arrived some other way; a
  * line-ending difference is not a surface regression and should not be
  * reported as one.
  */
-export function readGoldenBaseline(): string | null {
-  if (!fs.existsSync(GOLDEN_EDITOR_DOWN)) return null;
-  return fs.readFileSync(GOLDEN_EDITOR_DOWN, "utf-8").replace(/\r\n/g, "\n");
+export function readGoldenBaseline(scenario: GoldenScenario = "editor-down"): string | null {
+  const file = goldenBaselinePath(scenario);
+  if (!fs.existsSync(file)) return null;
+  return fs.readFileSync(file, "utf-8").replace(/\r\n/g, "\n");
 }
 
-/** Write the baseline. Used by `npm run golden:record`. */
-export function writeGoldenBaseline(contents: string): void {
-  fs.mkdirSync(path.dirname(GOLDEN_EDITOR_DOWN), { recursive: true });
-  fs.writeFileSync(GOLDEN_EDITOR_DOWN, contents, "utf-8");
+/** Write a baseline. Used by `npm run golden:record`. */
+export function writeGoldenBaseline(contents: string, scenario: GoldenScenario = "editor-down"): void {
+  const file = goldenBaselinePath(scenario);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, contents, "utf-8");
+}
+
+/** Point at the first differing line, so a large diff names its own cause. */
+export function firstDifference(expected: string, actual: string): string {
+  const a = expected.split("\n");
+  const b = actual.split("\n");
+  const clip = (line: string | undefined) =>
+    line === undefined ? "<end of file>" : line.length > 200 ? `${line.slice(0, 200)}...` : line;
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if (a[i] === b[i]) continue;
+    return `First difference at line ${i + 1}:\n  baseline: ${clip(a[i])}\n  recorded: ${clip(b[i])}`;
+  }
+  return `Files differ in length only: baseline ${a.length} lines, recorded ${b.length} lines.`;
 }

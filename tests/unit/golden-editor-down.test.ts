@@ -4,9 +4,11 @@
  * Plan item 1.10 asks for the single-editor surface recorded twice, once with
  * an editor connected and once with it down, because Epic-toolset enrichment
  * legitimately changes the surface between those two states and one baseline
- * cannot tell a regression apart from a cold start. The connected half needs
- * an Unreal install and cannot run on a CI runner. The editor-down half needs
- * nothing but Node, so it is recorded here and it gates merges.
+ * cannot tell a regression apart from a cold start. The editor-down half needs
+ * nothing but Node, so it is recorded here and it gates merges. The connected
+ * half needs a running editor and lives in the live tier
+ * (`tests/live/golden-connected.test.ts`, `npm run test:live`), which also
+ * re-verifies this one.
  *
  * What it guards: the `initialize` instructions and every tool in
  * `tools/list` with its full input schema. That is the entire contract a
@@ -22,6 +24,7 @@ import {
   GOLDEN_EDITOR_DOWN,
   GOLDEN_SCHEMA_VERSION,
   captureEditorDownSurface,
+  firstDifference,
   readGoldenBaseline,
   serializeGolden,
   writeGoldenBaseline,
@@ -44,7 +47,7 @@ let serialized: string;
 beforeAll(async () => {
   recording = await captureEditorDownSurface();
   serialized = serializeGolden(recording.surface);
-  if (RECORDING) writeGoldenBaseline(serialized);
+  if (RECORDING) writeGoldenBaseline(serialized, "editor-down");
 }, CAPTURE_TIMEOUT_MS);
 
 describe("golden baseline: single editor, editor down", () => {
@@ -59,6 +62,13 @@ describe("golden baseline: single editor, editor down", () => {
     expect(captured.toolCount).toBeGreaterThan(10);
     expect(captured.tools.every((t) => t.description.length > 0)).toBe(true);
     expect(captured.tools.every((t) => t.inputSchema !== undefined)).toBe(true);
+  });
+
+  it("reached no editor, which is the whole point of this half", () => {
+    // The scenario is a claim about where the surface came from. Port 1 is
+    // privileged, so a live editor cannot be behind it, and the startup log
+    // says which source enrichment used.
+    expect(recording.enrichmentSource).not.toBe("live editor");
   });
 
   it("carries no directory from the recording machine", () => {
@@ -80,7 +90,7 @@ describe("golden baseline: single editor, editor down", () => {
   }, CAPTURE_TIMEOUT_MS);
 
   it("matches the committed baseline", () => {
-    const baseline = readGoldenBaseline();
+    const baseline = readGoldenBaseline("editor-down");
     if (baseline === null) {
       throw new Error(
         `No golden baseline at ${GOLDEN_EDITOR_DOWN}.\n` +
@@ -105,16 +115,3 @@ describe("golden baseline: single editor, editor down", () => {
     expect(serialized).toBe(baseline);
   });
 });
-
-/** Point at the first differing line, so a large diff names its own cause. */
-function firstDifference(expected: string, actual: string): string {
-  const a = expected.split("\n");
-  const b = actual.split("\n");
-  const clip = (line: string | undefined) =>
-    line === undefined ? "<end of file>" : line.length > 200 ? `${line.slice(0, 200)}...` : line;
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    if (a[i] === b[i]) continue;
-    return `First difference at line ${i + 1}:\n  baseline: ${clip(a[i])}\n  recorded: ${clip(b[i])}`;
-  }
-  return `Files differ in length only: baseline ${a.length} lines, recorded ${b.length} lines.`;
-}
