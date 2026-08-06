@@ -1,0 +1,160 @@
+/**
+ * The editor-connected golden baseline (#817, plan item 1.10).
+ *
+ * Plan item 1.10 asks for the single-editor surface recorded twice, with the
+ * editor connected and with it down, because Epic-toolset enrichment picks a
+ * live editor, then the project cache, then the snapshot baked into the
+ * package. The surface legitimately differs between those states, so one
+ * baseline cannot tell a regression from a cold start.
+ *
+ * This is the connected half, and it is the reason the tier exists: the
+ * recording only means anything if the server it recorded really did enrich
+ * from a live editor. That is asserted, not assumed. The recorder pins a
+ * throwaway project that has never been enriched, so there is no cache for the
+ * catalog to come from, and then reads back the enrichment source the server
+ * narrated at startup. A recording that fell through to the baked snapshot
+ * fails here rather than being committed as evidence of something it is not.
+ *
+ * Both halves run in this tier (plan 7.3), so a change that moves the surface
+ * only when an editor is attached, or only when it is not, has one place that
+ * catches either.
+ *
+ * To re-record on purpose:  npm run golden:record -- --connected
+ */
+import * as os from "node:os";
+import { beforeAll, describe, expect, it } from "vitest";
+import {
+  GOLDEN_EDITOR_CONNECTED,
+  GOLDEN_SCHEMA_VERSION,
+  captureEditorConnectedSurface,
+  captureEditorDownSurface,
+  firstDifference,
+  readGoldenBaseline,
+  serializeGolden,
+  writeGoldenBaseline,
+  type GoldenRecording,
+} from "../golden/capture.js";
+import { closeLiveBridges, liveTarget } from "./harness.js";
+
+/** Set by `npm run golden:record -- --connected`. */
+const RECORDING = process.env.UE_MCP_RECORD_GOLDEN === "1";
+
+/** Each recording spawns a real server and pulls a live catalog. */
+const CAPTURE_TIMEOUT_MS = 300_000;
+
+const target = await liveTarget();
+
+let recording: GoldenRecording;
+let serialized: string;
+
+beforeAll(async () => {
+  recording = await captureEditorConnectedSurface(target.port, target.host);
+  serialized = serializeGolden(recording.surface);
+  if (RECORDING) writeGoldenBaseline(serialized, "editor-connected");
+}, CAPTURE_TIMEOUT_MS);
+
+describe("golden baseline: single editor, editor connected", () => {
+  it("was recorded from the live editor, not from a cache or the baked snapshot", () => {
+    expect(
+      recording.enrichmentSource,
+      `enrichment came from ${recording.enrichmentSource ?? "nothing"}; ` +
+        "this baseline is only evidence about the live-editor path.\n" +
+        recording.log.split("\n").filter((l) => l.includes("Epic")).join("\n"),
+    ).toBe("live editor");
+    expect(recording.enrichmentCount).toBeGreaterThan(0);
+  });
+
+  it("records a surface worth guarding", () => {
+    const captured = recording.surface;
+    expect(captured.scenario).toBe("editor-connected");
+    expect(captured.schemaVersion).toBe(GOLDEN_SCHEMA_VERSION);
+    expect(captured.server.name).toBe("ue-mcp");
+    expect(captured.instructions.length).toBeGreaterThan(500);
+    expect(captured.toolCount).toBeGreaterThan(10);
+    expect(captured.tools.every((t) => t.description.length > 0)).toBe(true);
+    expect(captured.tools.every((t) => t.inputSchema !== undefined)).toBe(true);
+  });
+
+  it("advertises no targeting parameter, because this is one editor", () => {
+    for (const tool of recording.surface.tools) {
+      const schema = tool.inputSchema as { properties?: Record<string, unknown> };
+      expect(Object.keys(schema.properties ?? {})).not.toContain("editor");
+    }
+  });
+
+  it("carries nothing from the recording machine, including its port", () => {
+    const machinePaths = [recording.sandbox, recording.projectDir, recording.repoRoot, os.homedir()];
+    for (const dir of machinePaths) {
+      if (dir.length < 4) continue;
+      for (const spelling of [dir, dir.replace(/\\/g, "/")]) {
+        expect(serialized.toLowerCase()).not.toContain(spelling.toLowerCase());
+      }
+    }
+    // The editor rebinds its port whenever the collision walk moves it, and a
+    // baseline that recorded one would churn for a reason that has nothing to
+    // do with the surface.
+    expect(serialized).not.toContain(String(target.port));
+  });
+
+  it("keeps every category the editor-down half advertises", () => {
+    // Enrichment adds; it must never take away. A connected surface missing a
+    // category the cold one has means the live path dropped something.
+    const down = readGoldenBaseline("editor-down");
+    expect(down, "the editor-down baseline is missing; run npm run golden:record").toBeTruthy();
+    const downNames = (JSON.parse(down!) as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
+    const connectedNames = recording.surface.tools.map((t) => t.name);
+    for (const name of downNames) {
+      expect(connectedNames).toContain(name);
+    }
+  });
+
+  it("is deterministic: two recordings in one run are byte-identical", async () => {
+    const second = serializeGolden((await captureEditorConnectedSurface(target.port, target.host)).surface);
+    expect(second).toBe(serialized);
+  }, CAPTURE_TIMEOUT_MS);
+
+  it("matches the committed baseline", () => {
+    const baseline = readGoldenBaseline("editor-connected");
+    if (baseline === null) {
+      throw new Error(
+        `No connected baseline at ${GOLDEN_EDITOR_CONNECTED}.\n` +
+          `Record one with:  npm run golden:record -- --connected\n` +
+          `then review and commit the file.`,
+      );
+    }
+    if (baseline !== serialized) {
+      throw new Error(
+        "The editor-connected surface changed.\n\n" +
+          "This compares the `initialize` instructions and every `tools/list` input schema,\n" +
+          "recorded with a live editor attached, against tests/golden/editor-connected.json.\n\n" +
+          "A difference here that the editor-down baseline does not also show is a change in\n" +
+          "what enrichment contributes: the editor's toolset catalog, or how it is injected.\n" +
+          "If it is intentional, re-record and read the diff before committing it:\n\n" +
+          "    npm run golden:record -- --connected\n\n" +
+          firstDifference(baseline, serialized),
+      );
+    }
+    expect(serialized).toBe(baseline);
+  });
+});
+
+describe("golden baseline: the editor-down half, with an editor running", () => {
+  it("still matches the committed baseline", async () => {
+    // Recorded against a privileged port, so it is the cold surface even
+    // though an editor is up. Running it here as well as in the unit tier is
+    // what plan 7.3 means by "both golden baselines": the two files have to
+    // hold at the same moment, or a surface change has been split across them.
+    const down = await captureEditorDownSurface();
+    const captured = serializeGolden(down.surface);
+    const baseline = readGoldenBaseline("editor-down");
+    expect(baseline).toBeTruthy();
+    if (baseline !== captured) {
+      throw new Error(
+        "The editor-down surface changed. Re-record it with npm run golden:record.\n\n" +
+          firstDifference(baseline!, captured),
+      );
+    }
+    expect(captured).toBe(baseline);
+    closeLiveBridges();
+  }, CAPTURE_TIMEOUT_MS);
+});
