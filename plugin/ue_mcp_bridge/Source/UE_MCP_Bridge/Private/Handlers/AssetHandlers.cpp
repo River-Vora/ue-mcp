@@ -75,32 +75,10 @@
 #include "AI/Navigation/NavCollisionBase.h"
 
 // ─── Protected mount guardrail ──────────────────────────────────────────
-// Engine-shipped content (/Engine/, /Script/, /Memory/, /Temp/) and Verse
-// runtime classes must never be mutated through the bridge. UE's
-// UEditorAssetLibrary::DeleteAsset will happily destroy files under
-// <engineRoot>/Engine/Content/ if not stopped - verified the hard way.
-// Apply this check to every handler that deletes, moves, or renames an
-// asset. Plugin content roots (mounted under /<PluginName>/) are NOT
-// protected here; per-project plugin content is expected to be writable.
+// The rule itself is MCPIsProtectedAssetPath in HandlerUtils.h, shared by
+// every asset translation unit so the write paths cannot drift apart.
 namespace
 {
-	bool IsProtectedAssetPath(const FString& Path)
-	{
-		FString P = Path;
-		P.TrimStartAndEndInline();
-		if (P.IsEmpty()) return false;
-		// Tolerate leading whitespace and the surface form (no leading slash).
-		if (!P.StartsWith(TEXT("/"))) P = TEXT("/") + P;
-		const FString L = P.ToLower();
-		if (L.StartsWith(TEXT("/engine/"))) return true;
-		if (L.StartsWith(TEXT("/script/"))) return true;
-		if (L.StartsWith(TEXT("/memory/"))) return true;
-		if (L.StartsWith(TEXT("/temp/"))) return true;
-		// Verse runtime objects surface as /Script/CoreUObject.* etc.
-		if (L.Contains(TEXT("/script/"))) return true;
-		return false;
-	}
-
 	TSharedPtr<FJsonValue> MakeProtectedPathError(const FString& Path)
 	{
 		return MCPError(FString::Printf(
@@ -1488,8 +1466,8 @@ TSharedPtr<FJsonValue> FAssetHandlers::RenameAsset(const TSharedPtr<FJsonObject>
 		return MCPError(TEXT("Missing 'sourcePath'+'destinationPath' or 'assetPath'+'newName'"));
 	}
 
-	if (IsProtectedAssetPath(SourcePath)) return MakeProtectedPathError(SourcePath);
-	if (IsProtectedAssetPath(DestPath))   return MakeProtectedPathError(DestPath);
+	if (MCPIsProtectedAssetPath(SourcePath)) return MakeProtectedPathError(SourcePath);
+	if (MCPIsProtectedAssetPath(DestPath))   return MakeProtectedPathError(DestPath);
 
 	// Idempotency: if already at destination, no-op.
 	if (SourcePath == DestPath)
@@ -1697,7 +1675,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::DeleteAsset(const TSharedPtr<FJsonObject>
 	FString AssetPath;
 	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
 
-	if (IsProtectedAssetPath(AssetPath)) return MakeProtectedPathError(AssetPath);
+	if (MCPIsProtectedAssetPath(AssetPath)) return MakeProtectedPathError(AssetPath);
 
 	const bool bForce = OptionalBool(Params, TEXT("force"), false);
 
@@ -1763,7 +1741,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::DeleteAssetBatch(const TSharedPtr<FJsonOb
 		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
 		Entry->SetStringField(TEXT("path"), Path);
 
-		if (IsProtectedAssetPath(Path))
+		if (MCPIsProtectedAssetPath(Path))
 		{
 			Entry->SetStringField(TEXT("status"), TEXT("protected"));
 			Entry->SetStringField(TEXT("reason"), TEXT("Engine/Script/Memory/Temp mounts are read-only via the bridge"));
@@ -1892,7 +1870,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::BulkRename(const TSharedPtr<FJsonObject>&
 			continue;
 		}
 
-		if (IsProtectedAssetPath(SourcePath) || IsProtectedAssetPath(NewPackagePath))
+		if (MCPIsProtectedAssetPath(SourcePath) || MCPIsProtectedAssetPath(NewPackagePath))
 		{
 			Record->SetStringField(TEXT("status"), TEXT("protected"));
 			Record->SetStringField(TEXT("reason"), TEXT("Engine/Script/Memory/Temp mounts are read-only via the bridge"));
@@ -2555,8 +2533,8 @@ TSharedPtr<FJsonValue> FAssetHandlers::MoveFolder(const TSharedPtr<FJsonObject>&
 	SourcePath.RemoveFromEnd(TEXT("/"));
 	DestinationPath.RemoveFromEnd(TEXT("/"));
 
-	if (IsProtectedAssetPath(SourcePath))      return MakeProtectedPathError(SourcePath);
-	if (IsProtectedAssetPath(DestinationPath)) return MakeProtectedPathError(DestinationPath);
+	if (MCPIsProtectedAssetPath(SourcePath))      return MakeProtectedPathError(SourcePath);
+	if (MCPIsProtectedAssetPath(DestinationPath)) return MakeProtectedPathError(DestinationPath);
 
 	// Scan source path to discover all assets
 	IAssetRegistry& AR = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
@@ -2738,7 +2716,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::DeleteFolder(const TSharedPtr<FJsonObject
 			continue;
 		}
 
-		if (IsProtectedAssetPath(Norm))
+		if (MCPIsProtectedAssetPath(Norm))
 		{
 			Entry->SetStringField(TEXT("status"), TEXT("failed"));
 			Entry->SetStringField(TEXT("reason"), TEXT("protected_path"));

@@ -64,26 +64,6 @@ namespace
 		bool PassedPreflight() const { return Error.IsEmpty(); }
 	};
 
-	// Mirrors IsProtectedAssetPath in AssetHandlers.cpp, which is file-local to
-	// that translation unit. Keep the two rule sets identical: a write path that
-	// enforces a weaker rule than its neighbours is how engine content gets
-	// mutated through the bridge.
-	bool IsProtectedBulkAssetPath(const FString& Path)
-	{
-		FString Normalized = Path;
-		Normalized.TrimStartAndEndInline();
-		if (Normalized.IsEmpty()) return false;
-		if (!Normalized.StartsWith(TEXT("/"))) Normalized = TEXT("/") + Normalized;
-		const FString Lower = Normalized.ToLower();
-		if (Lower.StartsWith(TEXT("/engine/"))) return true;
-		if (Lower.StartsWith(TEXT("/script/"))) return true;
-		if (Lower.StartsWith(TEXT("/memory/"))) return true;
-		if (Lower.StartsWith(TEXT("/temp/"))) return true;
-		// Verse runtime objects surface as /Script/CoreUObject.* etc.
-		if (Lower.Contains(TEXT("/script/"))) return true;
-		return false;
-	}
-
 	TSharedPtr<FJsonObject> MakePropertyReadback(
 		const FPreparedPropertyWrite& Prepared,
 		const TSharedPtr<FJsonValue>& ActualValue,
@@ -198,7 +178,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::BulkSetAssetProperties(const TSharedPtr<F
 		}
 		PreparedAsset.AssetPath = AssetPath;
 
-		if (IsProtectedBulkAssetPath(AssetPath))
+		if (MCPIsProtectedAssetPath(AssetPath))
 		{
 			RejectItem(BulkStatusProtected, FString::Printf(
 				TEXT("Refusing to mutate protected mount: %s. Engine, /Script/, /Memory/, /Temp/ are read-only via the bridge."),
