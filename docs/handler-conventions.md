@@ -96,6 +96,12 @@ MCPSetDeleteAssetRollback(Result, AssetPath)  // shorthand for delete_asset roll
 MCPCheckAssetExists(PackagePath, Name, OnConflict, FriendlyType?)
 MCPCheckActorLabelExists(World, Label, OnConflict, FriendlyType?)
 
+// Protected mount guardrail. True for /Engine/, /Memory/, /Temp/ and anything
+// containing /Script/. Call it from every handler that deletes, moves, renames
+// or writes an asset. Shared, never copied: see "File-local helpers and the
+// unity build" in development.md.
+MCPIsProtectedAssetPath(Path)
+
 // Actor lookup
 FindActorByLabel(World, Label)                // canonical label lookup
 FindActorByLabelOrName(World, Token)          // PIE: label OR internal name
