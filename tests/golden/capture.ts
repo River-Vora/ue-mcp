@@ -37,7 +37,11 @@
  *     dropped, and the three user-scoped files the server reads (global
  *     config, user state, auth) are redirected into the temp directory so a
  *     developer's own settings never reach the baseline;
- *   - the update check is off, so no network call can change what is recorded.
+ *   - the update check is off, so no network call can change what is recorded;
+ *   - the actions enrichment injected from the editor's toolset registry are
+ *     sorted, because the registry does not promise one enumeration order from
+ *     one editor session to the next. See `canonicalizeActionOrder`. This
+ *     normalizes the recording only: what the server advertises is untouched.
  *
  * The connected half deliberately keeps the throwaway project rather than
  * recording against the editor's own project directory. The only difference
@@ -176,6 +180,162 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// ── Ordering of enrichment-injected actions ───────────────────────────────────
+//
+// A category's own actions are declared in TypeScript, so their order is
+// authored, reproducible, and meaningful: it is the order the tool description
+// introduces them in. Enrichment then appends one action per tool in Unreal's
+// toolset registry, each prefixed `epic_`, in whatever order the live editor
+// enumerated the registry. That order is not promised to survive an editor
+// restart: the same editor over the same catalog can hand back the same tools
+// in a different sequence, and the connected baseline then reports a surface
+// change on a healthy editor.
+//
+// The sequence carries no meaning of its own (the enum is the set of accepted
+// values, not a reading order), so the recording sorts it, the same way it
+// already rewrites paths, ports and timestamps. Only the recorded snapshot is
+// normalized; what the server advertises at runtime is untouched.
+
+/** Prefix every enrichment-injected action carries. */
+const ENRICHED_ACTION_PREFIX = "epic_";
+
+/** Locale-independent order, so the file does not depend on where it was recorded. */
+function byCodeUnit(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * The action enum of one tool, as a live reference into its input schema, or
+ * null when the tool has none. Mutating the returned array edits the schema.
+ */
+function actionEnumOf(tool: GoldenTool): string[] | null {
+  const schema = tool.inputSchema as
+    | { properties?: { action?: { enum?: unknown } } }
+    | undefined;
+  const values = schema?.properties?.action?.enum;
+  if (!Array.isArray(values)) return null;
+  if (!values.every((v) => typeof v === "string")) return null;
+  return values as string[];
+}
+
+/**
+ * Where the trailing run of enrichment-injected actions begins, or the length
+ * of the list when there is none.
+ */
+function enrichedActionStart(values: string[]): number {
+  let start = values.length;
+  while (start > 0 && values[start - 1].startsWith(ENRICHED_ACTION_PREFIX)) start--;
+  return start;
+}
+
+/**
+ * Everything about a recorded surface that would make sorting the injected
+ * actions the wrong thing to do, or that sorting would paper over. Returned
+ * rather than thrown so both the recorder and the guards can report it.
+ *
+ * Two shapes are refused:
+ *
+ *   - an injected action ahead of a category's own actions, which would mean
+ *     enrichment no longer appends and the trailing run is not the injected
+ *     set. Sorting the tail would then move an authored action.
+ *   - the same action advertised twice by one category. Sorting keeps both
+ *     copies, but it puts them next to each other where they read as one, and
+ *     a category with a duplicated action is a registration bug rather than an
+ *     ordering one. The same action name under two different categories is
+ *     expected and allowed: unrelated toolsets ship tools of the same short
+ *     name, and routing sends them to different categories.
+ */
+export function actionOrderProblems(surface: GoldenSurface): string[] {
+  const problems: string[] = [];
+  for (const tool of surface.tools) {
+    const values = actionEnumOf(tool);
+    if (!values) continue;
+    const start = enrichedActionStart(values);
+    for (let i = 0; i < start; i++) {
+      if (values[i].startsWith(ENRICHED_ACTION_PREFIX)) {
+        problems.push(
+          `${tool.name}: '${values[i]}' sits at index ${i}, ahead of '${values[start - 1] ?? ""}', ` +
+            `so the injected actions are no longer the trailing run of the list`,
+        );
+      }
+    }
+    const seen = new Set<string>();
+    for (const value of values) {
+      if (seen.has(value)) problems.push(`${tool.name}: advertises '${value}' twice`);
+      seen.add(value);
+    }
+  }
+  return problems;
+}
+
+/** Every tool whose injected actions are not in sorted order. */
+export function unsortedEnrichedActions(surface: GoldenSurface): string[] {
+  const out: string[] = [];
+  for (const tool of surface.tools) {
+    const values = actionEnumOf(tool);
+    if (!values) continue;
+    const tail = values.slice(enrichedActionStart(values));
+    for (let i = 1; i < tail.length; i++) {
+      if (byCodeUnit(tail[i - 1], tail[i]) > 0) {
+        out.push(`${tool.name}: '${tail[i]}' follows '${tail[i - 1]}'`);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Sort the injected actions of every tool in place, leaving the category's own
+ * actions where they were declared. Refuses a surface `actionOrderProblems`
+ * has something to say about, because both of those are real defects and
+ * sorting is how you stop seeing them.
+ */
+export function canonicalizeActionOrder(surface: GoldenSurface): void {
+  const problems = actionOrderProblems(surface);
+  if (problems.length > 0) {
+    throw new Error(
+      "The recorded surface cannot be normalized, because sorting it would hide this:\n  " +
+        problems.join("\n  "),
+    );
+  }
+  for (const tool of surface.tools) {
+    const values = actionEnumOf(tool);
+    if (!values) continue;
+    const start = enrichedActionStart(values);
+    const tail = values.slice(start).sort(byCodeUnit);
+    for (let i = 0; i < tail.length; i++) values[start + i] = tail[i];
+  }
+}
+
+/**
+ * A copy of a surface with each tool's injected actions in a different order,
+ * standing in for the same catalog enumerated by a second editor session.
+ * Deterministic for a given seed, so a failure reproduces exactly.
+ */
+export function permuteEnrichedActions(surface: GoldenSurface, seed = 1): GoldenSurface {
+  const copy = JSON.parse(JSON.stringify(surface)) as GoldenSurface;
+  let state = seed >>> 0 || 1;
+  const nextInt = (bound: number): number => {
+    // xorshift32: small, dependency-free, and the same sequence everywhere.
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    state >>>= 0;
+    return state % bound;
+  };
+  for (const tool of copy.tools) {
+    const values = actionEnumOf(tool);
+    if (!values) continue;
+    const start = enrichedActionStart(values);
+    for (let i = values.length - 1; i > start; i--) {
+      const j = start + nextInt(i - start + 1);
+      [values[i], values[j]] = [values[j], values[i]];
+    }
+  }
+  return copy;
+}
+
 /** Deep clone with every object key sorted, so map ordering cannot churn the file. */
 export function sortKeysDeep(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortKeysDeep);
@@ -290,8 +450,13 @@ export async function captureSurface(options: CaptureOptions): Promise<GoldenRec
     const log = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf-8") : "";
     const enrichment = readEnrichment(log);
 
+    // The one ordering in the document that the recorded server did not choose:
+    // the actions enrichment took from the editor's toolset registry.
+    const recorded = JSON.parse(normalized) as GoldenSurface;
+    canonicalizeActionOrder(recorded);
+
     return {
-      surface: JSON.parse(normalized) as GoldenSurface,
+      surface: recorded,
       sandbox,
       projectDir,
       repoRoot: REPO_ROOT,
