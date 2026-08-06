@@ -23,12 +23,17 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
   GOLDEN_EDITOR_DOWN,
   GOLDEN_SCHEMA_VERSION,
+  actionOrderProblems,
+  canonicalizeActionOrder,
   captureEditorDownSurface,
   firstDifference,
+  permuteEnrichedActions,
   readGoldenBaseline,
   serializeGolden,
+  unsortedEnrichedActions,
   writeGoldenBaseline,
   type GoldenRecording,
+  type GoldenSurface,
 } from "../golden/capture.js";
 
 /**
@@ -88,6 +93,35 @@ describe("golden baseline: single editor, editor down", () => {
     const second = serializeGolden((await captureEditorDownSurface()).surface);
     expect(second).toBe(serialized);
   }, CAPTURE_TIMEOUT_MS);
+
+  it("orders the enrichment-injected actions canonically, in the recording and in the file", () => {
+    // Two recordings in one run share whatever order the catalog came back in,
+    // so they agree even when that order is not reproducible. The property that
+    // survives a restart is that the recorded order is sorted, so assert that
+    // instead: it is checkable from one run, and the connected half needs no
+    // second editor to catch the same class of failure.
+    expect(actionOrderProblems(recording.surface)).toEqual([]);
+    expect(unsortedEnrichedActions(recording.surface)).toEqual([]);
+
+    const baseline = readGoldenBaseline("editor-down");
+    expect(baseline).toBeTruthy();
+    const committed = JSON.parse(baseline!) as GoldenSurface;
+    expect(actionOrderProblems(committed)).toEqual([]);
+    expect(unsortedEnrichedActions(committed)).toEqual([]);
+  });
+
+  it("records the same bytes from a catalog enumerated in a different order", () => {
+    // What an editor restart does to the recording, without a second editor:
+    // the same actions, handed back in another sequence. The baseline is only
+    // stable across sessions if that lands on identical bytes.
+    const permuted = permuteEnrichedActions(recording.surface, 20250817);
+    expect(
+      serializeGolden(permuted),
+      "the permutation changed nothing, so this proves nothing",
+    ).not.toBe(serialized);
+    canonicalizeActionOrder(permuted);
+    expect(serializeGolden(permuted)).toBe(serialized);
+  });
 
   it("matches the committed baseline", () => {
     const baseline = readGoldenBaseline("editor-down");

@@ -212,7 +212,9 @@ export const MATRIX_CASES: MatrixCase[] = [
       { kind: "live", file: LIVE_GOLDEN, title: "was recorded from the live editor, not from a cache or the baked snapshot" },
       { kind: "live", file: LIVE_GOLDEN, title: "matches the committed baseline" },
       { kind: "live", file: LIVE_GOLDEN, title: "still matches the committed baseline" },
+      { kind: "live", file: LIVE_GOLDEN, title: "records the same bytes from a catalog enumerated in a different order" },
       { kind: "engine-free", file: "tests/unit/golden-editor-down.test.ts", title: "matches the committed baseline" },
+      { kind: "engine-free", file: "tests/unit/golden-editor-down.test.ts", title: "orders the enrichment-injected actions canonically, in the recording and in the file" },
     ],
   },
   {
