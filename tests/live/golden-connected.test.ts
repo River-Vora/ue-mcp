@@ -26,13 +26,18 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
   GOLDEN_EDITOR_CONNECTED,
   GOLDEN_SCHEMA_VERSION,
+  actionOrderProblems,
+  canonicalizeActionOrder,
   captureEditorConnectedSurface,
   captureEditorDownSurface,
   firstDifference,
+  permuteEnrichedActions,
   readGoldenBaseline,
   serializeGolden,
+  unsortedEnrichedActions,
   writeGoldenBaseline,
   type GoldenRecording,
+  type GoldenSurface,
 } from "../golden/capture.js";
 import { closeLiveBridges, liveTarget } from "./harness.js";
 
@@ -112,6 +117,34 @@ describe("golden baseline: single editor, editor connected", () => {
     const second = serializeGolden((await captureEditorConnectedSurface(target.port, target.host)).surface);
     expect(second).toBe(serialized);
   }, CAPTURE_TIMEOUT_MS);
+
+  it("orders the enrichment-injected actions canonically, in the recording and in the file", () => {
+    // Two recordings in one run read the same catalog in the same session, so
+    // they agree on an order that a restart is free to change. Unreal's toolset
+    // registry promises the set, not the sequence, which is why the recording
+    // sorts the injected actions rather than trusting the enumeration.
+    expect(actionOrderProblems(recording.surface)).toEqual([]);
+    expect(unsortedEnrichedActions(recording.surface)).toEqual([]);
+
+    const baseline = readGoldenBaseline("editor-connected");
+    expect(baseline, "record one with npm run golden:record -- --connected").toBeTruthy();
+    const committed = JSON.parse(baseline!) as GoldenSurface;
+    expect(actionOrderProblems(committed)).toEqual([]);
+    expect(unsortedEnrichedActions(committed)).toEqual([]);
+  });
+
+  it("records the same bytes from a catalog enumerated in a different order", () => {
+    // The failure this half kept hitting: a healthy editor, restarted, handing
+    // the same tools back in another sequence. Reproduced here from one editor
+    // by permuting the recorded catalog and normalizing it again.
+    const permuted = permuteEnrichedActions(recording.surface, 20250817);
+    expect(
+      serializeGolden(permuted),
+      "the permutation changed nothing, so this proves nothing",
+    ).not.toBe(serialized);
+    canonicalizeActionOrder(permuted);
+    expect(serializeGolden(permuted)).toBe(serialized);
+  });
 
   it("matches the committed baseline", () => {
     const baseline = readGoldenBaseline("editor-connected");
