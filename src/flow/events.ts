@@ -31,8 +31,9 @@ export type FlowEvent =
       flowName: string;
       step: PlanStep;
       // Trimmed: drops result.data (which can be large - shell outputs,
-      // CSV rows, etc.). Subscribers that need the full data should pull
-      // from the final run_completed event or the flow.run response.
+      // CSV rows, etc.). Subscribers that need the full data read it from
+      // the `steps` array of the flow.run response, which carries each
+      // step's data untouched.
       result: {
         success: boolean;
         skipped: boolean;

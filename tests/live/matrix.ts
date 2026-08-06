@@ -385,7 +385,14 @@ export const SINGLE_EDITOR_CHANGES: MatrixCase[] = [
   {
     id: "flow-context-complete",
     text: "Flows receive the full context: elicit, getFlows, getPlugins.",
-    coverage: [{ kind: "live", file: LIVE_SINGLE, title: "hands a flow the whole context, including flows and plugins" }],
+    coverage: [
+      { kind: "live", file: LIVE_SINGLE, title: "hands a flow the whole context, including flows and plugins" },
+      {
+        kind: "engine-free",
+        file: "tests/unit/flow-run-result.test.ts",
+        title: "hands the step the accessors the context had, not a rebuilt subset",
+      },
+    ],
   },
   {
     id: "default-config-categories",
