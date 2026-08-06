@@ -241,7 +241,14 @@ export const SINGLE_EDITOR_CHANGES: MatrixCase[] = [
   {
     id: "attach-no-dangling-entry",
     text: "attach() no longer writes a dangling .uproject entry for an absent bridge.",
-    coverage: [{ kind: "live", file: LIVE_SINGLE, title: "writes no dangling plugin entry into a project that has no bridge" }],
+    coverage: [
+      { kind: "live", file: LIVE_SINGLE, title: "writes no dangling plugin entry into a project that has no bridge" },
+      {
+        kind: "engine-free",
+        file: "tests/unit/deployer-attach.test.ts",
+        title: "writes nothing into a project that has no bridge installed",
+      },
+    ],
   },
   {
     id: "staleness-against-package",
