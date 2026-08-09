@@ -81,6 +81,33 @@ describe("compileSchemaFields", () => {
     expect(compileSchemaFields(undefined)).toEqual({});
   });
 
+  it("accepts any JSON value when the type is omitted (#892)", () => {
+    const out = compileSchemaFields({ value: { description: "coerced via ImportText" } });
+    for (const v of [1, true, "EMyEnum::Foo", ["a"], { k: 1 }]) {
+      expect(out.value.safeParse(v).success).toBe(true);
+    }
+    expect(out.value.isOptional()).toBe(true);
+  });
+
+  it("still demands presence for a required untyped param", () => {
+    const out = compileSchemaFields({ value: { required: true } });
+    expect(out.value.safeParse(7).success).toBe(true);
+    expect(out.value.safeParse(undefined).success).toBe(false);
+    expect(out.value.isOptional()).toBe(false);
+  });
+
+  it("compiles a list of types into a union", () => {
+    const out = compileSchemaFields({ value: { type: ["number", "boolean"] } });
+    expect(out.value.safeParse(1).success).toBe(true);
+    expect(out.value.safeParse(true).success).toBe(true);
+    expect(out.value.safeParse("nope").success).toBe(false);
+  });
+
+  it("compiles a one-element type list as that type", () => {
+    const out = compileSchemaFields({ value: { type: ["string"] } });
+    expect(out.value.safeParse("ok").success).toBe(true);
+    expect(out.value.safeParse(3).success).toBe(false);
+  });
 });
 
 describe("parseManifest salvage (#892)", () => {

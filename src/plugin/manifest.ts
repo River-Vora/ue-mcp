@@ -9,8 +9,17 @@ import yaml from "js-yaml";
  * end user.
  */
 
+const ParamTypeSchema = z.enum(["string", "number", "boolean", "object", "array"]);
+
+export type ManifestParamType = z.infer<typeof ParamTypeSchema>;
+
 const SchemaFieldSchema = z.object({
-  type: z.enum(["string", "number", "boolean", "object", "array"]),
+  // Omitted means "any JSON value". Some handler params genuinely have no one
+  // type: a property write coerced through UE's ImportText takes a number, a
+  // bool, a string or an enum name with equal validity, and forcing the author
+  // to pick one of them would lie about the surface. A list of type names
+  // narrows that to a union when the author does know the alternatives.
+  type: z.union([ParamTypeSchema, z.array(ParamTypeSchema).nonempty()]).optional(),
   required: z.boolean().optional(),
   description: z.string().optional(),
 });
@@ -257,19 +266,47 @@ export function compileSchemaFields(
   if (!fields) return {};
   const out: Record<string, z.ZodType> = {};
   for (const [key, def] of Object.entries(fields)) {
-    let zod: z.ZodType;
-    switch (def.type) {
-      case "string": zod = z.string(); break;
-      case "number": zod = z.number(); break;
-      case "boolean": zod = z.boolean(); break;
-      case "object": zod = z.record(z.unknown()); break;
-      case "array": zod = z.array(z.unknown()); break;
-    }
+    let zod = zodForDeclaredType(def.type, def.required === true);
     if (def.description) zod = zod.describe(def.description);
     if (!def.required) zod = zod.optional();
     out[key] = zod;
   }
   return out;
+}
+
+function zodForParamType(type: ManifestParamType): z.ZodType {
+  switch (type) {
+    case "string": return z.string();
+    case "number": return z.number();
+    case "boolean": return z.boolean();
+    case "object": return z.record(z.unknown());
+    case "array": return z.array(z.unknown());
+  }
+}
+
+/**
+ * Zod for one declared `type`, which is a single name, a list of names, or
+ * absent. Absent compiles to `z.any()`, which accepts undefined on its own, so
+ * a required untyped param carries a refinement that puts the presence check
+ * back: `.isOptional()` is what the SDK reads to build the JSON Schema
+ * `required` list.
+ */
+function zodForDeclaredType(
+  type: ManifestSchemaField["type"],
+  required: boolean,
+): z.ZodType {
+  if (type === undefined) {
+    return required
+      ? z.any().refine((v) => v !== undefined, { message: "Required" })
+      : z.any();
+  }
+  if (Array.isArray(type)) {
+    const members = type.map(zodForParamType);
+    return members.length === 1
+      ? members[0]
+      : z.union(members as [z.ZodType, z.ZodType, ...z.ZodType[]]);
+  }
+  return zodForParamType(type);
 }
 
 /**
