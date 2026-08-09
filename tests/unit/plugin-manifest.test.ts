@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { PluginManifestSchema, prefixedActionName, compileSchemaFields } from "../../src/plugin/manifest.js";
+import {
+  PluginManifestSchema,
+  prefixedActionName,
+  compileSchemaFields,
+  parseManifest,
+} from "../../src/plugin/manifest.js";
 import { satisfiesMinimum, compareVersions } from "../../src/plugin/version.js";
 
 describe("PluginManifestSchema", () => {
@@ -74,6 +79,72 @@ describe("compileSchemaFields", () => {
 
   it("returns empty for undefined", () => {
     expect(compileSchemaFields(undefined)).toEqual({});
+  });
+
+});
+
+describe("parseManifest salvage (#892)", () => {
+  const nativeManifest = (handlers: Record<string, unknown>) => ({
+    actionPrefix: "pie",
+    nativeModule: {
+      uePluginName: "PIE_Studio",
+      minBridgeApi: 1,
+      source: "ue/Plugins/PIE_Studio",
+      category: "pie",
+      handlers,
+    },
+  });
+
+  it("reports nothing dropped for a manifest that validates as authored", () => {
+    const { manifest, dropped } = parseManifest(
+      nativeManifest({ actor_set: { schema: { value: { type: "string" } } } }),
+    );
+    expect(dropped).toEqual([]);
+    expect(Object.keys(manifest.nativeModule!.handlers)).toEqual(["actor_set"]);
+  });
+
+  it("drops only the offending handler, keeping the rest of the category", () => {
+    const { manifest, dropped } = parseManifest(
+      nativeManifest({
+        actor_spawn: { schema: { class: { type: "string" } } },
+        actor_set: { schema: { value: { type: "not-a-type" } } },
+        snapshot: { schema: { target: { type: "string" } } },
+      }),
+    );
+    expect(Object.keys(manifest.nativeModule!.handlers)).toEqual(["actor_spawn", "snapshot"]);
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0].path).toBe("nativeModule.handlers.actor_set");
+  });
+
+  it("drops one inject action without taking its category down", () => {
+    const { manifest, dropped } = parseManifest({
+      actionPrefix: "vpp",
+      inject: {
+        pcg: {
+          good: { task: "vpp.good" },
+          bad: { task: "" },
+        },
+      },
+    });
+    expect(Object.keys(manifest.inject.pcg)).toEqual(["good"]);
+    expect(dropped.map((d) => d.path)).toEqual(["inject.pcg.bad"]);
+  });
+
+  it("prunes a task entry by its full dotted name", () => {
+    const { manifest, dropped } = parseManifest({
+      actionPrefix: "vpp",
+      tasks: {
+        "vpp.good": { class_path: "voxel/Good" },
+        "vpp.bad": { class_path: "" },
+      },
+    });
+    expect(Object.keys(manifest.tasks)).toEqual(["vpp.good"]);
+    expect(dropped.map((d) => d.path)).toEqual(["tasks.vpp.bad"]);
+  });
+
+  it("still fails the whole plugin on a structural error", () => {
+    expect(() => parseManifest({ actionPrefix: "NOT-VALID" })).toThrow();
+    expect(() => parseManifest({ nativeModule: { uePluginName: "X" } })).toThrow();
   });
 });
 

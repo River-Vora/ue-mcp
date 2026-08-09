@@ -152,9 +152,89 @@ export function findManifestPath(pkgDir: string): string | null {
   return null;
 }
 
+/** One manifest subtree removed to keep the rest of the plugin loadable. */
+export interface DroppedUnit {
+  /** Dotted manifest path, e.g. `nativeModule.handlers.actor_set`. */
+  path: string;
+  /** The validation error that cost it, already rendered for a log line. */
+  reason: string;
+}
+
 export interface ManifestParseResult {
   manifest: PluginManifest;
   manifestPath: string;
+  /** Units dropped by salvage. Empty when the manifest validated as authored. */
+  dropped: DroppedUnit[];
+}
+
+/**
+ * The smallest manifest subtree a validation error can be confined to. An
+ * error inside one of these costs that unit and nothing else, so a single
+ * malformed handler no longer takes its whole category off the surface.
+ * Returns null for anything structural (actionPrefix, nativeModule.source,
+ * a manifest that is not an object at all), which still fails the plugin.
+ */
+function salvageableUnit(issuePath: ReadonlyArray<string | number>): Array<string | number> | null {
+  const p = issuePath;
+  if (p[0] === "nativeModule" && p[1] === "handlers" && p.length >= 3) return p.slice(0, 3);
+  if (p[0] === "inject" && p.length >= 3) return p.slice(0, 3);
+  if (p[0] === "inject" && p.length === 2) return p.slice(0, 2);
+  if (p[0] === "provides" && p[2] === "actions" && p.length >= 4) return p.slice(0, 4);
+  if (p[0] === "provides" && p.length >= 2) return p.slice(0, 2);
+  if (p[0] === "flows" && p.length >= 2) return p.slice(0, 2);
+  if (p[0] === "tasks" && p.length >= 2) return p.slice(0, 2);
+  if (p[0] === "knowledge" && p.length >= 2) return p.slice(0, 2);
+  return null;
+}
+
+/** Delete `path` from a nested plain object. No-op if the path is not there. */
+function deleteAt(root: unknown, path: Array<string | number>): void {
+  let cur: unknown = root;
+  for (const key of path.slice(0, -1)) {
+    if (typeof cur !== "object" || cur === null) return;
+    cur = (cur as Record<string | number, unknown>)[key];
+  }
+  if (typeof cur !== "object" || cur === null) return;
+  delete (cur as Record<string | number, unknown>)[path[path.length - 1]];
+}
+
+/**
+ * Validate a manifest, dropping individually-salvageable units rather than
+ * rejecting the whole plugin. Throws (with Zod's full issue dump, as before)
+ * when any error lands outside a droppable unit.
+ */
+export function parseManifest(raw: unknown): { manifest: PluginManifest; dropped: DroppedUnit[] } {
+  const dropped: DroppedUnit[] = [];
+  let current = raw;
+  // Each pass removes at least one unit, so the loop is bounded by the number
+  // of units in the manifest; the cap is a backstop against a pathological
+  // schema where pruning cannot make progress.
+  for (let pass = 0; pass < 100; pass++) {
+    const result = PluginManifestSchema.safeParse(current);
+    if (result.success) return { manifest: result.data, dropped };
+
+    // Keyed by the rendered path only for dedup; the pruning itself uses the
+    // segment array, since a segment (a task name, say) may contain a dot.
+    const units = new Map<string, { unit: Array<string | number>; reason: string }>();
+    for (const issue of result.error.issues) {
+      const unit = salvageableUnit(issue.path);
+      if (!unit) throw result.error;
+      const key = unit.join(".");
+      if (!units.has(key)) {
+        units.set(key, { unit, reason: `${issue.path.join(".")}: ${issue.message}` });
+      }
+    }
+    if (units.size === 0) throw result.error;
+
+    current = structuredClone(current);
+    for (const [key, { unit, reason }] of units) {
+      deleteAt(current, unit);
+      dropped.push({ path: key, reason });
+    }
+  }
+  // Unreachable in practice: pruning that never converges means the schema
+  // rejects the pruned shape too, which is a bug in the schema, not the input.
+  throw new Error("manifest validation did not converge after 100 salvage passes");
 }
 
 export function loadManifest(pkgDir: string): ManifestParseResult {
@@ -163,8 +243,8 @@ export function loadManifest(pkgDir: string): ManifestParseResult {
     throw new Error(`ue-mcp.plugin.yml not found in ${pkgDir}`);
   }
   const raw = yaml.load(fs.readFileSync(manifestPath, "utf-8")) as unknown;
-  const manifest = PluginManifestSchema.parse(raw);
-  return { manifest, manifestPath };
+  const { manifest, dropped } = parseManifest(raw);
+  return { manifest, manifestPath, dropped };
 }
 
 /**
