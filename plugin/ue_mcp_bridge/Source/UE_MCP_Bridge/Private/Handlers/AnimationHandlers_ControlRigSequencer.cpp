@@ -23,6 +23,7 @@ namespace
 
 #include "HandlerAssetCreate.h"
 
+#include "AnimPose.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/Skeleton.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -34,6 +35,9 @@ namespace
 #include "Engine/SkeletalMesh.h"
 #include "Animation/SkeletalMeshActor.h"
 #include "Exporters/AnimSeqExportOption.h"
+#include "IControlRigObjectBinding.h"
+#include "ILevelSequenceEditorToolkit.h"
+#include "ISequencer.h"
 #include "LevelSequence.h"
 #include "LevelSequenceEditorBlueprintLibrary.h"
 #include "Misc/PackageName.h"
@@ -49,6 +53,7 @@ namespace
 #include "Sequencer/MovieSceneControlRigParameterTrack.h"
 #include "Tracks/MovieSceneSkeletalAnimationTrack.h"
 #include "Tracks/MovieSceneSpawnTrack.h"
+#include "Subsystems/AssetEditorSubsystem.h"
 #include "Units/Execution/RigUnit_InverseExecution.h"
 
 namespace
@@ -97,6 +102,41 @@ namespace
 		bool BoolValue = false;
 		float FloatValue = 0.0f;
 		int32 IntValue = 0;
+	};
+
+	struct FControlRigContactMetrics
+	{
+		double MaxPositionErrorCm = 0.0;
+		double MaxRotationErrorDegrees = 0.0;
+		int32 WorstPositionFrame = 0;
+		int32 WorstRotationFrame = 0;
+		FTransform WorstPositionExpected = FTransform::Identity;
+		FTransform WorstPositionActual = FTransform::Identity;
+	};
+
+	struct FControlRigContactStabilizerQA
+	{
+		FName Control;
+		ERigControlType ControlType = ERigControlType::Transform;
+		TArray<FTransform> Expected;
+		FControlRigContactMetrics Metrics;
+	};
+
+	struct FControlRigPreparedContactQA
+	{
+		int32 OperationIndex = INDEX_NONE;
+		FName Control;
+		FName DrivenReference;
+		ERigControlType ControlType = ERigControlType::Transform;
+		bool bHasDrivenReference = false;
+		bool bCheckRotation = false;
+		int32 FullWeightFrameCount = 0;
+		double PositionToleranceCm = 0.1;
+		double RotationToleranceDegrees = 0.5;
+		TArray<FFrameNumber> Frames;
+		TArray<FTransform> ExpectedSubject;
+		FControlRigContactMetrics Metrics;
+		TArray<FControlRigContactStabilizerQA> Stabilizers;
 	};
 
 	class FControlRigSequenceFocusGuard
@@ -810,6 +850,251 @@ namespace
 			default: return Patch.bTranslation || Patch.bRotation || Patch.bScale;
 		}
 	}
+
+	bool ControlRigSequencerControlHasTranslation(ERigControlType ControlType)
+	{
+		switch (ControlType)
+		{
+			case ERigControlType::Position:
+			case ERigControlType::Transform:
+			case ERigControlType::TransformNoScale:
+			case ERigControlType::EulerTransform:
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	bool ControlRigSequencerControlHasRotation(ERigControlType ControlType)
+	{
+		switch (ControlType)
+		{
+			case ERigControlType::Rotator:
+			case ERigControlType::Transform:
+			case ERigControlType::TransformNoScale:
+			case ERigControlType::EulerTransform:
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	double ControlRigSequencerSmoothStep(double Value)
+	{
+		const double T = FMath::Clamp(Value, 0.0, 1.0);
+		return T * T * (3.0 - 2.0 * T);
+	}
+
+	double ControlRigSequencerContactWeight(int32 Index, int32 FrameCount, int32 BlendIn, int32 BlendOut)
+	{
+		double Weight = 1.0;
+		if (BlendIn > 0)
+		{
+			Weight = FMath::Min(Weight, ControlRigSequencerSmoothStep(
+				static_cast<double>(Index) / static_cast<double>(BlendIn)));
+		}
+		if (BlendOut > 0)
+		{
+			Weight = FMath::Min(Weight, ControlRigSequencerSmoothStep(
+				static_cast<double>(FrameCount - 1 - Index) / static_cast<double>(BlendOut)));
+		}
+		return Weight;
+	}
+
+	FTransform ControlRigSequencerBlendContactTransform(
+		const FTransform& Before,
+		const FTransform& Target,
+		double Weight,
+		bool bBlendRotation)
+	{
+		FTransform Result = Before;
+		Result.SetTranslation(FMath::Lerp(Before.GetTranslation(), Target.GetTranslation(), Weight));
+		if (bBlendRotation)
+		{
+			const FQuat From = Before.GetRotation().GetNormalized();
+			FQuat To = Target.GetRotation().GetNormalized();
+			if ((From | To) < 0.0)
+			{
+				To = FQuat(-To.X, -To.Y, -To.Z, -To.W);
+			}
+			Result.SetRotation(FQuat::Slerp(From, To, Weight).GetNormalized());
+		}
+		Result.SetScale3D(Before.GetScale3D());
+		return Result;
+	}
+
+	bool ControlRigSequencerRegisterWriteFrames(
+		TSet<FString>& WrittenKeys,
+		FName Control,
+		const TArray<FFrameNumber>& Frames,
+		int32 OperationIndex,
+		FString& OutError)
+	{
+		for (const FFrameNumber Frame : Frames)
+		{
+			const FString Key = FString::Printf(
+				TEXT("%s|%d"), *Control.ToString().ToLower(), Frame.Value);
+			if (WrittenKeys.Contains(Key))
+			{
+				OutError = FString::Printf(
+					TEXT("operations[%d] overlaps another edit at %s frame %d"),
+					OperationIndex, *Control.ToString(), Frame.Value);
+				return false;
+			}
+			WrittenKeys.Add(Key);
+		}
+		return true;
+	}
+
+	USkeletalMeshComponent* ControlRigSequencerBoundSkeletalMesh(UControlRig* ControlRig)
+	{
+		if (!ControlRig) return nullptr;
+		const TSharedPtr<IControlRigObjectBinding> ObjectBinding = ControlRig->GetObjectBinding();
+		return ObjectBinding.IsValid()
+			? Cast<USkeletalMeshComponent>(ObjectBinding->GetBoundObject())
+			: nullptr;
+	}
+
+	bool ControlRigSequencerSampleReferenceTransforms(
+		const FControlRigSequenceSession& Session,
+		FName Reference,
+		const TArray<FFrameNumber>& Frames,
+		TArray<FTransform>& OutTransforms,
+		FString& OutError)
+	{
+		USkeletalMeshComponent* Component = ControlRigSequencerBoundSkeletalMesh(Session.ControlRig);
+		if (!Component)
+		{
+			OutError = TEXT("The Control Rig is not bound to a skeletal mesh component");
+			return false;
+		}
+		if (!Component->DoesSocketExist(Reference))
+		{
+			OutError = FString::Printf(TEXT("Driven bone or socket was not found: %s"), *Reference.ToString());
+			return false;
+		}
+		UMovieSceneSkeletalAnimationSection* SourceSection = nullptr;
+		for (UMovieSceneTrack* Track : Session.MovieScene->FindTracks(
+			UMovieSceneSkeletalAnimationTrack::StaticClass(), Session.BindingGuid, NAME_None))
+		{
+			for (UMovieSceneSection* Section : Track->GetAllSections())
+			{
+				auto* Candidate = Cast<UMovieSceneSkeletalAnimationSection>(Section);
+				if (!Candidate || !Candidate->Params.Animation) continue;
+				if (SourceSection && SourceSection != Candidate)
+				{
+					OutError = TEXT("contact_lock requires one source animation section in its edit session");
+					return false;
+				}
+				SourceSection = Candidate;
+			}
+		}
+		if (!SourceSection || !SourceSection->Params.Animation)
+		{
+			OutError = TEXT("The Control Rig edit session has no source animation section");
+			return false;
+		}
+
+		FAnimPoseEvaluationOptions Options;
+		Options.EvaluationType = EAnimDataEvalType::Raw;
+		Options.OptionalSkeletalMesh = Component->GetSkeletalMeshAsset();
+		Options.bShouldRetarget = true;
+		const bool bSocket = Component->GetSocketByName(Reference) != nullptr;
+		OutTransforms.Init(FTransform::Identity, Frames.Num());
+		for (int32 Index = 0; Index < Frames.Num(); ++Index)
+		{
+			const FFrameTime TickTime = FFrameRate::TransformTime(
+				FFrameTime(Frames[Index]),
+				Session.MovieScene->GetDisplayRate(),
+				Session.MovieScene->GetTickResolution());
+			const double AnimationTime = SourceSection->MapTimeToAnimation(
+				TickTime, Session.MovieScene->GetTickResolution());
+			FAnimPose Pose;
+			UAnimPoseExtensions::GetAnimPoseAtTime(
+				SourceSection->Params.Animation, AnimationTime, Options, Pose);
+			OutTransforms[Index] = bSocket
+				? UAnimPoseExtensions::GetSocketPose(Pose, Reference, EAnimPoseSpaces::World)
+				: UAnimPoseExtensions::GetBonePose(Pose, Reference, EAnimPoseSpaces::World);
+			if (OutTransforms[Index].ContainsNaN())
+			{
+				OutError = FString::Printf(
+					TEXT("Driven reference %s evaluated to an invalid component-space transform"),
+					*Reference.ToString());
+				return false;
+			}
+		}
+		if (OutTransforms.IsEmpty())
+		{
+			OutError = TEXT("contact_lock requires at least one frame");
+			return false;
+		}
+		return true;
+	}
+
+	double ControlRigSequencerRotationErrorDegrees(const FQuat& Expected, const FQuat& Actual)
+	{
+		const double Dot = FMath::Clamp(
+			FMath::Abs(Expected.GetNormalized() | Actual.GetNormalized()), 0.0, 1.0);
+		return FMath::RadiansToDegrees(2.0 * FMath::Acos(Dot));
+	}
+
+	void ControlRigSequencerMeasureContact(
+		const TArray<FFrameNumber>& Frames,
+		const TArray<FTransform>& Expected,
+		const TArray<FTransform>& Actual,
+		bool bCheckPosition,
+		bool bCheckRotation,
+		FControlRigContactMetrics& OutMetrics)
+	{
+		for (int32 Index = 0; Index < Frames.Num(); ++Index)
+		{
+			if (bCheckPosition)
+			{
+				const double Error = FVector::Distance(
+					Expected[Index].GetTranslation(), Actual[Index].GetTranslation());
+				if (Index == 0 || Error > OutMetrics.MaxPositionErrorCm)
+				{
+					OutMetrics.MaxPositionErrorCm = Error;
+					OutMetrics.WorstPositionFrame = Frames[Index].Value;
+					OutMetrics.WorstPositionExpected = Expected[Index];
+					OutMetrics.WorstPositionActual = Actual[Index];
+				}
+			}
+			if (bCheckRotation)
+			{
+				const double Error = ControlRigSequencerRotationErrorDegrees(
+					Expected[Index].GetRotation(), Actual[Index].GetRotation());
+				if (Index == 0 || Error > OutMetrics.MaxRotationErrorDegrees)
+				{
+					OutMetrics.MaxRotationErrorDegrees = Error;
+					OutMetrics.WorstRotationFrame = Frames[Index].Value;
+				}
+			}
+		}
+	}
+
+	TSharedPtr<FJsonObject> ControlRigSequencerContactMetricsJson(
+		const FControlRigContactMetrics& Metrics,
+		bool bCheckPosition,
+		bool bCheckRotation)
+	{
+		auto Object = MakeShared<FJsonObject>();
+		if (bCheckPosition)
+		{
+			Object->SetNumberField(TEXT("maxPositionErrorCm"), Metrics.MaxPositionErrorCm);
+			Object->SetNumberField(TEXT("worstPositionFrame"), Metrics.WorstPositionFrame);
+			Object->SetObjectField(
+				TEXT("worstPositionExpected"), ControlRigSequencerTransformJson(Metrics.WorstPositionExpected));
+			Object->SetObjectField(
+				TEXT("worstPositionActual"), ControlRigSequencerTransformJson(Metrics.WorstPositionActual));
+		}
+		if (bCheckRotation)
+		{
+			Object->SetNumberField(TEXT("maxRotationErrorDegrees"), Metrics.MaxRotationErrorDegrees);
+			Object->SetNumberField(TEXT("worstRotationFrame"), Metrics.WorstRotationFrame);
+		}
+		return Object;
+	}
 }
 
 #endif // UE_MCP_HAS_5_8_API
@@ -1349,6 +1634,10 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 #else
 	FString SequencePath;
 	if (auto Error = RequireString(Params, TEXT("sequencePath"), SequencePath)) return Error;
+	if (MCPIsProtectedAssetPath(SequencePath))
+	{
+		return MCPError(FString::Printf(TEXT("Protected asset cannot be modified: %s"), *SequencePath));
+	}
 	ULevelSequence* Sequence = Cast<ULevelSequence>(UEditorAssetLibrary::LoadAsset(SequencePath));
 	if (!Sequence) return MCPError(FString::Printf(TEXT("LevelSequence not found: %s"), *SequencePath));
 	FControlRigSequenceFocusGuard Focus(Sequence);
@@ -1368,6 +1657,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 	int32 RangeEndExclusive = 0;
 	ControlRigSequencerDisplayRange(Session.MovieScene, RangeStart, RangeEndExclusive);
 	TArray<FControlRigPreparedWrite> Prepared;
+	TArray<FControlRigPreparedContactQA> PreparedContacts;
 	TSet<FString> WrittenKeys;
 
 	for (int32 OperationIndex = 0; OperationIndex < Operations->Num(); ++OperationIndex)
@@ -1389,13 +1679,15 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 		const bool bSetOperation = Op == TEXT("set");
 		const bool bSetKeysOperation = Op == TEXT("set_keys");
 		const bool bOffsetOperation = Op == TEXT("offset");
+		const bool bContactOperation = Op == TEXT("contact_lock");
 		const bool bBoolOperation = Op == TEXT("set_bool");
 		const bool bFloatOperation = Op == TEXT("set_float");
 		const bool bIntOperation = Op == TEXT("set_int");
-		if (!bSetOperation && !bSetKeysOperation && !bOffsetOperation && !bBoolOperation && !bFloatOperation && !bIntOperation)
+		if (!bSetOperation && !bSetKeysOperation && !bOffsetOperation && !bContactOperation
+			&& !bBoolOperation && !bFloatOperation && !bIntOperation)
 		{
 			return MCPError(FString::Printf(
-				TEXT("operations[%d].op must be 'set_keys', 'set', 'offset', 'set_bool', 'set_float', or 'set_int'"),
+				TEXT("operations[%d].op must be 'set_keys', 'set', 'offset', 'contact_lock', 'set_bool', 'set_float', or 'set_int'"),
 				OperationIndex));
 		}
 		if (bBoolOperation)
@@ -1417,6 +1709,11 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 		{
 			return MCPError(FString::Printf(TEXT("Transform control not found: %s"), *ControlString));
 		}
+		else if (bContactOperation && !ControlRigSequencerControlHasTranslation(Control->Settings.ControlType))
+		{
+			return MCPError(FString::Printf(
+				TEXT("contact_lock driver control must support translation: %s"), *ControlString));
+		}
 
 		FControlRigPreparedWrite Write;
 		Write.Control = ControlName;
@@ -1428,9 +1725,18 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 		TArray<FTransform> AbsoluteKeyTransforms;
 		if (Write.ValueType == EControlRigPreparedValueType::Transform)
 		{
-			FString CanonicalSpace;
-			if (!ControlRigSequencerReadSpace(OptionalString(Operation, TEXT("space"), TEXT("local")), Write.Space, CanonicalSpace, Error))
-				return MCPError(FString::Printf(TEXT("operations[%d]: %s"), OperationIndex, *Error));
+			if (bContactOperation)
+			{
+				if (Operation->HasField(TEXT("space")))
+					return MCPError(FString::Printf(TEXT("operations[%d].contact_lock always uses component space"), OperationIndex));
+				Write.Space = EControlRigTransformSpace::Global;
+			}
+			else
+			{
+				FString CanonicalSpace;
+				if (!ControlRigSequencerReadSpace(OptionalString(Operation, TEXT("space"), TEXT("local")), Write.Space, CanonicalSpace, Error))
+					return MCPError(FString::Printf(TEXT("operations[%d]: %s"), OperationIndex, *Error));
+			}
 		}
 
 		if (bSetKeysOperation)
@@ -1542,7 +1848,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 				}
 			}
 		}
-		else if (bOffsetOperation)
+		else if (bOffsetOperation || bContactOperation)
 		{
 			double StartNumber = 0.0;
 			double EndNumber = 0.0;
@@ -1580,11 +1886,9 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 		{
 			if (Frame.Value < RangeStart || Frame.Value >= RangeEndExclusive)
 				return MCPError(FString::Printf(TEXT("operations[%d] frame %d is outside [%d, %d)"), OperationIndex, Frame.Value, RangeStart, RangeEndExclusive));
-			const FString Key = FString::Printf(TEXT("%s|%d"), *ControlName.ToString().ToLower(), Frame.Value);
-			if (WrittenKeys.Contains(Key))
-				return MCPError(FString::Printf(TEXT("operations[%d] overlaps another edit at %s frame %d"), OperationIndex, *ControlString, Frame.Value));
-			WrittenKeys.Add(Key);
 		}
+		if (!ControlRigSequencerRegisterWriteFrames(WrittenKeys, ControlName, Write.Frames, OperationIndex, Error))
+			return MCPError(Error);
 
 		if (Write.ValueType == EControlRigPreparedValueType::Bool)
 		{
@@ -1609,6 +1913,301 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 		}
 		else
 		{
+			if (bContactOperation)
+			{
+				const TSharedPtr<FJsonObject>* TargetObject = nullptr;
+				if (!Operation->TryGetObjectField(TEXT("target"), TargetObject)
+					|| !TargetObject || !TargetObject->IsValid())
+				{
+					return MCPError(FString::Printf(TEXT("operations[%d].target must be an object"), OperationIndex));
+				}
+				const bool bTargetRotation = (*TargetObject)->HasField(TEXT("rotationQuaternion"));
+				if (!(*TargetObject)->HasField(TEXT("translation"))
+					|| (*TargetObject)->Values.Num() != (bTargetRotation ? 2 : 1))
+				{
+					return MCPError(FString::Printf(
+						TEXT("operations[%d].target must contain translation and optional rotationQuaternion only"),
+						OperationIndex));
+				}
+				if (bTargetRotation && !ControlRigSequencerControlHasRotation(Control->Settings.ControlType))
+				{
+					return MCPError(FString::Printf(
+						TEXT("contact_lock driver control must support rotation when target.rotationQuaternion is set: %s"),
+						*ControlString));
+				}
+
+				FVector TargetTranslation;
+				FQuat TargetRotation = FQuat::Identity;
+				if (!ControlRigSequencerReadVector(*TargetObject, TEXT("translation"), TargetTranslation, Error)
+					|| (bTargetRotation && !ControlRigSequencerReadNormalizedQuaternion(*TargetObject, TargetRotation, Error)))
+				{
+					return MCPError(FString::Printf(TEXT("operations[%d].target: %s"), OperationIndex, *Error));
+				}
+
+				auto ReadNonNegativeFrameCount = [&](const TCHAR* Field, int32& OutValue) -> bool
+				{
+					OutValue = 0;
+					const TSharedPtr<FJsonValue>* Value = Operation->Values.Find(Field);
+					if (!Value || !Value->IsValid() || (*Value)->IsNull()) return true;
+					if ((*Value)->Type != EJson::Number)
+					{
+						Error = FString::Printf(TEXT("operations[%d].%s must be a non-negative integer"), OperationIndex, Field);
+						return false;
+					}
+					const double Number = (*Value)->AsNumber();
+					if (!FMath::IsFinite(Number)
+						|| !FMath::IsNearlyEqual(Number, FMath::RoundToDouble(Number))
+						|| Number < 0.0 || Number > static_cast<double>(MAX_int32))
+					{
+						Error = FString::Printf(TEXT("operations[%d].%s must be a non-negative integer"), OperationIndex, Field);
+						return false;
+					}
+					OutValue = static_cast<int32>(FMath::RoundToInt(Number));
+					return true;
+				};
+				int32 BlendIn = 0;
+				int32 BlendOut = 0;
+				if (!ReadNonNegativeFrameCount(TEXT("blendInFrames"), BlendIn)
+					|| !ReadNonNegativeFrameCount(TEXT("blendOutFrames"), BlendOut))
+				{
+					return MCPError(Error);
+				}
+				const int64 IntervalCount = static_cast<int64>(Write.Frames.Last().Value)
+					- static_cast<int64>(Write.Frames[0].Value);
+				if (static_cast<int64>(BlendIn) + static_cast<int64>(BlendOut) > IntervalCount)
+				{
+					return MCPError(FString::Printf(
+						TEXT("operations[%d] blends must leave at least one fully constrained frame"),
+						OperationIndex));
+				}
+
+				auto ReadTolerance = [&](const TCHAR* Field, double Default, double Maximum, double& OutValue) -> bool
+				{
+					OutValue = Default;
+					const TSharedPtr<FJsonValue>* Value = Operation->Values.Find(Field);
+					if (!Value || !Value->IsValid() || (*Value)->IsNull()) return true;
+					if ((*Value)->Type != EJson::Number)
+					{
+						Error = FString::Printf(TEXT("operations[%d].%s must be a positive finite number"), OperationIndex, Field);
+						return false;
+					}
+					const double Number = (*Value)->AsNumber();
+					if (!FMath::IsFinite(Number) || Number <= 0.0 || Number > Maximum)
+					{
+						Error = FString::Printf(
+							TEXT("operations[%d].%s must be greater than zero and at most %.3f"),
+							OperationIndex, Field, Maximum);
+						return false;
+					}
+					OutValue = Number;
+					return true;
+				};
+				double PositionToleranceCm = 0.1;
+				double RotationToleranceDegrees = 0.5;
+				if (!ReadTolerance(TEXT("positionToleranceCm"), 0.1, 100.0, PositionToleranceCm)
+					|| !ReadTolerance(TEXT("rotationToleranceDegrees"), 0.5, 180.0, RotationToleranceDegrees))
+				{
+					return MCPError(Error);
+				}
+
+				FString DrivenReferenceString;
+				const bool bHasDrivenReference = Operation->HasField(TEXT("drivenReference"));
+				if (bHasDrivenReference
+					&& (!Operation->TryGetStringField(TEXT("drivenReference"), DrivenReferenceString)
+						|| DrivenReferenceString.IsEmpty()))
+				{
+					return MCPError(FString::Printf(
+						TEXT("operations[%d].drivenReference must be a non-empty bone or socket name"),
+						OperationIndex));
+				}
+				const FName DrivenReference(*DrivenReferenceString);
+
+				TArray<FName> StabilizerNames;
+				const TSharedPtr<FJsonValue>* StabilizerValue = Operation->Values.Find(TEXT("stabilizeControls"));
+				if (StabilizerValue && StabilizerValue->IsValid() && !(*StabilizerValue)->IsNull())
+				{
+					const TArray<TSharedPtr<FJsonValue>>* StabilizerValues = nullptr;
+					if (!Operation->TryGetArrayField(TEXT("stabilizeControls"), StabilizerValues) || !StabilizerValues)
+					{
+						return MCPError(FString::Printf(TEXT("operations[%d].stabilizeControls must be an array"), OperationIndex));
+					}
+					if (StabilizerValues->Num() > 8)
+					{
+						return MCPError(FString::Printf(TEXT("operations[%d] supports at most 8 stabilizer controls"), OperationIndex));
+					}
+					for (int32 StabilizerIndex = 0; StabilizerIndex < StabilizerValues->Num(); ++StabilizerIndex)
+					{
+						const TSharedPtr<FJsonValue>& Value = (*StabilizerValues)[StabilizerIndex];
+						if (!Value.IsValid() || Value->Type != EJson::String || Value->AsString().IsEmpty())
+						{
+							return MCPError(FString::Printf(
+								TEXT("operations[%d].stabilizeControls[%d] must be a non-empty string"),
+								OperationIndex, StabilizerIndex));
+						}
+						const FName StabilizerName(*Value->AsString());
+						if (StabilizerName == ControlName || StabilizerNames.Contains(StabilizerName))
+						{
+							return MCPError(FString::Printf(
+								TEXT("operations[%d] stabilizers must be unique and cannot include the driver control"),
+								OperationIndex));
+						}
+						FRigControlElement* Stabilizer = Session.ControlRig->FindControl(StabilizerName);
+						if (!Stabilizer || !Stabilizer->Settings.IsAnimatable()
+							|| !ControlRigSequencerIsTransformControl(Stabilizer)
+							|| (!ControlRigSequencerControlHasTranslation(Stabilizer->Settings.ControlType)
+								&& !ControlRigSequencerControlHasRotation(Stabilizer->Settings.ControlType)))
+						{
+							return MCPError(FString::Printf(
+								TEXT("contact_lock stabilizer must be an animatable position and/or rotation control: %s"),
+								*StabilizerName.ToString()));
+						}
+						if (!ControlRigSequencerRegisterWriteFrames(
+							WrittenKeys, StabilizerName, Write.Frames, OperationIndex, Error))
+						{
+							return MCPError(Error);
+						}
+						StabilizerNames.Add(StabilizerName);
+					}
+				}
+
+				const int64 CellCount = static_cast<int64>(Write.Frames.Num())
+					* static_cast<int64>(StabilizerNames.Num() + 1);
+				if (CellCount > ControlRigSequencerMaxFrames)
+				{
+					return MCPError(FString::Printf(
+						TEXT("operations[%d] is limited to %d contact control-frame cells"),
+						OperationIndex, ControlRigSequencerMaxFrames));
+				}
+
+				TArray<FName> ContactControls{ControlName};
+				ContactControls.Append(StabilizerNames);
+				const TArray<FArrayOfRigControlTransforms> Existing =
+					UControlRigSequencerEditorLibrary::BatchGetControlTransforms(
+						Session.Sequence, Session.ControlRig, ContactControls, Write.Frames,
+						EControlRigTransformSpace::Global, EMovieSceneTimeUnit::DisplayRate);
+				if (Existing.Num() != ContactControls.Num())
+				{
+					return MCPError(FString::Printf(
+						TEXT("Could not sample every contact_lock control before operations[%d]"),
+						OperationIndex));
+				}
+				TMap<FName, const FArrayOfRigControlTransforms*> ExistingByControl;
+				for (const FArrayOfRigControlTransforms& Values : Existing)
+				{
+					if (Values.Transforms.Num() != Write.Frames.Num())
+					{
+						return MCPError(FString::Printf(
+							TEXT("Could not sample every contact_lock frame before operations[%d]"),
+							OperationIndex));
+					}
+					ExistingByControl.Add(Values.ControlName, &Values);
+				}
+				const FArrayOfRigControlTransforms* const* DriverValues = ExistingByControl.Find(ControlName);
+				if (!DriverValues || !*DriverValues)
+				{
+					return MCPError(FString::Printf(TEXT("Could not sample contact_lock driver %s"), *ControlString));
+				}
+				Write.Before = (*DriverValues)->Transforms;
+				Write.After.SetNum(Write.Frames.Num());
+
+				TArray<FTransform> SubjectBefore = Write.Before;
+				if (bHasDrivenReference
+					&& !ControlRigSequencerSampleReferenceTransforms(
+						Session, DrivenReference, Write.Frames, SubjectBefore, Error))
+				{
+					return MCPError(FString::Printf(TEXT("operations[%d]: %s"), OperationIndex, *Error));
+				}
+
+				FControlRigPreparedContactQA ContactQA;
+				ContactQA.OperationIndex = OperationIndex;
+				ContactQA.Control = ControlName;
+				ContactQA.DrivenReference = DrivenReference;
+				ContactQA.ControlType = Control->Settings.ControlType;
+				ContactQA.bHasDrivenReference = bHasDrivenReference;
+				ContactQA.bCheckRotation = bTargetRotation;
+				ContactQA.PositionToleranceCm = PositionToleranceCm;
+				ContactQA.RotationToleranceDegrees = RotationToleranceDegrees;
+				ContactQA.Frames = Write.Frames;
+				ContactQA.ExpectedSubject.SetNum(Write.Frames.Num());
+
+				TArray<double> Weights;
+				Weights.SetNum(Write.Frames.Num());
+				for (int32 Index = 0; Index < Write.Frames.Num(); ++Index)
+				{
+					const double Weight = ControlRigSequencerContactWeight(
+						Index, Write.Frames.Num(), BlendIn, BlendOut);
+					Weights[Index] = Weight;
+					if (Weight >= 1.0 - UE_DOUBLE_SMALL_NUMBER) ++ContactQA.FullWeightFrameCount;
+
+					FTransform SubjectTarget = SubjectBefore[Index];
+					SubjectTarget.SetTranslation(TargetTranslation);
+					if (bTargetRotation) SubjectTarget.SetRotation(TargetRotation);
+					ContactQA.ExpectedSubject[Index] = ControlRigSequencerBlendContactTransform(
+						SubjectBefore[Index], SubjectTarget, Weight, bTargetRotation);
+
+					if (bHasDrivenReference)
+					{
+						const FTransform SubjectRelativeToDriver =
+							SubjectBefore[Index].GetRelativeTransform(Write.Before[Index]);
+						FTransform DriverTarget = SubjectRelativeToDriver.GetRelativeTransformReverse(
+							ContactQA.ExpectedSubject[Index]);
+						DriverTarget.SetScale3D(Write.Before[Index].GetScale3D());
+						if (!ControlRigSequencerControlHasRotation(Control->Settings.ControlType))
+						{
+							DriverTarget.SetRotation(Write.Before[Index].GetRotation());
+						}
+						if (DriverTarget.ContainsNaN())
+						{
+							return MCPError(FString::Printf(
+								TEXT("operations[%d] produced an invalid driver transform at frame %d"),
+								OperationIndex, Write.Frames[Index].Value));
+						}
+						Write.After[Index] = DriverTarget;
+					}
+					else
+					{
+						Write.After[Index] = ContactQA.ExpectedSubject[Index];
+					}
+				}
+
+				for (const FName StabilizerName : StabilizerNames)
+				{
+					const FArrayOfRigControlTransforms* const* StabilizerValues = ExistingByControl.Find(StabilizerName);
+					FRigControlElement* Stabilizer = Session.ControlRig->FindControl(StabilizerName);
+					if (!StabilizerValues || !*StabilizerValues || !Stabilizer)
+					{
+						return MCPError(FString::Printf(TEXT("Could not prepare stabilizer %s"), *StabilizerName.ToString()));
+					}
+					FControlRigPreparedWrite StabilizerWrite;
+					StabilizerWrite.Control = StabilizerName;
+					StabilizerWrite.Op = Op;
+					StabilizerWrite.Space = EControlRigTransformSpace::Global;
+					StabilizerWrite.ValueType = EControlRigPreparedValueType::Transform;
+					StabilizerWrite.Frames = Write.Frames;
+					StabilizerWrite.Before = (*StabilizerValues)->Transforms;
+					StabilizerWrite.After.SetNum(Write.Frames.Num());
+					const FTransform Anchor = StabilizerWrite.Before[0];
+					const bool bStabilizeRotation =
+						ControlRigSequencerControlHasRotation(Stabilizer->Settings.ControlType);
+					for (int32 Index = 0; Index < Write.Frames.Num(); ++Index)
+					{
+						StabilizerWrite.After[Index] = ControlRigSequencerBlendContactTransform(
+							StabilizerWrite.Before[Index], Anchor, Weights[Index], bStabilizeRotation);
+					}
+
+					FControlRigContactStabilizerQA StabilizerQA;
+					StabilizerQA.Control = StabilizerName;
+					StabilizerQA.ControlType = Stabilizer->Settings.ControlType;
+					StabilizerQA.Expected = StabilizerWrite.After;
+					ContactQA.Stabilizers.Add(MoveTemp(StabilizerQA));
+					Prepared.Add(MoveTemp(StabilizerWrite));
+				}
+
+				PreparedContacts.Add(MoveTemp(ContactQA));
+				Prepared.Add(MoveTemp(Write));
+				continue;
+			}
+
 			const TArray<FName> OneControl{ControlName};
 			const TArray<FArrayOfRigControlTransforms> Existing = UControlRigSequencerEditorLibrary::BatchGetControlTransforms(
 				Session.Sequence, Session.ControlRig, OneControl, Write.Frames, Write.Space, EMovieSceneTimeUnit::DisplayRate);
@@ -1784,6 +2383,107 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 				}
 			}
 		}
+
+		if (!bApplyFailed)
+		{
+			for (FControlRigPreparedContactQA& Contact : PreparedContacts)
+			{
+				if (!Contact.bHasDrivenReference)
+				{
+					const TArray<FArrayOfRigControlTransforms> Actual =
+						UControlRigSequencerEditorLibrary::BatchGetControlTransforms(
+							Session.Sequence, Session.ControlRig, {Contact.Control}, Contact.Frames,
+							EControlRigTransformSpace::Global, EMovieSceneTimeUnit::DisplayRate);
+					if (Actual.Num() != 1 || Actual[0].Transforms.Num() != Contact.Frames.Num())
+					{
+						bApplyFailed = true;
+						ApplyError = FString::Printf(
+							TEXT("Could not perform final contact_lock readback for %s"),
+							*Contact.Control.ToString());
+						break;
+					}
+					ControlRigSequencerMeasureContact(
+						Contact.Frames, Contact.ExpectedSubject, Actual[0].Transforms,
+						true, Contact.bCheckRotation, Contact.Metrics);
+					if (Contact.Metrics.MaxPositionErrorCm > Contact.PositionToleranceCm
+						|| (Contact.bCheckRotation
+							&& Contact.Metrics.MaxRotationErrorDegrees > Contact.RotationToleranceDegrees))
+					{
+						bApplyFailed = true;
+						ApplyError = FString::Printf(
+							TEXT("contact_constraint_tolerance_exceeded: operations[%d] %s residual was %.4f cm at frame %d and %.4f degrees at frame %d"),
+							Contact.OperationIndex,
+							*Contact.Control.ToString(),
+							Contact.Metrics.MaxPositionErrorCm,
+							Contact.Metrics.WorstPositionFrame,
+							Contact.Metrics.MaxRotationErrorDegrees,
+							Contact.Metrics.WorstRotationFrame);
+						break;
+					}
+				}
+
+				if (!Contact.Stabilizers.IsEmpty())
+				{
+					TArray<FName> StabilizerNames;
+					for (const FControlRigContactStabilizerQA& Stabilizer : Contact.Stabilizers)
+					{
+						StabilizerNames.Add(Stabilizer.Control);
+					}
+					const TArray<FArrayOfRigControlTransforms> ActualStabilizers =
+						UControlRigSequencerEditorLibrary::BatchGetControlTransforms(
+							Session.Sequence, Session.ControlRig, StabilizerNames, Contact.Frames,
+							EControlRigTransformSpace::Global, EMovieSceneTimeUnit::DisplayRate);
+					if (ActualStabilizers.Num() != Contact.Stabilizers.Num())
+					{
+						bApplyFailed = true;
+						ApplyError = FString::Printf(
+							TEXT("Could not perform final contact_lock stabilizer readback for operations[%d]"),
+							Contact.OperationIndex);
+						break;
+					}
+					TMap<FName, const FArrayOfRigControlTransforms*> ActualByControl;
+					for (const FArrayOfRigControlTransforms& Values : ActualStabilizers)
+					{
+						ActualByControl.Add(Values.ControlName, &Values);
+					}
+					for (FControlRigContactStabilizerQA& Stabilizer : Contact.Stabilizers)
+					{
+						const FArrayOfRigControlTransforms* const* ActualValues =
+							ActualByControl.Find(Stabilizer.Control);
+						if (!ActualValues || !*ActualValues
+							|| (*ActualValues)->Transforms.Num() != Contact.Frames.Num())
+						{
+							bApplyFailed = true;
+							ApplyError = FString::Printf(
+								TEXT("Could not perform final contact_lock readback for stabilizer %s"),
+								*Stabilizer.Control.ToString());
+							break;
+						}
+						const bool bCheckPosition =
+							ControlRigSequencerControlHasTranslation(Stabilizer.ControlType);
+						const bool bCheckRotation =
+							ControlRigSequencerControlHasRotation(Stabilizer.ControlType);
+						ControlRigSequencerMeasureContact(
+							Contact.Frames, Stabilizer.Expected, (*ActualValues)->Transforms,
+							bCheckPosition, bCheckRotation, Stabilizer.Metrics);
+						if ((bCheckPosition
+								&& Stabilizer.Metrics.MaxPositionErrorCm > Contact.PositionToleranceCm)
+							|| (bCheckRotation
+								&& Stabilizer.Metrics.MaxRotationErrorDegrees > Contact.RotationToleranceDegrees))
+						{
+							bApplyFailed = true;
+							ApplyError = FString::Printf(
+								TEXT("contact_constraint_tolerance_exceeded: operations[%d] stabilizer %s residual was %.4f cm and %.4f degrees"),
+								Contact.OperationIndex, *Stabilizer.Control.ToString(),
+								Stabilizer.Metrics.MaxPositionErrorCm,
+								Stabilizer.Metrics.MaxRotationErrorDegrees);
+							break;
+						}
+					}
+					if (bApplyFailed) break;
+				}
+			}
+		}
 	}
 	if (bApplyFailed)
 	{
@@ -1806,7 +2506,8 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("sequencePath"), Session.Sequence->GetPathName());
 	Result->SetStringField(TEXT("bindingTag"), Session.BindingTag);
-	Result->SetNumberField(TEXT("appliedOperationCount"), Prepared.Num());
+	Result->SetNumberField(TEXT("appliedOperationCount"), Operations->Num());
+	Result->SetNumberField(TEXT("keyedControlWriteCount"), Prepared.Num());
 	int32 KeyedSamples = 0;
 	TArray<TSharedPtr<FJsonValue>> Applied;
 	for (const FControlRigPreparedWrite& Write : Prepared)
@@ -1820,6 +2521,44 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 	}
 	Result->SetNumberField(TEXT("keyedSampleCount"), KeyedSamples);
 	Result->SetArrayField(TEXT("applied"), Applied);
+	TArray<TSharedPtr<FJsonValue>> ContactResults;
+	for (const FControlRigPreparedContactQA& Contact : PreparedContacts)
+	{
+		auto Object = Contact.bHasDrivenReference
+			? MakeShared<FJsonObject>()
+			: ControlRigSequencerContactMetricsJson(Contact.Metrics, true, Contact.bCheckRotation);
+		Object->SetNumberField(TEXT("operationIndex"), Contact.OperationIndex);
+		Object->SetStringField(TEXT("control"), Contact.Control.ToString());
+		if (Contact.bHasDrivenReference)
+		{
+			Object->SetStringField(TEXT("drivenReference"), Contact.DrivenReference.ToString());
+			Object->SetStringField(TEXT("verification"), TEXT("bake_and_analyze_required"));
+		}
+		Object->SetNumberField(TEXT("frameCount"), Contact.Frames.Num());
+		Object->SetNumberField(TEXT("fullWeightFrameCount"), Contact.FullWeightFrameCount);
+		Object->SetNumberField(TEXT("positionToleranceCm"), Contact.PositionToleranceCm);
+		if (Contact.bCheckRotation)
+		{
+			Object->SetNumberField(TEXT("rotationToleranceDegrees"), Contact.RotationToleranceDegrees);
+		}
+		TArray<TSharedPtr<FJsonValue>> StabilizerResults;
+		for (const FControlRigContactStabilizerQA& Stabilizer : Contact.Stabilizers)
+		{
+			const bool bCheckPosition =
+				ControlRigSequencerControlHasTranslation(Stabilizer.ControlType);
+			const bool bCheckRotation =
+				ControlRigSequencerControlHasRotation(Stabilizer.ControlType);
+			auto StabilizerObject = ControlRigSequencerContactMetricsJson(
+				Stabilizer.Metrics, bCheckPosition, bCheckRotation);
+			StabilizerObject->SetStringField(TEXT("control"), Stabilizer.Control.ToString());
+			StabilizerResults.Add(MakeShared<FJsonValueObject>(StabilizerObject));
+		}
+		Object->SetArrayField(TEXT("stabilizers"), StabilizerResults);
+		Object->SetBoolField(TEXT("keyReadbackPassed"), true);
+		if (!Contact.bHasDrivenReference) Object->SetBoolField(TEXT("passed"), true);
+		ContactResults.Add(MakeShared<FJsonValueObject>(Object));
+	}
+	Result->SetArrayField(TEXT("contactQa"), ContactResults);
 	MCPSetUpdated(Result);
 	return MCPResult(Result);
 #endif

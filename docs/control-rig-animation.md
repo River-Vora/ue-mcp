@@ -19,11 +19,64 @@ so `ue-mcp init` can install them with the other bundled workflow skills.
 |------------|----------------|
 | `begin_control_rig_edit`, `read_control_rig_edit`, `apply_control_rig_edits`, `bake_control_rig_edit` | UE 5.8 only; older engines return `unsupported_engine_version` and do not fall back to raw bone tracks |
 | `analyze_animation` | Cross-version; it uses the native animation APIs available in the engine against which the bridge was compiled |
-| IK Rig and IK Retargeter actions | See each action in the [tool reference](tool-reference.md); support predates the UE 5.8 Control Rig editing slice |
+| `configure_ik_rig`, `configure_ik_retargeter`, and `contact_lock` inside `apply_control_rig_edits` | UE 5.8 only; older engines return `unsupported_engine_version` |
+| Legacy IK Rig and IK Retargeter create/read actions | See each action in the [tool reference](tool-reference.md); their older-engine support is unchanged |
 
 The editing loop is native. `execute_python` and Computer Use are not part of
 it. If a required datum is missing, add a native UE-MCP read or write action
 instead of making an escape hatch part of the workflow.
+
+## Author IK and retarget context
+
+Control Rig edits operate most predictably when the selected skeleton already
+has explicit chains, goals, and a solver. On UE 5.8, configure an existing IK
+Rig with `configure_ik_rig` rather than writing reflected asset properties:
+
+```text
+animation(
+  action="configure_ik_rig",
+  rigPath="/Game/Rigs/IK_<character>",
+  retargetRoot="pelvis",
+  rootMotionBone="root",
+  chains=[...],
+  fullBodyIK={rootBone:"pelvis", goals:[...]}
+)
+```
+
+The operation validates every named bone, chain ancestry, goal, solver
+connection, and numeric setting before saving. `read_ik_rig` is the required
+round-trip check: verify its preview mesh, roots, chains and goal assignments,
+goals, exclusions, solver stack, and full-body effector settings. Do not treat
+a chain carrying a goal *name* as proof that the goal or solver exists.
+
+Configure retargeting with `configure_ik_retargeter`:
+
+```text
+animation(
+  action="configure_ik_retargeter",
+  retargeterPath="/Game/Rigs/RTG_<source>_<target>",
+  sourceRig="/Game/Rigs/IK_<source>",
+  targetRig="/Game/Rigs/IK_<target>",
+  sourcePreviewMesh="/Game/Meshes/SK_<source>",
+  targetPreviewMesh="/Game/Meshes/SK_<target>",
+  ensureDefaultOps=true,
+  autoMapMode="exact",
+  forceRemap=true,
+  chainMappings=[...],
+  pose={side:"target", name:"<named_pose>", create:true, autoAlign:"chain_to_chain", rotationOffsets:[...]}
+)
+```
+
+The UE 5.8 operation stack must receive both rigs; setting only the top-level
+retargeter reference is insufficient. Auto-map first, apply deliberate manual
+overrides second, then create and adjust a named pose. A whole-pose auto-align
+resets that pose before the manual rotation offsets are applied. Read the
+retargeter back and verify its per-operation rig assignments and mappings,
+current/named pose deltas, preview meshes, and processor validation messages.
+
+Partial mapping is valid when the target owns extra twist, metacarpal, or
+accessory chains. Record the intentionally unmapped chains and require all
+motion-critical chains instead of blindly requiring every target chain.
 
 ## The authoring loop
 
@@ -237,6 +290,55 @@ transform first. The rules are:
 Read the same frames again after applying. Check both local continuity and the
 global/component anatomical targets before baking.
 
+### Contact constraints
+
+Use `contact_lock` when a known Control Rig driver must hold a control, bone, or
+socket at a fixed mesh-component-space transform across an inclusive interval:
+
+```json
+{
+  "op": "contact_lock",
+  "control": "<keyable_ik_driver>",
+  "drivenReference": "<bone_or_socket>",
+  "startFrame": 12,
+  "endFrame": 38,
+  "target": {
+    "translation": { "x": 0, "y": 0, "z": 0 },
+    "rotationQuaternion": { "x": 0, "y": 0, "z": 0, "w": 1 }
+  },
+  "blendInFrames": 4,
+  "blendOutFrames": 4,
+  "stabilizeControls": ["<pole_or_secondary_control>"],
+  "positionToleranceCm": 0.1,
+  "rotationToleranceDegrees": 0.5
+}
+```
+
+Read the target from the source or session; the identity values above show only
+the payload shape. The session must contain one source skeletal-animation
+section. The bridge samples that AnimSequence at each mapped Sequencer frame,
+measures the bone/socket offset from the driver, and solves dense
+component-space driver keys. Smooth edge weights blend into and out of the
+lock, and at least one frame must remain fully constrained.
+
+The apply call transactionally reads back the driver and stabilizer keys. With
+`drivenReference`, `contactQa.verification` is
+`bake_and_analyze_required`: the composed layered bone/socket result is not
+claimed before export. Bake to a new AnimSequence, run `analyze_animation` on
+every constrained frame, and compare the driven reference with the target. If
+it exceeds the motion's acceptance tolerance, reject that output and revise the
+driver, stabilizers, or rig mapping. Without `drivenReference`, the driver
+itself is constrained and its residual is checked during apply.
+
+This is deliberately a generic contact primitive, not a foot-specific macro.
+It works for hands on props, planted feet, held tools, mechanical linkages, and
+other contacts when the rig exposes a translatable driver with the required
+degrees of freedom. The caller still discovers the correct driver and optional
+pole/stabilizer, handles foot roll or pelvis compensation when the rig needs
+them, and verifies the baked affected and unaffected bones. This is a one-pass
+rigid solve; it does not model collision, friction, joint limits, foot roll, or
+pelvis compensation.
+
 ### 7. Bake to a new asset
 
 ```text
@@ -346,6 +448,8 @@ versioned fixtures:
 | From-scratch gesture over a neutral source pose | Per-rig discovery, typed controls, dense quaternion keys, bake, numeric checks, and fixed-frame review |
 | Retarget between two known skeletons | Chain mapping, retarget pose, root behavior, proportions, and target-side axis discovery |
 | Copy an existing animation, switch/use IK, then modify the hand and elbow target | IK/FK scalar handling, endpoint and pole control, and preservation of unedited motion |
+| Full-body IK authoring from an existing mesh | Roots, ancestry-valid chains, concrete goals, solver/effector connections, save/reload round trip |
+| Bone/socket contact plus a simultaneous unrelated edit | Generic dense constraint solving, smooth transitions, transactional key readback, post-bake residual QA, and preservation outside the constraint |
 | Edge-case pack | Right-side mirroring or negative scale, dense source keys, additive-source rejection/flattening, layered sessions, scalar enums/floats, root motion, loop seams, and short clips |
 
 Each fixture records source/session/output asset paths, binding tag, engine

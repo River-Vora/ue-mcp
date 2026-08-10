@@ -83,10 +83,17 @@ describe("action classification", () => {
   });
 
   it("lets plain reads through", () => {
-    for (const key of ["project.get_status", "asset.list", "level.get_outliner", "reflection.reflect_class"]) {
+    for (const key of [
+      "project.get_status",
+      "asset.list",
+      "level.get_outliner",
+      "reflection.reflect_class",
+      "animation.read_control_rig_edit",
+    ]) {
       expect(classifyTaskClass(key).class, key).toBe("read");
       expect(requiresExplicitEditor("read")).toBe(false);
     }
+    expect(classifyTaskClass("animation.read_control_rig_edit").source).toBe("override");
   });
 
   it("reads a mutate verb anywhere in the name, not only at the front", () => {
