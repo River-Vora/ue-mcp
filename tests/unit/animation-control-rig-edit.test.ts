@@ -95,6 +95,26 @@ describe("animation Control Rig edit workflow", () => {
     expect(source).toContain("MakeMeshPoseIndex(Index).GetInt()");
   });
 
+  it("reports asset-rate-scaled duration and notify timing from the native analyzer", () => {
+    const source = readFileSync(
+      new URL(
+        "../../plugin/ue_mcp_bridge/Source/UE_MCP_Bridge/Private/Handlers/AnimationHandlers_Validation.cpp",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+
+    expect(source).toContain("const double RateScale = static_cast<double>(Sequence->RateScale)");
+    expect(source).toContain("const double PlaybackRateMagnitude = FMath::Abs(RateScale)");
+    expect(source).toContain("DurationSeconds / PlaybackRateMagnitude");
+    expect(source).toContain('SetNumberField(TEXT("rawTriggerTimeSeconds"), RawTriggerTimeSeconds)');
+    expect(source).toContain("RawTriggerTimeSeconds / PlaybackRateMagnitude");
+    expect(source.match(/SetNumberField\(TEXT\("rateScale"\), RateScale\)/g)).toHaveLength(2);
+    expect(source.match(/SetNumberField\(TEXT\("effectiveDurationSeconds"\), EffectiveDurationSeconds\)/g)).toHaveLength(2);
+    expect(source.match(/SetArrayField\(TEXT\("notifies"\), NotifyValues\)/g)).toHaveLength(2);
+    expect(source).toContain('SetField(TEXT("effectiveTriggerTimeSeconds"), MakeShared<FJsonValueNull>())');
+  });
+
   it("routes scalar controls through native Sequencer APIs with metadata and readback", () => {
     const source = readFileSync(
       new URL(

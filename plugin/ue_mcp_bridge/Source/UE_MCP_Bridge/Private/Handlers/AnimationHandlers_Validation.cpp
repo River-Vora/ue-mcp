@@ -222,6 +222,42 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AnalyzeAnimation(const TSharedPtr<FJs
 	{
 		return MCPError(TEXT("AnimSequence has an invalid duration or frame count"));
 	}
+	const double RateScale = static_cast<double>(Sequence->RateScale);
+	if (!FMath::IsFinite(RateScale))
+	{
+		return MCPError(TEXT("AnimSequence has an invalid RateScale"));
+	}
+	const double PlaybackRateMagnitude = FMath::Abs(RateScale);
+	const bool bHasEffectiveTiming = PlaybackRateMagnitude > 0.0;
+	const double EffectiveDurationSeconds = bHasEffectiveTiming
+		? DurationSeconds / PlaybackRateMagnitude
+		: 0.0;
+
+	TArray<TSharedPtr<FJsonValue>> NotifyValues;
+	NotifyValues.Reserve(Sequence->Notifies.Num());
+	for (const FAnimNotifyEvent& NotifyEvent : Sequence->Notifies)
+	{
+		const double RawTriggerTimeSeconds = static_cast<double>(NotifyEvent.GetTriggerTime());
+		if (!FMath::IsFinite(RawTriggerTimeSeconds))
+		{
+			return MCPError(TEXT("AnimSequence has a notify with an invalid trigger time"));
+		}
+
+		TSharedPtr<FJsonObject> NotifyObject = MakeShared<FJsonObject>();
+		NotifyObject->SetStringField(TEXT("name"), NotifyEvent.NotifyName.ToString());
+		NotifyObject->SetNumberField(TEXT("rawTriggerTimeSeconds"), RawTriggerTimeSeconds);
+		if (bHasEffectiveTiming)
+		{
+			NotifyObject->SetNumberField(
+				TEXT("effectiveTriggerTimeSeconds"),
+				RawTriggerTimeSeconds / PlaybackRateMagnitude);
+		}
+		else
+		{
+			NotifyObject->SetField(TEXT("effectiveTriggerTimeSeconds"), MakeShared<FJsonValueNull>());
+		}
+		NotifyValues.Add(MakeShared<FJsonValueObject>(NotifyObject));
+	}
 
 	TArray<int32> BoneIndices;
 	const TArray<TSharedPtr<FJsonValue>>* BoneNamesJson = nullptr;
@@ -553,6 +589,16 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AnalyzeAnimation(const TSharedPtr<FJs
 	Manifest->SetStringField(TEXT("skeletonPath"), Skeleton->GetPathName());
 	if (!SkeletalMeshPath.IsEmpty()) Manifest->SetStringField(TEXT("skeletalMeshPath"), SkeletalMeshPath);
 	Manifest->SetNumberField(TEXT("durationSeconds"), DurationSeconds);
+	Manifest->SetNumberField(TEXT("rateScale"), RateScale);
+	if (bHasEffectiveTiming)
+	{
+		Manifest->SetNumberField(TEXT("effectiveDurationSeconds"), EffectiveDurationSeconds);
+	}
+	else
+	{
+		Manifest->SetField(TEXT("effectiveDurationSeconds"), MakeShared<FJsonValueNull>());
+	}
+	Manifest->SetArrayField(TEXT("notifies"), NotifyValues);
 	TSharedPtr<FJsonObject> FrameRateObject = MakeShared<FJsonObject>();
 	FrameRateObject->SetNumberField(TEXT("numerator"), SourceRate.Numerator);
 	FrameRateObject->SetNumberField(TEXT("denominator"), SourceRate.Denominator);
@@ -628,6 +674,16 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AnalyzeAnimation(const TSharedPtr<FJs
 	Result->SetStringField(TEXT("skeletonPath"), Skeleton->GetPathName());
 	if (!SkeletalMeshPath.IsEmpty()) Result->SetStringField(TEXT("skeletalMeshPath"), SkeletalMeshPath);
 	Result->SetNumberField(TEXT("durationSeconds"), DurationSeconds);
+	Result->SetNumberField(TEXT("rateScale"), RateScale);
+	if (bHasEffectiveTiming)
+	{
+		Result->SetNumberField(TEXT("effectiveDurationSeconds"), EffectiveDurationSeconds);
+	}
+	else
+	{
+		Result->SetField(TEXT("effectiveDurationSeconds"), MakeShared<FJsonValueNull>());
+	}
+	Result->SetArrayField(TEXT("notifies"), NotifyValues);
 	Result->SetNumberField(TEXT("sourceFrameCount"), SourceFrameCount);
 	Result->SetNumberField(TEXT("sampleCount"), Frames.Num());
 	Result->SetObjectField(TEXT("displayRate"), FrameRateObject);

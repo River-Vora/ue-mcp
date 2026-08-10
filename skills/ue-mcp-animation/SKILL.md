@@ -66,6 +66,11 @@ elbow angle/plane stability, probed palm-normal alignment, speed/acceleration,
 direction changes, and drift in untouched bones. Numeric samples are the source
 of truth; screenshots are the human visual gate.
 
+Use the analyzer's `rateScale`, `effectiveDurationSeconds`, and per-notify
+`rawTriggerTimeSeconds` / `effectiveTriggerTimeSeconds` fields when validating
+gameplay release timing. Effective times use the asset-rate magnitude and are
+null when the asset rate is zero.
+
 For an exact native frame capture, without Computer Use or Python:
 
 1. `editor(action="open_asset", assetPath=<baked_anim>)`.

@@ -246,6 +246,12 @@ invalid-transform count, root displacement and maximum root speed, selected-bone
 bounds, and optional loop-seam root/joint errors. The manifest also records
 centimeter units and Unreal's +X forward, +Y right, +Z up convention.
 
+Timing metadata is explicit: `durationSeconds` is the raw sequence duration,
+`rateScale` is the AnimSequence asset rate, and `effectiveDurationSeconds` is
+the raw duration divided by the rate magnitude. Each `notifies` record includes
+`rawTriggerTimeSeconds` and its rate-scaled `effectiveTriggerTimeSeconds`. A
+zero asset rate reports null effective times because playback does not advance.
+
 Derive motion-specific assertions from the samples rather than screenshots:
 
 - wrist height relative to shoulder and the elbow-to-wrist direction
