@@ -20,6 +20,7 @@
 #include "Dom/JsonValue.h"
 #include "Engine/SkeletalMesh.h"
 #include "HAL/FileManager.h"
+#include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
 #include "Misc/MemStack.h"
 #include "Misc/Paths.h"
@@ -110,8 +111,9 @@ namespace
 
 	bool AnimQaResolveOutputDirectory(const FString& Requested, FString& OutDirectory, FString& OutError)
 	{
-		const FString AllowedRoot = FPaths::ConvertRelativePathToFull(
+		FString NormalizedRoot = FPaths::ConvertRelativePathToFull(
 			FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Codex"), TEXT("AnimationQA")));
+		FPaths::NormalizeDirectoryName(NormalizedRoot);
 
 		FString Candidate;
 		if (Requested.IsEmpty())
@@ -121,7 +123,13 @@ namespace
 		}
 		if (FPaths::IsRelative(Requested))
 		{
-			Candidate = FPaths::Combine(AllowedRoot, Requested);
+			FString ProjectRelativeCandidate = FPaths::ConvertRelativePathToFull(
+				FPaths::Combine(FPaths::ProjectDir(), Requested));
+			FPaths::NormalizeDirectoryName(ProjectRelativeCandidate);
+			Candidate = FPaths::IsSamePath(ProjectRelativeCandidate, NormalizedRoot)
+				|| FPaths::IsUnderDirectory(ProjectRelativeCandidate, NormalizedRoot)
+				? ProjectRelativeCandidate
+				: FPaths::Combine(NormalizedRoot, Requested);
 		}
 		else
 		{
@@ -129,8 +137,6 @@ namespace
 		}
 
 		Candidate = FPaths::ConvertRelativePathToFull(Candidate);
-		FString NormalizedRoot = AllowedRoot;
-		FPaths::NormalizeDirectoryName(NormalizedRoot);
 		FPaths::NormalizeDirectoryName(Candidate);
 		if (!FPaths::IsSamePath(Candidate, NormalizedRoot)
 			&& !FPaths::IsUnderDirectory(Candidate, NormalizedRoot))
@@ -156,6 +162,36 @@ namespace
 		}
 	}
 }
+
+#if WITH_DEV_AUTOMATION_TESTS
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAnimationAnalysisOutputDirectoryNormalizationTest,
+	"UE.MCP.Animation.Analysis.OutputDirectoryNormalization",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAnimationAnalysisOutputDirectoryNormalizationTest::RunTest(const FString& Parameters)
+{
+	const FString Leaf = TEXT("throw_production_v003_full");
+	const FString QualifiedRequest = FPaths::Combine(
+		TEXT("Saved"), TEXT("Codex"), TEXT("AnimationQA"), Leaf);
+	FString RootRelativeOutput;
+	FString QualifiedOutput;
+	FString RootRelativeError;
+	FString QualifiedError;
+	TestTrue(
+		TEXT("a path relative to the AnimationQA root resolves"),
+		AnimQaResolveOutputDirectory(Leaf, RootRelativeOutput, RootRelativeError));
+	TestTrue(
+		TEXT("a Project/Saved-qualified path resolves"),
+		AnimQaResolveOutputDirectory(QualifiedRequest, QualifiedOutput, QualifiedError));
+	TestTrue(
+		TEXT("both forms resolve to the same directory exactly once"),
+		FPaths::IsSamePath(RootRelativeOutput, QualifiedOutput));
+	return true;
+}
+
+#endif
 
 TSharedPtr<FJsonValue> FAnimationHandlers::AnalyzeAnimation(const TSharedPtr<FJsonObject>& Params)
 {
