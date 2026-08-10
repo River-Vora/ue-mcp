@@ -321,6 +321,18 @@ measures the bone/socket offset from the driver, and solves dense
 component-space driver keys. Smooth edge weights blend into and out of the
 lock, and at least one frame must remain fully constrained.
 
+FK bones commonly use skeleton translation retargeting, which discards their
+authored translation keys during AnimSequence playback. For an FK
+`drivenReference` contact on such a bone, the bridge instead resolves the
+driver-to-reference descendant chain, runs a per-frame FABRIK position solve,
+and writes local rotation-chain keys while preserving the source local bone
+translations. The result reports `solver=fk_rotation_chain`. This special FK
+path requires a driven bone and does not accept stabilizer controls; use an
+asset Control Rig when the contact targets a socket or also needs a pole or
+secondary stabilizer. A translation-only target leaves the driven control's
+orientation unkeyed; the end control joins the keyed chain only when
+`target.rotationQuaternion` is supplied.
+
 The apply call transactionally reads back the driver and stabilizer keys. With
 `drivenReference`, `contactQa.verification` is
 `bake_and_analyze_required`: the composed layered bone/socket result is not
@@ -332,12 +344,11 @@ itself is constrained and its residual is checked during apply.
 
 This is deliberately a generic contact primitive, not a foot-specific macro.
 It works for hands on props, planted feet, held tools, mechanical linkages, and
-other contacts when the rig exposes a translatable driver with the required
-degrees of freedom. The caller still discovers the correct driver and optional
+other contacts when the rig exposes a driver with the required degrees of
+freedom. The caller still discovers the correct driver and optional
 pole/stabilizer, handles foot roll or pelvis compensation when the rig needs
-them, and verifies the baked affected and unaffected bones. This is a one-pass
-rigid solve; it does not model collision, friction, joint limits, foot roll, or
-pelvis compensation.
+them, and verifies the baked affected and unaffected bones. It does not model
+collision, friction, joint limits, foot roll, or pelvis compensation.
 
 ### 7. Bake to a new asset
 

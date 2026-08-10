@@ -23,7 +23,9 @@ namespace
 
 #include "HandlerAssetCreate.h"
 
+#include "Algo/Reverse.h"
 #include "AnimPose.h"
+#include "FABRIK.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/Skeleton.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -33,6 +35,7 @@ namespace
 #include "Editor.h"
 #include "Engine/Blueprint.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/SkeletalMeshSocket.h"
 #include "Animation/SkeletalMeshActor.h"
 #include "Exporters/AnimSeqExportOption.h"
 #include "IControlRigObjectBinding.h"
@@ -45,6 +48,9 @@ namespace
 #include "MovieSceneBindingProxy.h"
 #include "MovieSceneObjectBindingID.h"
 #include "MovieSceneSpawnable.h"
+#if WITH_DEV_AUTOMATION_TESTS
+#include "Misc/AutomationTest.h"
+#endif
 #include "Rigs/FKControlRig.h"
 #include "Rigs/RigHierarchy.h"
 #include "ScopedTransaction.h"
@@ -129,6 +135,7 @@ namespace
 		FName DrivenReference;
 		ERigControlType ControlType = ERigControlType::Transform;
 		bool bHasDrivenReference = false;
+		bool bUsedFkRotationChain = false;
 		bool bCheckRotation = false;
 		int32 FullWeightFrameCount = 0;
 		double PositionToleranceCm = 0.1;
@@ -923,6 +930,65 @@ namespace
 		return Result;
 	}
 
+	bool ControlRigSequencerSolveRotationChain(
+		const TArray<FTransform>& SourceGlobals,
+		const FTransform& TargetEnd,
+		bool bTargetRotation,
+		TArray<FTransform>& OutGlobals,
+		double& OutPositionErrorCm)
+	{
+		if (SourceGlobals.Num() < 2)
+		{
+			return false;
+		}
+
+		TArray<FFABRIKChainLink> Links;
+		Links.Reserve(SourceGlobals.Num());
+		double MaximumReach = 0.0;
+		for (int32 Index = 0; Index < SourceGlobals.Num(); ++Index)
+		{
+			const FVector Position = SourceGlobals[Index].GetTranslation();
+			const double Length = Index == 0
+				? 0.0
+				: FVector::Distance(Position, SourceGlobals[Index - 1].GetTranslation());
+			MaximumReach += Length;
+			Links.Emplace(Position, Length, Index, Index);
+		}
+
+		AnimationCore::SolveFabrik(
+			Links, TargetEnd.GetTranslation(), MaximumReach, 0.001, 32);
+
+		OutGlobals = SourceGlobals;
+		for (int32 Index = 0; Index < Links.Num(); ++Index)
+		{
+			OutGlobals[Index].SetTranslation(Links[Index].Position);
+			if (Index + 1 < Links.Num())
+			{
+				const FVector SourceDirection =
+					SourceGlobals[Index + 1].GetTranslation() - SourceGlobals[Index].GetTranslation();
+				const FVector SolvedDirection = Links[Index + 1].Position - Links[Index].Position;
+				if (!SourceDirection.IsNearlyZero() && !SolvedDirection.IsNearlyZero())
+				{
+					const FQuat Delta = FQuat::FindBetweenNormals(
+						SourceDirection.GetSafeNormal(), SolvedDirection.GetSafeNormal());
+					OutGlobals[Index].SetRotation(
+						(Delta * SourceGlobals[Index].GetRotation()).GetNormalized());
+				}
+			}
+			else if (bTargetRotation)
+			{
+				OutGlobals[Index].SetRotation(TargetEnd.GetRotation().GetNormalized());
+			}
+		}
+
+		OutPositionErrorCm = FVector::Distance(
+			OutGlobals.Last().GetTranslation(), TargetEnd.GetTranslation());
+		return !OutGlobals.ContainsByPredicate([](const FTransform& Transform)
+		{
+			return Transform.ContainsNaN();
+		});
+	}
+
 	bool ControlRigSequencerRegisterWriteFrames(
 		TSet<FString>& WrittenKeys,
 		FName Control,
@@ -1096,6 +1162,43 @@ namespace
 		return Object;
 	}
 }
+
+#if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUEMCPControlRigContactRotationChainTest,
+	"UE_MCP.Animation.ControlRig.ContactRotationChain",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUEMCPControlRigContactRotationChainTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	const TArray<FTransform> SourceGlobals{
+		FTransform(FQuat::Identity, FVector(0.0, 0.0, 0.0)),
+		FTransform(FQuat::Identity, FVector(10.0, 0.0, 0.0)),
+		FTransform(FQuat::Identity, FVector(20.0, 0.0, 0.0)),
+	};
+	const FTransform TargetEnd(FQuat::Identity, FVector(10.0, 10.0, 0.0));
+	TArray<FTransform> SolvedGlobals;
+	double PositionErrorCm = 0.0;
+	TestTrue(
+		TEXT("Rotation chain solves a reachable contact"),
+		ControlRigSequencerSolveRotationChain(
+			SourceGlobals, TargetEnd, false, SolvedGlobals, PositionErrorCm));
+	TestTrue(TEXT("Solved contact is within one millimetre"), PositionErrorCm <= 0.1);
+	TestTrue(
+		TEXT("Driver translation remains unchanged"),
+		SolvedGlobals[0].GetTranslation().Equals(SourceGlobals[0].GetTranslation(), UE_KINDA_SMALL_NUMBER));
+	TestTrue(
+		TEXT("First local bone translation remains unchanged"),
+		SolvedGlobals[1].GetRelativeTransform(SolvedGlobals[0]).GetTranslation().Equals(
+			SourceGlobals[1].GetRelativeTransform(SourceGlobals[0]).GetTranslation(), 0.001));
+	TestTrue(
+		TEXT("Second local bone translation remains unchanged"),
+		SolvedGlobals[2].GetRelativeTransform(SolvedGlobals[1]).GetTranslation().Equals(
+			SourceGlobals[2].GetRelativeTransform(SourceGlobals[1]).GetTranslation(), 0.001));
+	return true;
+}
+#endif
 
 #endif // UE_MCP_HAS_5_8_API
 
@@ -2022,6 +2125,111 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 				}
 				const FName DrivenReference(*DrivenReferenceString);
 
+				bool bUseFkRotationChain = false;
+				TArray<int32> FkChainBoneIndices;
+				TArray<FName> FkChainControls;
+				int32 FkChainWriteCount = 0;
+				if (bHasDrivenReference && Cast<UFKControlRig>(Session.ControlRig))
+				{
+					const UFKControlRig* FkRig = CastChecked<UFKControlRig>(Session.ControlRig);
+					USkeletalMeshComponent* Component = ControlRigSequencerBoundSkeletalMesh(Session.ControlRig);
+					USkeletalMesh* Mesh = Component ? Component->GetSkeletalMeshAsset() : nullptr;
+					USkeleton* Skeleton = Mesh ? Mesh->GetSkeleton() : nullptr;
+					if (!Mesh || !Skeleton)
+					{
+						return MCPError(TEXT("FK contact_lock requires a bound skeletal mesh and skeleton"));
+					}
+
+					const FReferenceSkeleton& ReferenceSkeleton = Mesh->GetRefSkeleton();
+					const FName DriverBone = UFKControlRig::GetControlTargetName(
+						ControlName, ERigElementType::Bone);
+					const int32 DriverBoneIndex = ReferenceSkeleton.FindBoneIndex(DriverBone);
+					bool bDrivenReferenceIsSocket = false;
+					int32 DrivenBoneIndex = ReferenceSkeleton.FindBoneIndex(DrivenReference);
+					if (DrivenBoneIndex == INDEX_NONE)
+					{
+						const USkeletalMeshSocket* Socket = Component->GetSocketByName(DrivenReference);
+						bDrivenReferenceIsSocket = Socket != nullptr;
+						DrivenBoneIndex = Socket
+							? ReferenceSkeleton.FindBoneIndex(Socket->BoneName)
+							: INDEX_NONE;
+					}
+					if (DriverBoneIndex == INDEX_NONE || DrivenBoneIndex == INDEX_NONE)
+					{
+						return MCPError(FString::Printf(
+							TEXT("FK contact_lock could not resolve driver %s and driven reference %s to bones"),
+							*ControlString, *DrivenReferenceString));
+					}
+
+					const int32 SkeletonDriverIndex = Skeleton->GetSkeletonBoneIndexFromMeshBoneIndex(
+						Mesh, DriverBoneIndex);
+					bUseFkRotationChain = SkeletonDriverIndex != INDEX_NONE
+						&& Skeleton->GetBoneTranslationRetargetingMode(SkeletonDriverIndex)
+							== EBoneTranslationRetargetingMode::Skeleton;
+					if (bUseFkRotationChain)
+					{
+						if (FkRig->GetApplyMode() != EControlRigFKRigExecuteMode::Replace)
+						{
+							return MCPError(
+								TEXT("contact_lock_runtime_translation_unsupported: FK rotation-chain contact requires Replace apply mode"));
+						}
+						if (bDrivenReferenceIsSocket)
+						{
+							return MCPError(FString::Printf(
+								TEXT("contact_lock_runtime_translation_unsupported: FK rotation-chain contact currently requires a driven bone; socket %s requires an asset Control Rig"),
+								*DrivenReferenceString));
+						}
+						for (int32 BoneIndex = DrivenBoneIndex;
+							BoneIndex != INDEX_NONE;
+							BoneIndex = ReferenceSkeleton.GetParentIndex(BoneIndex))
+						{
+							FkChainBoneIndices.Add(BoneIndex);
+							if (BoneIndex == DriverBoneIndex) break;
+						}
+						if (FkChainBoneIndices.IsEmpty() || FkChainBoneIndices.Last() != DriverBoneIndex)
+						{
+							return MCPError(FString::Printf(
+								TEXT("FK contact_lock driver bone %s must be an ancestor of %s"),
+								*DriverBone.ToString(),
+								*ReferenceSkeleton.GetBoneName(DrivenBoneIndex).ToString()));
+						}
+						Algo::Reverse(FkChainBoneIndices);
+						if (FkChainBoneIndices.Num() < 2)
+						{
+							return MCPError(FString::Printf(
+								TEXT("contact_lock_runtime_translation_unsupported: FK bone %s ignores animation translation and has no descendant rotation chain"),
+								*DriverBone.ToString()));
+						}
+						for (const int32 BoneIndex : FkChainBoneIndices)
+						{
+							const FName ChainControl = UFKControlRig::GetControlName(
+								ReferenceSkeleton.GetBoneName(BoneIndex), ERigElementType::Bone);
+							const FRigControlElement* ChainElement = Session.ControlRig->FindControl(ChainControl);
+							if (!ChainElement || !ChainElement->Settings.IsAnimatable()
+								|| !ControlRigSequencerControlHasRotation(ChainElement->Settings.ControlType))
+							{
+								return MCPError(FString::Printf(
+									TEXT("FK contact_lock rotation-chain control is unavailable: %s"),
+									*ChainControl.ToString()));
+							}
+							FkChainControls.Add(ChainControl);
+						}
+						// A position-only contact needs rotations through the end bone's parent.
+						// Key the end control only when the caller explicitly requests orientation.
+						FkChainWriteCount = bTargetRotation
+							? FkChainControls.Num()
+							: FkChainControls.Num() - 1;
+						for (int32 ChainIndex = 1; ChainIndex < FkChainWriteCount; ++ChainIndex)
+						{
+							if (!ControlRigSequencerRegisterWriteFrames(
+								WrittenKeys, FkChainControls[ChainIndex], Write.Frames, OperationIndex, Error))
+							{
+								return MCPError(Error);
+							}
+						}
+					}
+				}
+
 				TArray<FName> StabilizerNames;
 				const TSharedPtr<FJsonValue>* StabilizerValue = Operation->Values.Find(TEXT("stabilizeControls"));
 				if (StabilizerValue && StabilizerValue->IsValid() && !(*StabilizerValue)->IsNull())
@@ -2030,6 +2238,12 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 					if (!Operation->TryGetArrayField(TEXT("stabilizeControls"), StabilizerValues) || !StabilizerValues)
 					{
 						return MCPError(FString::Printf(TEXT("operations[%d].stabilizeControls must be an array"), OperationIndex));
+					}
+					if (bUseFkRotationChain && !StabilizerValues->IsEmpty())
+					{
+						return MCPError(FString::Printf(
+							TEXT("operations[%d] cannot combine FK rotation-chain contact with stabilizer controls"),
+							OperationIndex));
 					}
 					if (StabilizerValues->Num() > 8)
 					{
@@ -2070,8 +2284,11 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 					}
 				}
 
+				const int32 ContactControlCount = bUseFkRotationChain
+					? FkChainWriteCount
+					: 1;
 				const int64 CellCount = static_cast<int64>(Write.Frames.Num())
-					* static_cast<int64>(StabilizerNames.Num() + 1);
+					* static_cast<int64>(StabilizerNames.Num() + ContactControlCount);
 				if (CellCount > ControlRigSequencerMaxFrames)
 				{
 					return MCPError(FString::Printf(
@@ -2110,8 +2327,54 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 				Write.Before = (*DriverValues)->Transforms;
 				Write.After.SetNum(Write.Frames.Num());
 
+				TArray<TArray<FTransform>> FkSourceChainGlobals;
+				if (bUseFkRotationChain)
+				{
+					const TArray<FArrayOfRigControlTransforms> GlobalChainValues =
+						UControlRigSequencerEditorLibrary::BatchGetControlTransforms(
+							Session.Sequence, Session.ControlRig, FkChainControls, Write.Frames,
+							EControlRigTransformSpace::Global, EMovieSceneTimeUnit::DisplayRate);
+					if (GlobalChainValues.Num() != FkChainControls.Num())
+					{
+						return MCPError(FString::Printf(
+							TEXT("Could not sample every FK contact rotation-chain control before operations[%d]"),
+							OperationIndex));
+					}
+					TMap<FName, const FArrayOfRigControlTransforms*> GlobalValuesByControl;
+					for (const FArrayOfRigControlTransforms& Values : GlobalChainValues)
+					{
+						if (Values.Transforms.Num() != Write.Frames.Num())
+						{
+							return MCPError(FString::Printf(
+								TEXT("Could not sample every FK contact rotation-chain frame before operations[%d]"),
+								OperationIndex));
+						}
+						GlobalValuesByControl.Add(Values.ControlName, &Values);
+					}
+					FkSourceChainGlobals.SetNum(FkChainControls.Num());
+					for (int32 ChainIndex = 0; ChainIndex < FkChainControls.Num(); ++ChainIndex)
+					{
+						const FArrayOfRigControlTransforms* const* Values =
+							GlobalValuesByControl.Find(FkChainControls[ChainIndex]);
+						if (!Values || !*Values)
+						{
+							return MCPError(FString::Printf(
+								TEXT("Could not sample FK contact rotation-chain control %s"),
+								*FkChainControls[ChainIndex].ToString()));
+						}
+						FkSourceChainGlobals[ChainIndex] = (*Values)->Transforms;
+					}
+				}
+
 				TArray<FTransform> SubjectBefore = Write.Before;
-				if (bHasDrivenReference
+				if (bUseFkRotationChain)
+				{
+					// FK control globals include their initial offset and coincide with the
+					// evaluated bone component transforms. Use them so an existing rig layer
+					// is part of the solve instead of resampling only the source animation.
+					SubjectBefore = FkSourceChainGlobals.Last();
+				}
+				else if (bHasDrivenReference
 					&& !ControlRigSequencerSampleReferenceTransforms(
 						Session, DrivenReference, Write.Frames, SubjectBefore, Error))
 				{
@@ -2145,6 +2408,10 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 					ContactQA.ExpectedSubject[Index] = ControlRigSequencerBlendContactTransform(
 						SubjectBefore[Index], SubjectTarget, Weight, bTargetRotation);
 
+					if (bUseFkRotationChain)
+					{
+						continue;
+					}
 					if (bHasDrivenReference)
 					{
 						const FTransform SubjectRelativeToDriver =
@@ -2167,6 +2434,129 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 					else
 					{
 						Write.After[Index] = ContactQA.ExpectedSubject[Index];
+					}
+				}
+
+				TArray<FControlRigPreparedWrite> FkChainWrites;
+				if (bUseFkRotationChain)
+				{
+					ContactQA.bUsedFkRotationChain = true;
+					const TArray<FArrayOfRigControlTransforms> LocalControlValues =
+						UControlRigSequencerEditorLibrary::BatchGetControlTransforms(
+							Session.Sequence, Session.ControlRig, FkChainControls, Write.Frames,
+							EControlRigTransformSpace::Local, EMovieSceneTimeUnit::DisplayRate);
+					if (LocalControlValues.Num() != FkChainControls.Num())
+					{
+						return MCPError(FString::Printf(
+							TEXT("Could not sample every FK contact rotation-chain control before operations[%d]"),
+							OperationIndex));
+					}
+					TMap<FName, const FArrayOfRigControlTransforms*> LocalValuesByControl;
+					for (const FArrayOfRigControlTransforms& Values : LocalControlValues)
+					{
+						if (Values.Transforms.Num() != Write.Frames.Num())
+						{
+							return MCPError(FString::Printf(
+								TEXT("Could not sample every FK contact rotation-chain frame before operations[%d]"),
+								OperationIndex));
+						}
+						LocalValuesByControl.Add(Values.ControlName, &Values);
+					}
+
+					FkChainWrites.SetNum(FkChainWriteCount);
+					TArray<FTransform> ControlOffsets;
+					ControlOffsets.SetNum(FkChainWriteCount);
+					for (int32 ChainIndex = 0; ChainIndex < FkChainWriteCount; ++ChainIndex)
+					{
+						const FArrayOfRigControlTransforms* const* LocalValues =
+							LocalValuesByControl.Find(FkChainControls[ChainIndex]);
+						FRigControlElement* ChainControl = Session.ControlRig->FindControl(FkChainControls[ChainIndex]);
+						if (!LocalValues || !*LocalValues || !ChainControl)
+						{
+							return MCPError(FString::Printf(
+								TEXT("Could not prepare FK contact rotation-chain control %s"),
+								*FkChainControls[ChainIndex].ToString()));
+						}
+						FControlRigPreparedWrite& ChainWrite = FkChainWrites[ChainIndex];
+						ChainWrite.Control = FkChainControls[ChainIndex];
+						ChainWrite.Op = Op;
+						ChainWrite.Space = EControlRigTransformSpace::Local;
+						ChainWrite.ValueType = EControlRigPreparedValueType::Transform;
+						ChainWrite.Frames = Write.Frames;
+						ChainWrite.Before = (*LocalValues)->Transforms;
+						ChainWrite.After.SetNum(Write.Frames.Num());
+						ControlOffsets[ChainIndex] = Session.ControlRig->GetHierarchy()->GetControlOffsetTransform(
+							ChainControl, ERigTransformType::InitialLocal);
+					}
+
+					TArray<FTransform> PredictedSubjects;
+					PredictedSubjects.SetNum(Write.Frames.Num());
+					for (int32 FrameIndex = 0; FrameIndex < Write.Frames.Num(); ++FrameIndex)
+					{
+						TArray<FTransform> SourceGlobals;
+						SourceGlobals.Reserve(FkChainBoneIndices.Num());
+						for (const TArray<FTransform>& BoneSamples : FkSourceChainGlobals)
+						{
+							SourceGlobals.Add(BoneSamples[FrameIndex]);
+						}
+
+						const FTransform SubjectRelativeToEnd =
+							SubjectBefore[FrameIndex].GetRelativeTransform(SourceGlobals.Last());
+						const FTransform TargetEnd = SubjectRelativeToEnd.GetRelativeTransformReverse(
+							ContactQA.ExpectedSubject[FrameIndex]);
+						TArray<FTransform> SolvedGlobals;
+						double SolverPositionErrorCm = 0.0;
+						if (!ControlRigSequencerSolveRotationChain(
+								SourceGlobals, TargetEnd, bTargetRotation, SolvedGlobals, SolverPositionErrorCm)
+							|| !FMath::IsFinite(SolverPositionErrorCm))
+						{
+							return MCPError(FString::Printf(
+								TEXT("operations[%d] could not solve the FK contact rotation chain at frame %d"),
+								OperationIndex, Write.Frames[FrameIndex].Value));
+						}
+
+						const FTransform SourceDriverLocal =
+							FkChainWrites[0].Before[FrameIndex] * ControlOffsets[0];
+						FTransform SourceParent =
+							SourceDriverLocal.GetRelativeTransformReverse(SourceGlobals[0]);
+						FTransform DesiredParent = SourceParent;
+						for (int32 ChainIndex = 0; ChainIndex < FkChainBoneIndices.Num(); ++ChainIndex)
+						{
+							const FTransform SourceLocal = SourceGlobals[ChainIndex].GetRelativeTransform(SourceParent);
+							FTransform DesiredLocal = SourceLocal;
+							if (ChainIndex < FkChainWriteCount)
+							{
+								DesiredLocal = SolvedGlobals[ChainIndex].GetRelativeTransform(DesiredParent);
+								// Skeleton-retargeted FK translations are discarded during playback. Keep the
+								// source local lengths and express the contact correction in rotations only.
+								DesiredLocal.SetTranslation(SourceLocal.GetTranslation());
+								DesiredLocal.SetScale3D(SourceLocal.GetScale3D());
+								DesiredLocal.NormalizeRotation();
+								FkChainWrites[ChainIndex].After[FrameIndex] =
+									DesiredLocal.GetRelativeTransform(ControlOffsets[ChainIndex]);
+							}
+							const FTransform DesiredGlobal = DesiredLocal * DesiredParent;
+							SourceParent = SourceGlobals[ChainIndex];
+							DesiredParent = DesiredGlobal;
+							SolvedGlobals[ChainIndex] = DesiredGlobal;
+						}
+						PredictedSubjects[FrameIndex] = SubjectRelativeToEnd * SolvedGlobals.Last();
+					}
+
+					ControlRigSequencerMeasureContact(
+						Write.Frames, ContactQA.ExpectedSubject, PredictedSubjects,
+						true, bTargetRotation, ContactQA.Metrics);
+					if (ContactQA.Metrics.MaxPositionErrorCm > PositionToleranceCm
+						|| (bTargetRotation
+							&& ContactQA.Metrics.MaxRotationErrorDegrees > RotationToleranceDegrees))
+					{
+						return MCPError(FString::Printf(
+							TEXT("contact_constraint_tolerance_exceeded: operations[%d] FK rotation-chain residual was %.4f cm at frame %d and %.4f degrees at frame %d"),
+							OperationIndex,
+							ContactQA.Metrics.MaxPositionErrorCm,
+							ContactQA.Metrics.WorstPositionFrame,
+							ContactQA.Metrics.MaxRotationErrorDegrees,
+							ContactQA.Metrics.WorstRotationFrame));
 					}
 				}
 
@@ -2204,7 +2594,14 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 				}
 
 				PreparedContacts.Add(MoveTemp(ContactQA));
-				Prepared.Add(MoveTemp(Write));
+				if (bUseFkRotationChain)
+				{
+					Prepared.Append(MoveTemp(FkChainWrites));
+				}
+				else
+				{
+					Prepared.Add(MoveTemp(Write));
+				}
 				continue;
 			}
 
@@ -2533,6 +2930,13 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ApplyControlRigEdits(const TSharedPtr
 		{
 			Object->SetStringField(TEXT("drivenReference"), Contact.DrivenReference.ToString());
 			Object->SetStringField(TEXT("verification"), TEXT("bake_and_analyze_required"));
+			if (Contact.bUsedFkRotationChain)
+			{
+				Object->SetStringField(TEXT("solver"), TEXT("fk_rotation_chain"));
+				Object->SetObjectField(
+					TEXT("preBakePrediction"),
+					ControlRigSequencerContactMetricsJson(Contact.Metrics, true, Contact.bCheckRotation));
+			}
 		}
 		Object->SetNumberField(TEXT("frameCount"), Contact.Frames.Num());
 		Object->SetNumberField(TEXT("fullWeightFrameCount"), Contact.FullWeightFrameCount);

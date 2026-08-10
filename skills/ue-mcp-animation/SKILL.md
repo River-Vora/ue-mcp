@@ -74,8 +74,12 @@ right-side pose.
    transactionally reads back the driver and stabilizers. A driven bone/socket
    returns `verification=bake_and_analyze_required`; bake, analyze every
    constrained frame, and reject the output if its residual misses the motion's
-   acceptance tolerance. The bridge does not guess the driver, pole, foot roll,
-   friction, joint limits, or pelvis compensation.
+   acceptance tolerance. FK contacts whose translation is ignored by skeleton
+   retargeting use a local rotation-chain solve and report
+   `solver=fk_rotation_chain`; that path requires a driven bone and does not
+   accept stabilizers. Position-only locks leave the driven control orientation
+   unkeyed. The bridge does not guess the driver, pole, foot roll, friction,
+   joint limits, or pelvis compensation.
 10. Read back the edited frames in local and global space. Reject elbow flips,
    discontinuities, wrong forearm direction, wrong palm normal, or unexpected
    changes outside the edited chain before baking.

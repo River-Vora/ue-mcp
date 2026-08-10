@@ -176,6 +176,12 @@ describe("animation Control Rig edit workflow", () => {
 
     expect(source).toContain('Op == TEXT("contact_lock")');
     expect(source).toContain("ControlRigSequencerSmoothStep");
+    expect(source).toContain("Skeleton->GetBoneTranslationRetargetingMode(SkeletonDriverIndex)");
+    expect(source).toContain("AnimationCore::SolveFabrik(");
+    expect(source).toContain("DesiredLocal.SetTranslation(SourceLocal.GetTranslation())");
+    expect(source).toContain("GetControlOffsetTransform(");
+    expect(source).toContain("FkChainControls.Num() - 1");
+    expect(source).toContain('SetStringField(TEXT("solver"), TEXT("fk_rotation_chain"))');
     expect(source).toContain("UAnimPoseExtensions::GetAnimPoseAtTime(");
     expect(source).toContain("SourceSection->MapTimeToAnimation(");
     expect(source).toContain("GetRelativeTransformReverse(");

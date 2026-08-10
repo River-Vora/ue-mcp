@@ -36,6 +36,7 @@ public class UE_MCP_Bridge : ModuleRules
 			{
 				"AIModule",
 				"MessageLog",
+				"AnimationCore",
 				"AnimGraph",
 				"AnimationEditor",
 				"AnimationBlueprintLibrary",
