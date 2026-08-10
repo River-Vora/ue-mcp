@@ -61,6 +61,10 @@ The source must be a non-additive AnimSequence compatible with the selected
 mesh. Flatten an additive clip against its intended base pose first. The
 session's `layered` option controls whether the source track remains active
 under the Control Rig layer; it does not supply an additive source's base pose.
+Sequencer compensates a finite non-zero AnimSequence `RateScale`, so the session
+maps the raw source timeline from start to end exactly once without changing the
+source asset. A zero `RateScale` is rejected because it has no invertible time
+mapping.
 
 Every material iteration gets a new session path, binding tag, and eventual
 output path. Keep `onConflict="error"` while developing. `skip` is suitable

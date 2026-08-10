@@ -60,6 +60,29 @@ describe("animation Control Rig edit workflow", () => {
     expect(source).toContain("falling outside every section and snapping to reference pose");
   });
 
+  it("cancels AnimSequence RateScale so a session maps the raw timeline once", () => {
+    const source = readFileSync(
+      new URL(
+        "../../plugin/ue_mcp_bridge/Source/UE_MCP_Bridge/Private/Handlers/AnimationHandlers_ControlRigSequencer.cpp",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const nativeTest = readFileSync(
+      new URL(
+        "../../plugin/ue_mcp_bridge/Source/UE_MCP_Bridge/Private/Tests/AnimationControlRigTimelineTests.cpp",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+
+    expect(source).toContain("const float RawTimelinePlayRate = static_cast<float>(1.0 / SourceRateScale)");
+    expect(source).toContain("AnimationSection->Params.PlayRate = RawTimelinePlayRate");
+    expect(nativeTest).toContain("SourceAnimation->RateScale = 3.06608796f");
+    expect(nativeTest).toContain("for (int32 Frame = 0; Frame <= 40; ++Frame)");
+    expect(nativeTest).toContain("Section->MapTimeToAnimation(FFrameTime(Frame), DisplayRate)");
+  });
+
   it("validates offset ranges before expanding them into frames", () => {
     const source = readFileSync(
       new URL(

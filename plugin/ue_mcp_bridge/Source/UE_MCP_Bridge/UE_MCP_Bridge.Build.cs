@@ -11,7 +11,8 @@ public class UE_MCP_Bridge : ModuleRules
 	// Private/BridgeStateFiles.cpp, Private/BridgeParamEcho.cpp and
 	// Private/Tests/BridgeProtocolTests.cpp: same reason.
 	// Private/Handlers/AnimationHandlers_ControlRigSequencer.cpp and
-	// Private/Handlers/AnimationHandlers_Validation.cpp: same reason.
+	// Private/Handlers/AnimationHandlers_Validation.cpp plus
+	// Private/Tests/AnimationControlRigTimelineTests.cpp: same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;

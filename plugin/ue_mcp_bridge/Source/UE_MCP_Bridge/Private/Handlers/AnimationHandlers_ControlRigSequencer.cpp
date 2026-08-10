@@ -844,6 +844,16 @@ TSharedPtr<FJsonValue> FAnimationHandlers::BeginControlRigEdit(const TSharedPtr<
 	{
 		return MCPError(TEXT("Additive source animations require an explicit base pose. Flatten the additive with its intended base before beginning a Control Rig edit."));
 	}
+	const double SourceRateScale = static_cast<double>(SourceAnimation->RateScale);
+	if (!FMath::IsFinite(SourceRateScale) || SourceRateScale == 0.0)
+	{
+		return MCPError(TEXT("Source animation RateScale must be finite and non-zero before beginning a Control Rig edit"));
+	}
+	const float RawTimelinePlayRate = static_cast<float>(1.0 / SourceRateScale);
+	if (!FMath::IsFinite(RawTimelinePlayRate))
+	{
+		return MCPError(TEXT("Source animation RateScale cannot be converted to a finite Sequencer play rate"));
+	}
 
 	const FString RigMode = OptionalString(Params, TEXT("rigMode"), TEXT("fk")).ToLower();
 	UClass* ControlRigClass = nullptr;
@@ -995,6 +1005,9 @@ TSharedPtr<FJsonValue> FAnimationHandlers::BeginControlRigEdit(const TSharedPtr<
 				else
 				{
 					AnimationSection->Params.Animation = SourceAnimation;
+					// Sequencer multiplies section PlayRate by the AnimSequence RateScale.
+					// Cancel the asset rate so the edit session sees the raw source timeline once.
+					AnimationSection->Params.PlayRate = RawTimelinePlayRate;
 					// Unreal's AnimSequence exporter samples the exact playback end as its final key.
 					// Keep one support frame on the source/rig sections so that sample evaluates the
 					// animation instead of falling outside every section and snapping to reference pose.

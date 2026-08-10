@@ -21,6 +21,8 @@ right-side pose.
    when generated FK controls are intentional. The source must be non-additive
    and mesh-compatible; flatten an additive clip against its intended base
    first. `layered` controls the session layer, not an additive source base.
+   A finite non-zero source `RateScale` is compensated in Sequencer so the raw
+   timeline maps once without modifying the source asset; zero is rejected.
 4. Call `read_control_rig_edit` at rest, transitions, extrema, and end in both
    `local` and `global` space. Here `global` is rig/global (normally mesh
    component) space, not actor world space.
