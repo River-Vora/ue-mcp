@@ -1,6 +1,8 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Animation/Skeleton.h"
+#include "Engine/SkeletalMesh.h"
+#include "HandlerUtils.h"
 #include "HandlerRegistry.h"
 #include "Handlers/DiffHandlers.h"
 #include "Misc/AutomationTest.h"
@@ -54,6 +56,27 @@ public:
 			}
 		}
 		return Skeleton;
+	}
+
+	USkeletalMesh* AddSkeletalMesh(
+		const TCHAR* Name,
+		std::initializer_list<FTestBone> Bones,
+		USkeleton* AssociatedSkeleton)
+	{
+		USkeletalMesh* Mesh = NewObject<USkeletalMesh>(Package, FName(Name), RF_Transient);
+		FReferenceSkeleton ReferenceSkeleton;
+		{
+			FReferenceSkeletonModifier Modifier(ReferenceSkeleton, AssociatedSkeleton);
+			for (const FTestBone& Bone : Bones)
+			{
+				Modifier.Add(
+					FMeshBoneInfo(FName(Bone.Name), Bone.Name, Bone.ParentIndex),
+					FTransform::Identity);
+			}
+		}
+		Mesh->SetRefSkeleton(ReferenceSkeleton);
+		Mesh->SetSkeleton(AssociatedSkeleton);
+		return Mesh;
 	}
 
 	UObject* AddWrongTypeObject(const TCHAR* Name)
@@ -166,6 +189,22 @@ const TArray<TSharedPtr<FJsonValue>>* GetArray(
 {
 	const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
 	return Object.IsValid() && Object->TryGetArrayField(Field, Values) ? Values : nullptr;
+}
+
+bool AddNamedVirtualBoneForTest(
+	USkeleton* Skeleton,
+	const FName SourceBone,
+	const FName TargetBone,
+	const FName DesiredName,
+	FName& OutActualName)
+{
+#if UE_MCP_HAS_5_5_API
+	OutActualName = DesiredName;
+	return Skeleton->AddNewNamedVirtualBone(SourceBone, TargetBone, DesiredName);
+#else
+	OutActualName = NAME_None;
+	return Skeleton->AddNewVirtualBone(SourceBone, TargetBone, OutActualName);
+#endif
 }
 }
 
@@ -297,8 +336,15 @@ bool FSkeletonDiffFNameIdentityTest::RunTest(const FString& Parameters)
 		{ TEXT("PELVIS"), 0 },
 		{ TEXT("HAND"), 1 },
 	});
-	TestTrue(TEXT("from virtual bone is created"), From->AddNewNamedVirtualBone(TEXT("pelvis"), TEXT("hand"), TEXT("VB Aim")));
-	TestTrue(TEXT("to virtual bone is created"), To->AddNewNamedVirtualBone(TEXT("PELVIS"), TEXT("HAND"), TEXT("vb aim")));
+	FName FromVirtualName;
+	FName ToVirtualName;
+	TestTrue(
+		TEXT("from virtual bone is created"),
+		AddNamedVirtualBoneForTest(From, TEXT("pelvis"), TEXT("hand"), TEXT("VB Aim"), FromVirtualName));
+	TestTrue(
+		TEXT("to virtual bone is created"),
+		AddNamedVirtualBoneForTest(To, TEXT("PELVIS"), TEXT("HAND"), TEXT("vb aim"), ToVirtualName));
+	TestEqual(TEXT("case-only virtual bone names retain FName identity"), FromVirtualName, ToVirtualName);
 	Fixture.ResetDirty();
 
 	const TSharedPtr<FJsonObject> Result = ExecuteDiff(Registry, From, To);
@@ -378,6 +424,118 @@ bool FSkeletonDiffDirectionalRawBoneTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FSkeletonDiffRawBoneIndexTest,
+	"UE.MCP.Diff.Skeleton.RawBoneIndexChanges",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FSkeletonDiffRawBoneIndexTest::RunTest(const FString& Parameters)
+{
+	FMCPHandlerRegistry Registry;
+	FDiffHandlers::RegisterHandlers(Registry);
+	FTransientSkeletonPackage Fixture(TEXT("SkeletonDiffRawIndex"));
+	USkeleton* From = Fixture.AddSkeleton(TEXT("From"), {
+		{ TEXT("root"), INDEX_NONE },
+		{ TEXT("SiblingZulu"), 0 },
+		{ TEXT("SiblingAlpha"), 0 },
+	});
+	USkeleton* To = Fixture.AddSkeleton(TEXT("To"), {
+		{ TEXT("root"), INDEX_NONE },
+		{ TEXT("SiblingAlpha"), 0 },
+		{ TEXT("SiblingZulu"), 0 },
+	});
+	Fixture.ResetDirty();
+
+	const TSharedPtr<FJsonObject> Result = ExecuteDiff(Registry, From, To);
+	TestTrue(TEXT("raw-index diff succeeds"), Result.IsValid() && Result->GetBoolField(TEXT("success")));
+	if (Result.IsValid())
+	{
+		TestFalse(TEXT("sibling reordering is not structurally identical"), Result->GetBoolField(TEXT("structurallyIdentical")));
+		TestTrue(TEXT("sibling reordering preserves hierarchy compatibility"), Result->GetBoolField(TEXT("hierarchyCompatible")));
+		TestEqual(TEXT("sibling reordering counts two index changes"), static_cast<int32>(Result->GetNumberField(TEXT("changeCount"))), 2);
+		TestEqual(TEXT("sibling reordering adds no raw bones"), GetStringArray(Result, TEXT("rawBonesAdded")).Num(), 0);
+		TestEqual(TEXT("sibling reordering removes no raw bones"), GetStringArray(Result, TEXT("rawBonesRemoved")).Num(), 0);
+		const TArray<TSharedPtr<FJsonValue>>* IndexChanges = GetArray(Result, TEXT("rawBoneIndexChanges"));
+		TestTrue(TEXT("raw index changes are present"), IndexChanges && IndexChanges->Num() == 2);
+		if (IndexChanges && IndexChanges->Num() == 2)
+		{
+			const TSharedPtr<FJsonObject> First = (*IndexChanges)[0]->AsObject();
+			const TSharedPtr<FJsonObject> Second = (*IndexChanges)[1]->AsObject();
+			TestEqual(TEXT("index changes are sorted by bone name"), First->GetStringField(TEXT("bone")), FString(TEXT("SiblingAlpha")));
+			TestEqual(TEXT("first old index is exact"), static_cast<int32>(First->GetNumberField(TEXT("fromIndex"))), 2);
+			TestEqual(TEXT("first new index is exact"), static_cast<int32>(First->GetNumberField(TEXT("toIndex"))), 1);
+			TestEqual(TEXT("second changed bone is exact"), Second->GetStringField(TEXT("bone")), FString(TEXT("SiblingZulu")));
+			TestEqual(TEXT("second old index is exact"), static_cast<int32>(Second->GetNumberField(TEXT("fromIndex"))), 1);
+			TestEqual(TEXT("second new index is exact"), static_cast<int32>(Second->GetNumberField(TEXT("toIndex"))), 2);
+		}
+	}
+	TestFalse(TEXT("raw-index diff does not dirty its package"), Fixture.GetPackage()->IsDirty());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FSkeletalMeshDiffPublicRouteTest,
+	"UE.MCP.Diff.Skeleton.SkeletalMeshPublicRoute",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FSkeletalMeshDiffPublicRouteTest::RunTest(const FString& Parameters)
+{
+	FMCPHandlerRegistry Registry;
+	FDiffHandlers::RegisterHandlers(Registry);
+	FTransientSkeletonPackage Fixture(TEXT("SkeletalMeshDiffRoute"));
+	USkeleton* FromPolicy = Fixture.AddSkeleton(TEXT("FromPolicy"), {
+		{ TEXT("root"), INDEX_NONE },
+		{ TEXT("pelvis"), 0 },
+	});
+	USkeleton* ToPolicy = Fixture.AddSkeleton(TEXT("ToPolicy"), {
+		{ TEXT("root"), INDEX_NONE },
+		{ TEXT("pelvis"), 0 },
+		{ TEXT("hand_attach"), 1 },
+	});
+	FName FromVirtualName;
+	FName ToVirtualName;
+	TestTrue(
+		TEXT("from policy virtual bone is created"),
+		AddNamedVirtualBoneForTest(FromPolicy, TEXT("root"), TEXT("pelvis"), TEXT("VB shared"), FromVirtualName));
+	TestTrue(
+		TEXT("to policy virtual bone is created"),
+		AddNamedVirtualBoneForTest(ToPolicy, TEXT("root"), TEXT("pelvis"), TEXT("VB shared"), ToVirtualName));
+	USkeletalMesh* From = Fixture.AddSkeletalMesh(TEXT("SK_From"), {
+		{ TEXT("root"), INDEX_NONE },
+		{ TEXT("pelvis"), 0 },
+	}, FromPolicy);
+	USkeletalMesh* To = Fixture.AddSkeletalMesh(TEXT("SK_To"), {
+		{ TEXT("root"), INDEX_NONE },
+		{ TEXT("pelvis"), 0 },
+		{ TEXT("hand_attach"), 1 },
+	}, ToPolicy);
+	Fixture.ResetDirty();
+	FPackageSaveObserver SaveObserver(Fixture.GetPackage());
+
+	const TSharedPtr<FJsonObject> Result = ExecuteDiff(Registry, From, To);
+	TestTrue(TEXT("public diff_asset routes SkeletalMesh assets"), Result.IsValid() && Result->GetBoolField(TEXT("success")));
+	if (Result.IsValid())
+	{
+		TestEqual(TEXT("asset type is SkeletalMesh"), Result->GetStringField(TEXT("assetType")), FString(TEXT("SkeletalMesh")));
+		TestEqual(TEXT("mesh raw count from is compact"), static_cast<int32>(Result->GetNumberField(TEXT("rawBoneCountFrom"))), 2);
+		TestEqual(TEXT("mesh raw count to is compact"), static_cast<int32>(Result->GetNumberField(TEXT("rawBoneCountTo"))), 3);
+		const TArray<FString> Added = GetStringArray(Result, TEXT("rawBonesAdded"));
+		TestEqual(TEXT("mesh diff reports one added bone"), Added.Num(), 1);
+		if (Added.Num() == 1)
+		{
+			TestEqual(TEXT("mesh added bone is exact"), Added[0], FString(TEXT("hand_attach")));
+		}
+		TestTrue(TEXT("additive mesh hierarchy remains compatible"), Result->GetBoolField(TEXT("hierarchyCompatible")));
+		TestEqual(TEXT("mesh policy virtual bones are compared"), static_cast<int32>(Result->GetNumberField(TEXT("virtualBoneCountFrom"))), 1);
+		TestEqual(TEXT("from virtual source is the associated Skeleton"), Result->GetStringField(TEXT("virtualBoneSourceFrom")), FromPolicy->GetPathName());
+		TestFalse(TEXT("reference-pose omission is explicit"), Result->GetBoolField(TEXT("referencePoseCompared")));
+		TestFalse(TEXT("export-name omission is explicit"), Result->GetBoolField(TEXT("exportNamesCompared")));
+	}
+	TestFalse(TEXT("SkeletalMesh diff stays read-only"), Fixture.GetPackage()->IsDirty());
+	TestEqual(TEXT("SkeletalMesh diff never saves"), SaveObserver.GetSaveAttempts(), 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FSkeletonDiffReparentTest,
 	"UE.MCP.Diff.Skeleton.ReparentedHierarchy",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -447,8 +605,14 @@ bool FSkeletonDiffVirtualBoneTest::RunTest(const FString& Parameters)
 		{ TEXT("TargetA"), 0 },
 		{ TEXT("TargetB"), 0 },
 	});
-	TestTrue(TEXT("from virtual bone is created"), From->AddNewNamedVirtualBone(TEXT("Source"), TEXT("TargetA"), TEXT("VB shared")));
-	TestTrue(TEXT("to virtual bone is created"), To->AddNewNamedVirtualBone(TEXT("Source"), TEXT("TargetB"), TEXT("VB shared")));
+	FName FromVirtualName;
+	FName ToVirtualName;
+	TestTrue(
+		TEXT("from virtual bone is created"),
+		AddNamedVirtualBoneForTest(From, TEXT("Source"), TEXT("TargetA"), TEXT("VB shared"), FromVirtualName));
+	TestTrue(
+		TEXT("to virtual bone is created"),
+		AddNamedVirtualBoneForTest(To, TEXT("Source"), TEXT("TargetB"), TEXT("VB shared"), ToVirtualName));
 	Fixture.ResetDirty();
 
 	const TSharedPtr<FJsonObject> Result = ExecuteDiff(Registry, From, To);
@@ -467,13 +631,14 @@ bool FSkeletonDiffVirtualBoneTest::RunTest(const FString& Parameters)
 		if (Added && Added->Num() == 1)
 		{
 			const TSharedPtr<FJsonObject> Bone = (*Added)[0]->AsObject();
-			TestEqual(TEXT("added virtual name"), Bone->GetStringField(TEXT("name")), FString(TEXT("VB shared")));
+			TestEqual(TEXT("added virtual name"), Bone->GetStringField(TEXT("name")), ToVirtualName.ToString());
 			TestEqual(TEXT("added virtual source"), Bone->GetStringField(TEXT("sourceBone")), FString(TEXT("Source")));
 			TestEqual(TEXT("added virtual target"), Bone->GetStringField(TEXT("targetBone")), FString(TEXT("TargetB")));
 		}
 		if (Removed && Removed->Num() == 1)
 		{
 			const TSharedPtr<FJsonObject> Bone = (*Removed)[0]->AsObject();
+			TestEqual(TEXT("removed virtual name"), Bone->GetStringField(TEXT("name")), FromVirtualName.ToString());
 			TestEqual(TEXT("removed virtual target"), Bone->GetStringField(TEXT("targetBone")), FString(TEXT("TargetA")));
 		}
 	}
