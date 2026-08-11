@@ -30,7 +30,11 @@ private:
 	// otherPath (compare/B). Reports changes as A -> B.
 	static TSharedPtr<FJsonValue> DiffBlueprint(const TSharedPtr<FJsonObject>& Params);
 
-	// Type-routing entry point. Blueprints delegate to DiffBlueprint; other
-	// asset classes return a clear "not yet supported" until their phase lands.
+	// Diff two exact USkeleton assets without emitting transforms or full bone
+	// dumps. Raw hierarchy and virtual-bone deltas are reported separately.
+	static TSharedPtr<FJsonValue> DiffSkeleton(const TSharedPtr<FJsonObject>& Params);
+
+	// Type-routing entry point. Blueprints and Skeletons delegate to their
+	// respective semantic diff handlers; unsupported classes fail clearly.
 	static TSharedPtr<FJsonValue> DiffAsset(const TSharedPtr<FJsonObject>& Params);
 };
