@@ -662,7 +662,10 @@ bool FSkeletonDiffEditorCompatibilityTest::RunTest(const FString& Parameters)
 	USkeleton* To = Fixture.AddSkeleton(TEXT("To"), {
 		{ TEXT("root"), INDEX_NONE },
 	});
-	From->AddCompatibleSkeleton(To);
+	To->AddCompatibleSkeleton(From);
+	TestFalse(
+		TEXT("forward policy query is false before the reverse-compatible diff"),
+		From->IsCompatibleForEditor(To));
 	Fixture.ResetDirty();
 
 	const TSharedPtr<FJsonObject> Result = ExecuteDiff(Registry, From, To);
