@@ -278,6 +278,48 @@ bool FSkeletonDiffIdenticalAndSideEffectsTest::RunTest(const FString& Parameters
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FSkeletonDiffFNameIdentityTest,
+	"UE.MCP.Diff.Skeleton.FNameIdentity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FSkeletonDiffFNameIdentityTest::RunTest(const FString& Parameters)
+{
+	FMCPHandlerRegistry Registry;
+	FDiffHandlers::RegisterHandlers(Registry);
+	FTransientSkeletonPackage Fixture(TEXT("SkeletonDiffFNameIdentity"));
+	USkeleton* From = Fixture.AddSkeleton(TEXT("From"), {
+		{ TEXT("root"), INDEX_NONE },
+		{ TEXT("pelvis"), 0 },
+		{ TEXT("hand"), 1 },
+	});
+	USkeleton* To = Fixture.AddSkeleton(TEXT("To"), {
+		{ TEXT("ROOT"), INDEX_NONE },
+		{ TEXT("PELVIS"), 0 },
+		{ TEXT("HAND"), 1 },
+	});
+	TestTrue(TEXT("from virtual bone is created"), From->AddNewNamedVirtualBone(TEXT("pelvis"), TEXT("hand"), TEXT("VB Aim")));
+	TestTrue(TEXT("to virtual bone is created"), To->AddNewNamedVirtualBone(TEXT("PELVIS"), TEXT("HAND"), TEXT("vb aim")));
+	Fixture.ResetDirty();
+
+	const TSharedPtr<FJsonObject> Result = ExecuteDiff(Registry, From, To);
+	TestTrue(TEXT("case-only diff succeeds"), Result.IsValid() && Result->GetBoolField(TEXT("success")));
+	if (Result.IsValid())
+	{
+		TestTrue(TEXT("FName-equivalent skeletons are structurally identical"), Result->GetBoolField(TEXT("structurallyIdentical")));
+		TestTrue(TEXT("FName-equivalent hierarchy is compatible"), Result->GetBoolField(TEXT("hierarchyCompatible")));
+		TestEqual(TEXT("case-only names add no changes"), static_cast<int32>(Result->GetNumberField(TEXT("changeCount"))), 0);
+		TestEqual(TEXT("case-only raw names are not added"), GetStringArray(Result, TEXT("rawBonesAdded")).Num(), 0);
+		TestEqual(TEXT("case-only raw names are not removed"), GetStringArray(Result, TEXT("rawBonesRemoved")).Num(), 0);
+		const TArray<TSharedPtr<FJsonValue>>* AddedVirtual = GetArray(Result, TEXT("virtualBonesAdded"));
+		const TArray<TSharedPtr<FJsonValue>>* RemovedVirtual = GetArray(Result, TEXT("virtualBonesRemoved"));
+		TestTrue(TEXT("case-only virtual names are not added"), AddedVirtual && AddedVirtual->Num() == 0);
+		TestTrue(TEXT("case-only virtual names are not removed"), RemovedVirtual && RemovedVirtual->Num() == 0);
+	}
+	TestFalse(TEXT("case-only diff does not dirty its package"), Fixture.GetPackage()->IsDirty());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FSkeletonDiffDirectionalRawBoneTest,
 	"UE.MCP.Diff.Skeleton.DirectionalRawBonesAndOrdering",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

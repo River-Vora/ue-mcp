@@ -96,9 +96,9 @@ namespace
 
 	struct FVirtualBoneDiffRecord
 	{
-		FString Name;
-		FString Source;
-		FString Target;
+		FName Name;
+		FName Source;
+		FName Target;
 
 		bool operator==(const FVirtualBoneDiffRecord& Other) const
 		{
@@ -108,9 +108,9 @@ namespace
 
 	bool VirtualBoneRecordLess(const FVirtualBoneDiffRecord& A, const FVirtualBoneDiffRecord& B)
 	{
-		if (A.Name != B.Name) return A.Name < B.Name;
-		if (A.Source != B.Source) return A.Source < B.Source;
-		return A.Target < B.Target;
+		if (A.Name != B.Name) return A.Name.ToString() < B.Name.ToString();
+		if (A.Source != B.Source) return A.Source.ToString() < B.Source.ToString();
+		return A.Target.ToString() < B.Target.ToString();
 	}
 
 	TArray<FVirtualBoneDiffRecord> CollectVirtualBones(const USkeleton* Skeleton)
@@ -120,9 +120,9 @@ namespace
 		for (const FVirtualBone& Bone : Skeleton->GetVirtualBones())
 		{
 			Out.Add({
-				Bone.VirtualBoneName.ToString(),
-				Bone.SourceBoneName.ToString(),
-				Bone.TargetBoneName.ToString()
+				Bone.VirtualBoneName,
+				Bone.SourceBoneName,
+				Bone.TargetBoneName
 			});
 		}
 		Out.Sort(VirtualBoneRecordLess);
@@ -136,20 +136,20 @@ namespace
 		for (const FVirtualBoneDiffRecord& Bone : In)
 		{
 			TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-			Obj->SetStringField(TEXT("name"), Bone.Name);
-			Obj->SetStringField(TEXT("sourceBone"), Bone.Source);
-			Obj->SetStringField(TEXT("targetBone"), Bone.Target);
+			Obj->SetStringField(TEXT("name"), Bone.Name.ToString());
+			Obj->SetStringField(TEXT("sourceBone"), Bone.Source.ToString());
+			Obj->SetStringField(TEXT("targetBone"), Bone.Target.ToString());
 			Out.Add(MakeShared<FJsonValueObject>(Obj));
 		}
 		return Out;
 	}
 
-	FString RawParentName(const TArray<FMeshBoneInfo>& Bones, int32 BoneIndex)
+	FName RawParentName(const TArray<FMeshBoneInfo>& Bones, int32 BoneIndex)
 	{
 		const int32 ParentIndex = Bones[BoneIndex].ParentIndex;
-		if (ParentIndex == INDEX_NONE) return NAME_None.ToString();
-		if (Bones.IsValidIndex(ParentIndex)) return Bones[ParentIndex].Name.ToString();
-		return FString::Printf(TEXT("<invalid:%d>"), ParentIndex);
+		if (ParentIndex == INDEX_NONE) return NAME_None;
+		if (Bones.IsValidIndex(ParentIndex)) return Bones[ParentIndex].Name;
+		return FName(*FString::Printf(TEXT("<invalid:%d>"), ParentIndex));
 	}
 }
 
@@ -399,46 +399,49 @@ TSharedPtr<FJsonValue> FDiffHandlers::DiffSkeleton(const TSharedPtr<FJsonObject>
 	const TArray<FMeshBoneInfo>& RawA = A->GetReferenceSkeleton().GetRawRefBoneInfo();
 	const TArray<FMeshBoneInfo>& RawB = B->GetReferenceSkeleton().GetRawRefBoneInfo();
 
-	TMap<FString, FString> ParentByBoneA;
-	TMap<FString, FString> ParentByBoneB;
+	TMap<FName, FName> ParentByBoneA;
+	TMap<FName, FName> ParentByBoneB;
 	for (int32 Index = 0; Index < RawA.Num(); ++Index)
 	{
-		ParentByBoneA.Add(RawA[Index].Name.ToString(), RawParentName(RawA, Index));
+		ParentByBoneA.Add(RawA[Index].Name, RawParentName(RawA, Index));
 	}
 	for (int32 Index = 0; Index < RawB.Num(); ++Index)
 	{
-		ParentByBoneB.Add(RawB[Index].Name.ToString(), RawParentName(RawB, Index));
+		ParentByBoneB.Add(RawB[Index].Name, RawParentName(RawB, Index));
 	}
 
 	TArray<FString> RawBonesAdded;
 	TArray<FString> RawBonesRemoved;
-	TArray<FString> SharedRawBones;
-	for (const TPair<FString, FString>& Bone : ParentByBoneB)
+	TArray<FName> SharedRawBones;
+	for (const TPair<FName, FName>& Bone : ParentByBoneB)
 	{
-		if (!ParentByBoneA.Contains(Bone.Key)) RawBonesAdded.Add(Bone.Key);
+		if (!ParentByBoneA.Contains(Bone.Key)) RawBonesAdded.Add(Bone.Key.ToString());
 	}
-	for (const TPair<FString, FString>& Bone : ParentByBoneA)
+	for (const TPair<FName, FName>& Bone : ParentByBoneA)
 	{
 		if (ParentByBoneB.Contains(Bone.Key)) SharedRawBones.Add(Bone.Key);
-		else RawBonesRemoved.Add(Bone.Key);
+		else RawBonesRemoved.Add(Bone.Key.ToString());
 	}
 	RawBonesAdded.Sort();
 	RawBonesRemoved.Sort();
-	SharedRawBones.Sort();
+	SharedRawBones.Sort([](const FName& Left, const FName& Right)
+	{
+		return Left.ToString() < Right.ToString();
+	});
 
 	TArray<TSharedPtr<FJsonValue>> Reparented;
 	bool bSharedParentsMatch = true;
-	for (const FString& BoneName : SharedRawBones)
+	for (const FName& BoneName : SharedRawBones)
 	{
-		const FString& ParentA = ParentByBoneA.FindChecked(BoneName);
-		const FString& ParentB = ParentByBoneB.FindChecked(BoneName);
+		const FName ParentA = ParentByBoneA.FindChecked(BoneName);
+		const FName ParentB = ParentByBoneB.FindChecked(BoneName);
 		if (ParentA != ParentB)
 		{
 			bSharedParentsMatch = false;
 			TSharedPtr<FJsonObject> Delta = MakeShared<FJsonObject>();
-			Delta->SetStringField(TEXT("bone"), BoneName);
-			Delta->SetStringField(TEXT("fromParent"), ParentA);
-			Delta->SetStringField(TEXT("toParent"), ParentB);
+			Delta->SetStringField(TEXT("bone"), BoneName.ToString());
+			Delta->SetStringField(TEXT("fromParent"), ParentA.ToString());
+			Delta->SetStringField(TEXT("toParent"), ParentB.ToString());
 			Reparented.Add(MakeShared<FJsonValueObject>(Delta));
 		}
 	}
