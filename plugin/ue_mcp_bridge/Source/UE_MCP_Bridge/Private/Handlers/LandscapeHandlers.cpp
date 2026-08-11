@@ -12,14 +12,20 @@
 #include "LandscapeStreamingProxy.h"
 #include "LandscapeInfo.h"
 #include "LandscapeComponent.h"
+#include "LandscapeHeightfieldCollisionComponent.h"
 #include "LandscapeSplineActor.h"
 #include "LandscapeSplinesComponent.h"
 #include "LandscapeSplineControlPoint.h"
 #include "LandscapeSplineSegment.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Misc/FileHelper.h"
+#include "Misc/PackageName.h"
+#include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
 #include "Materials/MaterialInterface.h"
 #include "EditorScriptingUtilities/Public/EditorAssetLibrary.h"
+#include "FileHelpers.h"
+#include "RenderingThread.h"
 #include "Components/PrimitiveComponent.h"
 #include "LandscapeLayerInfoObject.h"
 #include "UObject/Package.h"
@@ -42,6 +48,7 @@ void FLandscapeHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// #733: World Partition landscape streaming-proxy enumeration + spatial lookup.
 	Registry.RegisterHandler(TEXT("list_landscape_proxies"), &ListLandscapeProxies);
 	Registry.RegisterHandler(TEXT("find_landscape_proxy_at"), &FindLandscapeProxyAt);
+	Registry.RegisterHandlerWithTimeout(TEXT("refresh_landscape_physical_material_collision"), &RefreshPhysicalMaterialCollision, 300.0f);
 	Registry.RegisterHandlerWithTimeout(TEXT("sculpt_landscape"), &Sculpt, 120.0f);
 	Registry.RegisterHandlerWithTimeout(TEXT("paint_landscape_layer"), &PaintLayer, 120.0f);
 }
@@ -875,4 +882,471 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::FindLandscapeProxyAt(const TSharedPtr
 	Result->SetBoolField(TEXT("loaded"), false);
 	Result->SetStringField(TEXT("note"), TEXT("No loaded proxy covers this position; the covering proxy is likely streamed out, so weight/height readbacks here are ambiguous."));
 	return MCPResult(Result);
+}
+
+// Refresh physical-material collision data after a LayerInfo PhysMaterial edit.
+// ChangedPhysMaterial is the engine path used by ALandscapeProxy's own editor
+// property change handling: it rebuilds dominant-layer data and recreates each
+// registered collision component. Only loaded streaming proxies can be acted on;
+// World Partition actors that are not resident do not exist in the editor world.
+TSharedPtr<FJsonValue> FLandscapeHandlers::RefreshPhysicalMaterialCollision(const TSharedPtr<FJsonObject>& Params)
+{
+#if !UE_MCP_HAS_5_8_API
+	return MCPError(TEXT("Landscape physical-material collision refresh requires Unreal Engine 5.8 or newer"));
+#else
+	const double StartedAt = FPlatformTime::Seconds();
+	if (!GEditor)
+	{
+		return MCPError(TEXT("Editor not available"));
+	}
+	if (GEditor->PlayWorld != nullptr || GEditor->bIsSimulatingInEditor)
+	{
+		return MCPError(TEXT("Stop PIE or SIE before refreshing landscape physical-material collision"));
+	}
+
+	REQUIRE_EDITOR_WORLD(World);
+	if (World->WorldType != EWorldType::Editor)
+	{
+		return MCPError(TEXT("Physical-material collision refresh requires the current editor world"));
+	}
+	if (!World->IsPartitionedWorld())
+	{
+		return MCPError(TEXT("The current editor world is not a World Partition map"));
+	}
+
+	const int32 MaxActors = OptionalInt(Params, TEXT("maxActors"), 256);
+	if (MaxActors < 1 || MaxActors > 1024)
+	{
+		return MCPError(TEXT("'maxActors' must be between 1 and 1024"));
+	}
+	const bool bSave = OptionalBool(Params, TEXT("save"), false);
+
+	TSet<FString> WantedLabels;
+	const bool bHasLabelFilter = Params->HasField(TEXT("actorLabels"));
+	if (bHasLabelFilter)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+		if (!Params->TryGetArrayField(TEXT("actorLabels"), Values) || !Values || Values->IsEmpty() || Values->Num() > 256)
+		{
+			return MCPError(TEXT("'actorLabels' must be a non-empty array of at most 256 strings"));
+		}
+		for (const TSharedPtr<FJsonValue>& Value : *Values)
+		{
+			FString Label;
+			if (!Value.IsValid() || !Value->TryGetString(Label) || Label.IsEmpty())
+			{
+				return MCPError(TEXT("Every 'actorLabels' entry must be a non-empty string"));
+			}
+			WantedLabels.Add(Label.ToLower());
+		}
+	}
+
+	TSet<FGuid> WantedGuids;
+	const bool bHasGuidFilter = Params->HasField(TEXT("guids"));
+	if (bHasGuidFilter)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+		if (!Params->TryGetArrayField(TEXT("guids"), Values) || !Values || Values->IsEmpty() || Values->Num() > 256)
+		{
+			return MCPError(TEXT("'guids' must be a non-empty array of at most 256 GUID strings"));
+		}
+		for (const TSharedPtr<FJsonValue>& Value : *Values)
+		{
+			FString GuidText;
+			FGuid Guid;
+			if (!Value.IsValid() || !Value->TryGetString(GuidText) || !FGuid::Parse(GuidText, Guid))
+			{
+				return MCPError(FString::Printf(TEXT("Invalid actor GUID: '%s'"), *GuidText));
+			}
+			WantedGuids.Add(Guid);
+		}
+	}
+
+	FBox FilterBounds(ForceInit);
+	const bool bHasBoundsFilter = Params->HasField(TEXT("bounds"));
+	if (bHasBoundsFilter)
+	{
+		const TSharedPtr<FJsonObject>* BoundsObject = nullptr;
+		const TSharedPtr<FJsonObject>* MinObject = nullptr;
+		const TSharedPtr<FJsonObject>* MaxObject = nullptr;
+		if (!Params->TryGetObjectField(TEXT("bounds"), BoundsObject) || !BoundsObject ||
+			!(*BoundsObject)->TryGetObjectField(TEXT("min"), MinObject) || !MinObject ||
+			!(*BoundsObject)->TryGetObjectField(TEXT("max"), MaxObject) || !MaxObject)
+		{
+			return MCPError(TEXT("'bounds' must be {min:{x,y,z}, max:{x,y,z}}"));
+		}
+
+		auto ReadVector = [](const TSharedPtr<FJsonObject>& Object, FVector& Out) -> bool
+		{
+			double X = 0.0, Y = 0.0, Z = 0.0;
+			if (!Object->TryGetNumberField(TEXT("x"), X) ||
+				!Object->TryGetNumberField(TEXT("y"), Y) ||
+				!Object->TryGetNumberField(TEXT("z"), Z) ||
+				!FMath::IsFinite(X) || !FMath::IsFinite(Y) || !FMath::IsFinite(Z))
+			{
+				return false;
+			}
+			Out = FVector(X, Y, Z);
+			return true;
+		};
+
+		FVector Min, Max;
+		if (!ReadVector(*MinObject, Min) || !ReadVector(*MaxObject, Max))
+		{
+			return MCPError(TEXT("Every bounds min/max coordinate must be a finite number"));
+		}
+		FilterBounds = FBox(FVector::Min(Min, Max), FVector::Max(Min, Max));
+	}
+
+	TArray<ALandscapeStreamingProxy*> LoadedProxies;
+	TArray<ALandscapeStreamingProxy*> Matches;
+	for (TActorIterator<ALandscapeStreamingProxy> It(World); It; ++It)
+	{
+		ALandscapeStreamingProxy* Proxy = *It;
+		if (!Proxy || Proxy->GetWorld() != World) continue;
+		LoadedProxies.Add(Proxy);
+
+		if (bHasLabelFilter && !WantedLabels.Contains(Proxy->GetActorLabel().ToLower())) continue;
+		if (bHasGuidFilter && !WantedGuids.Contains(Proxy->GetActorGuid())) continue;
+		if (bHasBoundsFilter)
+		{
+			FVector Origin, Extent;
+			Proxy->GetActorBounds(false, Origin, Extent);
+			if (!FBox::BuildAABB(Origin, Extent).Intersect(FilterBounds)) continue;
+		}
+		Matches.Add(Proxy);
+	}
+
+	if (Matches.Num() > MaxActors)
+	{
+		return MCPError(FString::Printf(
+			TEXT("%d loaded LandscapeStreamingProxy actors matched, above the maxActors limit of %d. Narrow actorLabels/guids/bounds or raise maxActors deliberately."),
+			Matches.Num(), MaxActors));
+	}
+
+	struct FRefreshEntry
+	{
+		TSharedPtr<FJsonObject> Json;
+		ALandscapeStreamingProxy* Proxy = nullptr;
+		ALandscape* ParentLandscape = nullptr;
+		UPackage* Package = nullptr;
+		FString PackagePath;
+		FString FilePath;
+		FString Error;
+		int32 CollisionComponents = 0;
+		int32 OutdatedBefore = 0;
+		int32 OutdatedAfter = 0;
+		bool bTextureResourcesReady = false;
+		bool bRefreshed = false;
+		bool bPackageSaved = false;
+	};
+
+	TArray<FRefreshEntry> Entries;
+	TArray<FString> PackagePaths;
+	TMap<ALandscape*, bool> TextureResourcesReady;
+	for (ALandscapeStreamingProxy* Proxy : Matches)
+	{
+		ALandscape* ParentLandscape = Proxy ? Proxy->GetLandscapeActor() : nullptr;
+		if (ParentLandscape && !TextureResourcesReady.Contains(ParentLandscape))
+		{
+			// BuildPhysicalMaterial depends on resident weightmaps. Do this once per
+			// parent landscape and wait, instead of letting each proxy make a
+			// best-effort non-blocking request in the same frame.
+			TextureResourcesReady.Add(ParentLandscape, ParentLandscape->PrepareTextureResources(true));
+		}
+	}
+
+	int32 Refreshed = 0;
+	int32 CollisionComponentsRefreshed = 0;
+	int32 OutdatedBefore = 0;
+
+	for (ALandscapeStreamingProxy* Proxy : Matches)
+	{
+		FRefreshEntry& Entry = Entries.AddDefaulted_GetRef();
+		Entry.Proxy = Proxy;
+		Entry.ParentLandscape = Proxy->GetLandscapeActor();
+		Entry.bTextureResourcesReady = Entry.ParentLandscape && TextureResourcesReady.FindRef(Entry.ParentLandscape);
+		Entry.Json = MakeShared<FJsonObject>();
+		Entry.Json->SetStringField(TEXT("label"), Proxy->GetActorLabel());
+		Entry.Json->SetStringField(TEXT("guid"), Proxy->GetActorGuid().ToString());
+		Entry.Json->SetBoolField(TEXT("textureResourcesReady"), Entry.bTextureResourcesReady);
+
+		Entry.Package = Proxy->GetPackage();
+		if (Entry.Package)
+		{
+			Entry.PackagePath = Entry.Package->GetName();
+			Entry.Json->SetStringField(TEXT("package"), Entry.PackagePath);
+			PackagePaths.AddUnique(Entry.PackagePath);
+			FPackageName::TryConvertLongPackageNameToFilename(
+				Entry.PackagePath, Entry.FilePath, FPackageName::GetAssetPackageExtension());
+			if (!Entry.FilePath.IsEmpty()) Entry.Json->SetStringField(TEXT("file"), Entry.FilePath);
+		}
+
+		TArray<ULandscapeComponent*> Components;
+		Proxy->GetComponents<ULandscapeComponent>(Components);
+		for (ULandscapeComponent* Component : Components)
+		{
+			if (Component && Component->IsRegistered() && Component->GetCollisionComponent())
+			{
+				++Entry.CollisionComponents;
+			}
+		}
+		Entry.Json->SetNumberField(TEXT("collisionComponents"), Entry.CollisionComponents);
+		if (Entry.CollisionComponents == 0)
+		{
+			Entry.Error = TEXT("No registered landscape collision components were available to refresh");
+			Entry.Json->SetBoolField(TEXT("refreshed"), false);
+			continue;
+		}
+		if (!Entry.bTextureResourcesReady)
+		{
+			Entry.Error = TEXT("The parent landscape could not make its texture resources resident");
+			Entry.Json->SetBoolField(TEXT("refreshed"), false);
+			continue;
+		}
+
+		Proxy->ChangedPhysMaterial();
+		Entry.OutdatedBefore = Proxy->GetOudatedPhysicalMaterialComponentsCount();
+		Entry.Json->SetNumberField(TEXT("outdatedBefore"), Entry.OutdatedBefore);
+		// The return type changed between supported UE versions; ignoring it is
+		// intentional. The exported outdated count below is the stable readback.
+		Proxy->BuildPhysicalMaterial();
+		Entry.bRefreshed = true;
+		Entry.Json->SetBoolField(TEXT("refreshed"), true);
+		++Refreshed;
+		CollisionComponentsRefreshed += Entry.CollisionComponents;
+		OutdatedBefore += Entry.OutdatedBefore;
+	}
+
+	// BuildPhysicalMaterial advances an asynchronous GPU readback. Re-enter the
+	// exported build method after flushing render commands until it finalizes
+	// every matched proxy, or until there is enough time left to return a useful
+	// failure report and any targeted saves before the handler's 300-second
+	// bridge timeout. Time spent preparing texture resources counts too.
+	const double BuildDeadline = StartedAt + 240.0;
+	bool bBuildTimedOut = false;
+	while (Refreshed > 0)
+	{
+		int32 Remaining = 0;
+		for (const FRefreshEntry& Entry : Entries)
+		{
+			if (Entry.bRefreshed) Remaining += Entry.Proxy->GetOudatedPhysicalMaterialComponentsCount();
+		}
+		if (Remaining == 0) break;
+		if (FPlatformTime::Seconds() >= BuildDeadline)
+		{
+			bBuildTimedOut = true;
+			break;
+		}
+
+		FlushRenderingCommands();
+		for (FRefreshEntry& Entry : Entries)
+		{
+			if (Entry.bRefreshed && Entry.Proxy->GetOudatedPhysicalMaterialComponentsCount() > 0)
+			{
+				Entry.Proxy->BuildPhysicalMaterial();
+			}
+		}
+		FPlatformProcess::Sleep(0.001f);
+	}
+	if (Refreshed > 0) FlushRenderingCommands();
+
+	int32 CollisionComponentsRecreateRequested = 0;
+	int32 CollisionComponentsRecreatedAfterBuild = 0;
+	int32 CollisionComponentsUnchangedAfterBuild = 0;
+	int32 OutdatedAfterBuild = 0;
+	for (FRefreshEntry& Entry : Entries)
+	{
+		if (!Entry.bRefreshed) continue;
+		Entry.OutdatedAfter = Entry.Proxy->GetOudatedPhysicalMaterialComponentsCount();
+		Entry.Json->SetNumberField(TEXT("outdatedAfterBuild"), Entry.OutdatedAfter);
+		Entry.Json->SetBoolField(TEXT("physicalMaterialCurrentAfterBuild"), Entry.OutdatedAfter == 0);
+		OutdatedAfterBuild += Entry.OutdatedAfter;
+		if (Entry.OutdatedAfter == 0)
+		{
+			// ChangedPhysMaterial recreates collision before the asynchronous
+			// physical-material render data has completed. Recreate it once more
+			// after completion so this action does not depend on the project's
+			// landscape.ApplyPhysicalMaterialChangesImmediately CVar.
+			int32 EntryRecreateRequested = 0;
+			int32 EntryRecreated = 0;
+			int32 EntryUnchanged = 0;
+			TArray<ULandscapeComponent*> Components;
+			Entry.Proxy->GetComponents<ULandscapeComponent>(Components);
+			for (ULandscapeComponent* Component : Components)
+			{
+				if (Component && Component->IsRegistered())
+				{
+					if (ULandscapeHeightfieldCollisionComponent* Collision = Component->GetCollisionComponent())
+					{
+						++EntryRecreateRequested;
+						if (Collision->RecreateCollision()) ++EntryRecreated;
+						else ++EntryUnchanged;
+					}
+				}
+			}
+			Entry.Json->SetNumberField(TEXT("collisionRecreateRequestedAfterBuild"), EntryRecreateRequested);
+			Entry.Json->SetNumberField(TEXT("collisionRecreatedAfterBuild"), EntryRecreated);
+			Entry.Json->SetNumberField(TEXT("collisionUnchangedAfterBuild"), EntryUnchanged);
+			CollisionComponentsRecreateRequested += EntryRecreateRequested;
+			CollisionComponentsRecreatedAfterBuild += EntryRecreated;
+			CollisionComponentsUnchangedAfterBuild += EntryUnchanged;
+		}
+		else
+		{
+			Entry.Error = FString::Printf(
+				TEXT("Physical-material build did not flush %d outdated component(s)%s"),
+				Entry.OutdatedAfter, bBuildTimedOut ? TEXT(" before the timeout") : TEXT(""));
+		}
+	}
+
+	TArray<UPackage*> PackagesToSave;
+	if (bSave)
+	{
+		for (FRefreshEntry& Entry : Entries)
+		{
+			if (!Entry.Error.IsEmpty()) continue;
+			if (!Entry.Proxy->IsPackageExternal() || !Entry.Package)
+			{
+				Entry.Error = TEXT("Matched proxy is not stored in an external actor package");
+			}
+			else if (Entry.FilePath.IsEmpty())
+			{
+				Entry.Error = TEXT("Could not resolve the external actor package filename");
+			}
+			else if (!Entry.Proxy->MarkPackageDirty())
+			{
+				Entry.Error = TEXT("Could not mark the external actor package dirty");
+			}
+			else
+			{
+				PackagesToSave.AddUnique(Entry.Package);
+			}
+		}
+	}
+
+	bool bSaveCallSucceeded = true;
+	if (bSave && PackagesToSave.Num() > 0)
+	{
+		bSaveCallSucceeded = UEditorLoadingAndSavingUtils::SavePackages(PackagesToSave, /*bOnlyDirty=*/false);
+	}
+	if (bSave)
+	{
+		for (FRefreshEntry& Entry : Entries)
+		{
+			if (!Entry.Error.IsEmpty()) continue;
+			Entry.bPackageSaved = Entry.Package && !Entry.Package->IsDirty();
+			if (!Entry.bPackageSaved)
+			{
+				Entry.Error = bSaveCallSucceeded
+					? TEXT("External actor package remained dirty after the targeted save")
+					: TEXT("Targeted package save was cancelled or failed");
+			}
+		}
+	}
+
+	// Saving invokes ALandscapeProxy::PreSave, which can finalize derived tasks.
+	// Read the state back after that hook so the reported outcome describes what
+	// was persisted, not only the state immediately before serialization.
+	int32 OutdatedAfter = 0;
+	int32 PhysicalMaterialsCurrent = 0;
+	for (FRefreshEntry& Entry : Entries)
+	{
+		if (!Entry.bRefreshed) continue;
+		Entry.OutdatedAfter = Entry.Proxy->GetOudatedPhysicalMaterialComponentsCount();
+		Entry.Json->SetNumberField(TEXT("outdatedAfter"), Entry.OutdatedAfter);
+		if (bSave) Entry.Json->SetNumberField(TEXT("outdatedAfterSave"), Entry.OutdatedAfter);
+		const bool bPhysicalMaterialCurrent = Entry.OutdatedAfter == 0;
+		Entry.Json->SetBoolField(TEXT("physicalMaterialCurrent"), bPhysicalMaterialCurrent);
+		OutdatedAfter += Entry.OutdatedAfter;
+		if (bPhysicalMaterialCurrent)
+		{
+			++PhysicalMaterialsCurrent;
+		}
+		else if (Entry.Error.IsEmpty())
+		{
+			Entry.Error = FString::Printf(
+				TEXT("Physical-material state has %d outdated component(s) after %s"),
+				Entry.OutdatedAfter, bSave ? TEXT("the targeted save") : TEXT("the build"));
+		}
+	}
+
+	TArray<TSharedPtr<FJsonValue>> ActorResults;
+	TArray<FString> SavedPackagePaths;
+	TArray<FString> FailedPackagePaths;
+	int32 Saved = 0;
+	int32 Failed = 0;
+	for (FRefreshEntry& Entry : Entries)
+	{
+		Entry.Json->SetBoolField(TEXT("saved"), Entry.bPackageSaved);
+		if (Entry.bPackageSaved)
+		{
+			++Saved;
+			if (!Entry.PackagePath.IsEmpty()) SavedPackagePaths.AddUnique(Entry.PackagePath);
+		}
+		if (!Entry.Error.IsEmpty())
+		{
+			++Failed;
+			Entry.Json->SetStringField(TEXT("error"), Entry.Error);
+			if (!Entry.PackagePath.IsEmpty()) FailedPackagePaths.AddUnique(Entry.PackagePath);
+		}
+		ActorResults.Add(MakeShared<FJsonValueObject>(Entry.Json));
+	}
+
+	auto ToJsonStrings = [](const TArray<FString>& Strings)
+	{
+		TArray<TSharedPtr<FJsonValue>> Values;
+		Values.Reserve(Strings.Num());
+		for (const FString& String : Strings) Values.Add(MakeShared<FJsonValueString>(String));
+		return Values;
+	};
+
+	auto Result = MCPSuccess();
+	if (Failed > 0 || Matches.IsEmpty()) Result->SetBoolField(TEXT("success"), false);
+	if (Refreshed > 0) MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("world"), World->GetPathName());
+	Result->SetBoolField(TEXT("saveRequested"), bSave);
+	Result->SetNumberField(TEXT("maxActors"), MaxActors);
+	Result->SetNumberField(TEXT("loaded"), LoadedProxies.Num());
+	Result->SetNumberField(TEXT("matched"), Matches.Num());
+	Result->SetNumberField(TEXT("refreshed"), Refreshed);
+	Result->SetNumberField(TEXT("collisionComponentsRefreshed"), CollisionComponentsRefreshed);
+	Result->SetNumberField(TEXT("collisionComponentsRecreateRequested"), CollisionComponentsRecreateRequested);
+	Result->SetNumberField(TEXT("collisionComponentsRecreatedAfterBuild"), CollisionComponentsRecreatedAfterBuild);
+	Result->SetNumberField(TEXT("collisionComponentsUnchangedAfterBuild"), CollisionComponentsUnchangedAfterBuild);
+	Result->SetNumberField(TEXT("physicalMaterialsCurrent"), PhysicalMaterialsCurrent);
+	Result->SetNumberField(TEXT("outdatedBefore"), OutdatedBefore);
+	Result->SetNumberField(TEXT("outdatedAfterBuild"), OutdatedAfterBuild);
+	Result->SetNumberField(TEXT("outdatedAfter"), OutdatedAfter);
+	Result->SetBoolField(TEXT("buildTimedOut"), bBuildTimedOut);
+	Result->SetNumberField(TEXT("textureResourceParents"), TextureResourcesReady.Num());
+	int32 ReadyParents = 0;
+	for (const TPair<ALandscape*, bool>& Pair : TextureResourcesReady) ReadyParents += Pair.Value ? 1 : 0;
+	Result->SetNumberField(TEXT("textureResourceParentsReady"), ReadyParents);
+	Result->SetNumberField(TEXT("saved"), Saved);
+	Result->SetNumberField(TEXT("failed"), Failed);
+	Result->SetArrayField(TEXT("packagePaths"), ToJsonStrings(PackagePaths));
+	Result->SetArrayField(TEXT("savedPackagePaths"), ToJsonStrings(SavedPackagePaths));
+	Result->SetArrayField(TEXT("failedPackagePaths"), ToJsonStrings(FailedPackagePaths));
+	Result->SetArrayField(TEXT("actors"), ActorResults);
+	FString Note;
+	if (Matches.IsEmpty())
+	{
+		Note = TEXT("No loaded LandscapeStreamingProxy actor matched. Unloaded proxies were not changed; pin them first with level(load_actor_descs), then rerun this action.");
+	}
+	else if (Failed > 0)
+	{
+		Note = FString::Printf(TEXT("%d of %d matched proxies failed; inspect the per-actor errors. Unloaded proxies were not changed."), Failed, Matches.Num());
+	}
+	else if (bSave)
+	{
+		Note = TEXT("Only matched loaded external actor packages were targeted and verified after save. Unloaded proxies were not changed.");
+	}
+	else
+	{
+		Note = TEXT("Collision and physical-material data were rebuilt in memory and matched packages may now be dirty. No packages were saved. Unloaded proxies were not changed.");
+	}
+	Result->SetStringField(TEXT("note"), Note);
+	return MCPResult(Result);
+#endif // UE_MCP_HAS_5_8_API
 }
