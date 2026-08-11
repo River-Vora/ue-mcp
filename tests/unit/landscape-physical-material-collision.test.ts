@@ -6,21 +6,22 @@ describe("landscape.refresh_physical_material_collision", () => {
     const action = landscapeTool.actions.refresh_physical_material_collision;
     expect(landscapeTool.schema.action.safeParse("refresh_physical_material_collision").success).toBe(true);
     expect(action.bridge).toBe("refresh_landscape_physical_material_collision");
-    expect(action.timeoutMs).toBe(300_000);
+    expect(action.timeoutMs).toBe(600_000);
+    expect(action.description).toContain("no pending landscape edit-layer work");
+    expect(action.description).toContain("every raw, complex-live, and simple-live height sample");
+    expect(action.description).toContain("Persistence is deliberately unsupported");
     expect(action.mapParams?.({
       action: "refresh_physical_material_collision",
       actorLabels: ["LandscapeStreamingProxy_2_3"],
       guids: ["16A4CE244E435B01995B28A15C81A661"],
       bounds: { min: { x: 0, y: 1, z: 2 }, max: { x: 3, y: 4, z: 5 } },
       maxActors: 8,
-      save: false,
       unrelated: "must not reach the bridge",
     })).toEqual({
       actorLabels: ["LandscapeStreamingProxy_2_3"],
       guids: ["16A4CE244E435B01995B28A15C81A661"],
       bounds: { min: { x: 0, y: 1, z: 2 }, max: { x: 3, y: 4, z: 5 } },
       maxActors: 8,
-      save: false,
     });
   });
 
@@ -35,13 +36,12 @@ describe("landscape.refresh_physical_material_collision", () => {
     expect(landscapeTool.schema.maxActors.safeParse(1025).success).toBe(false);
   });
 
-  it("requires complete numeric bounds and a boolean save flag", () => {
+  it("requires complete numeric bounds and does not expose package saving", () => {
     expect(landscapeTool.schema.bounds.safeParse({
       min: { x: -100, y: -100, z: -10 },
       max: { x: 100, y: 100, z: 10 },
     }).success).toBe(true);
     expect(landscapeTool.schema.bounds.safeParse({ min: { x: 0, y: 0 }, max: { x: 1, y: 1, z: 1 } }).success).toBe(false);
-    expect(landscapeTool.schema.save.safeParse(true).success).toBe(true);
-    expect(landscapeTool.schema.save.safeParse("yes").success).toBe(false);
+    expect("save" in landscapeTool.schema).toBe(false);
   });
 });
