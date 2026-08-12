@@ -14,8 +14,21 @@ right-side pose.
 ## Required loop
 
 1. Call `project(action="get_status")`; verify the intended project and editor.
-2. Resolve the source AnimSequence, mesh, skeleton, Control Rig, and frame rate.
-3. Create a versioned session with `begin_control_rig_edit`. Use a unique
+2. Establish the character's authoring baseline before editing clips. Search
+   for a Control Rig already bound to the target mesh/skeleton and inspect it
+   with `read_control_rig_hierarchy` and `read_control_rig_graph`. It must have
+   the controls, Forward Solve, and Backward Solve required for the intended
+   edits. If the project or character has no suitable rig, create one first
+   with the bundled Epic 5.8 controlrig actions (`epic_create`,
+   `epic_import_bones_from_asset`, `epic_add_control`, deliberate Forward Solve
+   nodes/links, and `epic_add_backward_solve_graph`), then save the exact rig
+   with `asset(epic_save_assets)`. `epic_create` alone creates no imported
+   bones, authored controls, or solver wiring. Run an unchanged
+   source-to-controls-to-bones round trip on the exact production mesh. Do not
+   begin production work on an unverified or merely name-compatible rig.
+3. Resolve the source AnimSequence, mesh, skeleton, verified Control Rig, and
+   frame rate.
+4. Create a versioned session with `begin_control_rig_edit`. Use a unique
    LevelSequence path and `bindingTag`, an end-exclusive frame range, and
    `onConflict="error"`. Use `rigMode="asset"` for a project rig or `"fk"` only
    when generated FK controls are intentional. The source must be non-additive
@@ -23,33 +36,33 @@ right-side pose.
    first. `layered` controls the session layer, not an additive source base.
    A finite non-zero source `RateScale` is compensated in Sequencer so the raw
    timeline maps once without modifying the source asset; zero is rejected.
-4. Call `read_control_rig_edit` at rest, transitions, extrema, and end in both
+5. Call `read_control_rig_edit` at rest, transitions, extrema, and end in both
    `local` and `global` space. Here `global` is rig/global (normally mesh
    component) space, not actor world space.
-5. Inspect every control's `controlType`, `animatable`, and enum metadata. Write
+6. Inspect every control's `controlType`, `animatable`, and enum metadata. Write
    scalars with the matching `set_bool`, `set_float`, or `set_int`; enum values
    must come from `enumOptions`. Never write `animatable=false` controls.
-6. Define anatomical component-space targets, then solve proximal to distal:
+7. Define anatomical component-space targets, then solve proximal to distal:
    shoulder/upper arm, elbow pole and bend, forearm direction, wrist, palm
    normal, then secondary motion. For a wave, the forearm must rise, the wrist
    must sit above the elbow/near the shoulder region, and the probed palm normal
    must face the intended viewer before wrist oscillation is added.
-7. When an axis is uncertain, make an immutable probe session. Apply a small
+8. When an axis is uncertain, make an immutable probe session. Apply a small
    positive and negative rotation to one local axis at one fixed frame, bake,
    and inspect the resulting component-space shoulder/forearm/hand landmarks
    with `analyze_animation`. Probe the right side separately; mirrored parents
    or negative scale can reverse anatomical meanings. Preserve the full scale
    read from the control.
-8. Apply absolute `set_keys` transforms with finite normalized quaternions,
+9. Apply absolute `set_keys` transforms with finite normalized quaternions,
    complete translation/rotationQuaternion/scale payloads, and strictly
    increasing frames. Preserve translation and scale unless intentionally
    editing them. If the source bake has dense keys, key every affected frame;
    sparse keys will not replace the intervening source motion. Apply related
    controls and scalar switches in one transaction.
-9. Read back the edited frames in local and global space. Reject elbow flips,
+10. Read back the edited frames in local and global space. Reject elbow flips,
    discontinuities, wrong forearm direction, wrong palm normal, or unexpected
    changes outside the edited chain before baking.
-10. Bake to a new versioned AnimSequence with `bake_control_rig_edit`,
+11. Bake to a new versioned AnimSequence with `bake_control_rig_edit`,
     `reduceKeys=false`, and `onConflict="error"`. Never overwrite source,
     another iteration's session, or prior approved output assets.
 

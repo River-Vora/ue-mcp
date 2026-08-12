@@ -27,7 +27,36 @@ instead of making an escape hatch part of the workflow.
 
 ## The authoring loop
 
-### 1. Orient and create an immutable session
+### 1. Establish a per-character Control Rig baseline
+
+`begin_control_rig_edit` edits through a Control Rig; it does not invent one.
+Before authoring the first clip for a new project or character, search for an
+existing rig bound to the target mesh/skeleton. Inspect it with
+`read_control_rig_hierarchy` and `read_control_rig_graph`. A usable baseline
+must expose the controls needed by the intended motion, a Forward Solve that
+drives the bones, and a Backward Solve that can initialize those controls from
+source animation without a pose jump.
+
+If no suitable rig exists, create that baseline first. UE 5.8's bundled
+Control Rig toolset is available through the animation category: start with
+`epic_create`, import the production skeleton with
+`epic_import_bones_from_asset`, add the intended controls with
+`epic_add_control`, and add inverse initialization with
+`epic_add_backward_solve_graph`; then use the remaining Control Rig graph,
+node, and link actions and save the exact rig with `asset(epic_save_assets)`.
+`epic_create` alone creates no imported bones, authored controls, or solver
+wiring.
+Build only the controls and solvers required by the character's current
+animation work. Verify the saved hierarchy and graph, then round-trip an
+unchanged source clip through Backward Solve, Forward Solve, and bake. Bone
+transforms must remain within the project's tolerance before the rig is trusted
+for production edits.
+
+Do not treat matching bone or control names as compatibility proof. Do not
+create a new rig per animation; the verified character rig is the reusable
+authoring foundation and baked AnimSequences remain the runtime output.
+
+### 2. Orient and create an immutable session
 
 Start with `project(action="get_status")` and verify the active project and
 editor connection. Resolve the source AnimSequence, skeletal mesh, skeleton,
@@ -71,7 +100,7 @@ output path. Keep `onConflict="error"` while developing. `skip` is suitable
 only for a deliberately idempotent replay; begin and bake never overwrite an
 existing asset.
 
-### 2. Read controls before choosing them
+### 3. Read controls before choosing them
 
 Call `read_control_rig_edit` on the candidate controls at the rest, transition,
 peak, opposite peak, and final frames. Read both spaces:
@@ -99,7 +128,7 @@ Never write a control with `animatable=false`. Use `set_bool`, `set_float`, or
 `set_int` for scalar controls. For an enum, pass an exact integer listed in
 `enumOptions`; do not infer it from the option's position or label.
 
-### 3. Solve anatomy in component space
+### 4. Solve anatomy in component space
 
 Define observable targets before changing controls. For an arm gesture, solve
 proximal to distal:
@@ -144,7 +173,7 @@ This makes the method reusable across skeletons and animated hierarchies while
 keeping the only unavoidable custom data small: control/bone mapping, local
 axes and signs, mirrored scale, joint limits, and the motion's constraints.
 
-### 4. Probe mirrored and ambiguous axes
+### 5. Probe mirrored and ambiguous axes
 
 Never obtain right-side rotations by negating left-side Euler values. A
 right-side control may inherit mirrored axes or negative scale, so the same
@@ -167,7 +196,7 @@ For every unfamiliar rig, and separately for each side when needed:
 This small probe is cheaper and safer than correcting a full clip built on an
 assumed axis convention.
 
-### 5. Apply absolute quaternion keys
+### 6. Apply absolute quaternion keys
 
 Use `set_keys` for reproducible transform authoring:
 
@@ -208,7 +237,7 @@ transform first. The rules are:
 Read the same frames again after applying. Check both local continuity and the
 global/component anatomical targets before baking.
 
-### 6. Bake to a new asset
+### 7. Bake to a new asset
 
 ```text
 animation(

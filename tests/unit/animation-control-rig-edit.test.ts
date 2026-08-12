@@ -208,6 +208,35 @@ describe("animation Control Rig edit workflow", () => {
     expect(source).toContain("static_cast<UObject&>(*SkeletalMesh)");
   });
 
+  it("makes the per-character Control Rig baseline a prerequisite", () => {
+    const begin = animationTool.actions.begin_control_rig_edit.description;
+    const skill = readFileSync(
+      new URL("../../skills/ue-mcp-animation/SKILL.md", import.meta.url),
+      "utf8",
+    );
+    const guide = readFileSync(
+      new URL("../../docs/control-rig-animation.md", import.meta.url),
+      "utf8",
+    );
+
+    expect(begin).toContain("Baseline first");
+    expect(begin).toContain("read_control_rig_hierarchy/read_control_rig_graph");
+    expect(begin).toContain("epic_create");
+    expect(begin).toContain("epic_import_bones_from_asset");
+    expect(begin).toContain("epic_add_control");
+    expect(begin).toContain("epic_add_backward_solve_graph");
+    expect(begin).toContain("unchanged source round-trip");
+    expect(begin).toContain("rejects rigs without inverse execution");
+    expect(animationTool.schema.controlRigPath.description).toContain("verified baseline");
+    expect(animationTool.schema.rigMode.description).toContain("verified baseline");
+    expect(skill).toContain("Establish the character's authoring baseline");
+    expect(skill).toContain("source-to-controls-to-bones round trip");
+    expect(guide).toContain("Establish a per-character Control Rig baseline");
+    expect(guide).toContain("it does not invent one");
+    expect(guide).toContain("alone creates no imported bones");
+    expect(guide.replace(/\s+/g, " ")).toContain("Do not create a new rig per animation");
+  });
+
   it("validates typed transform and scalar operations", () => {
     const operations = animationTool.schema.operations;
 
