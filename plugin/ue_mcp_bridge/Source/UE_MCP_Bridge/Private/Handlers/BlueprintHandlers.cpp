@@ -35,6 +35,7 @@
 #include "K2Node_EditablePinBase.h"
 #include "K2Node_IfThenElse.h"
 #include "K2Node_MacroInstance.h"
+#include "K2Node_AddComponent.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_DynamicCast.h"
 #include "K2Node_VariableSet.h"
@@ -125,6 +126,7 @@ void FBlueprintHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("reparent_component"), &ReparentComponent);
 	Registry.RegisterHandler(TEXT("reparent_blueprint"), &ReparentBlueprint);
 	Registry.RegisterHandler(TEXT("flush_inheritable_component_handler"), &FlushInheritableComponentHandler);
+	Registry.RegisterHandler(TEXT("flush_blueprint_component_templates"), &FlushComponentTemplates);
 	Registry.RegisterHandler(TEXT("set_actor_tick_settings"), &SetActorTickSettings);
 
 	// v0.7.12 - issue #128 - single-property read (inherited-aware)
@@ -2502,6 +2504,91 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::FlushInheritableComponentHandler(cons
 		Result->SetNumberField(TEXT("recordsAfter"), After);
 		Result->SetNumberField(TEXT("recordsRemoved"), FMath::Max(0, Before - After));
 	}
+	return MCPResult(Result);
+}
+
+TSharedPtr<FJsonValue> FBlueprintHandlers::FlushComponentTemplates(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+
+	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
+	if (!Blueprint)
+	{
+		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	}
+
+	TArray<UK2Node_AddComponent*> ComponentNodes;
+	FBlueprintEditorUtils::GetAllNodesOfClass(Blueprint, ComponentNodes);
+
+	TArray<UActorComponent*> ReferencedTemplates;
+	bool bNeedsUpdate = false;
+	for (UK2Node_AddComponent* ComponentNode : ComponentNodes)
+	{
+		UActorComponent* Template = ComponentNode ? ComponentNode->GetTemplateFromNode() : nullptr;
+		if (!Template)
+		{
+			continue;
+		}
+		if (ReferencedTemplates.Contains(Template))
+		{
+			bNeedsUpdate = true;
+			continue;
+		}
+		ReferencedTemplates.Add(Template);
+		bNeedsUpdate |= !Template->HasAllFlags(RF_ArchetypeObject | RF_Transactional);
+	}
+
+	const int32 RecordsBefore = Blueprint->ComponentTemplates.Num();
+	if (RecordsBefore != ReferencedTemplates.Num())
+	{
+		bNeedsUpdate = true;
+	}
+	else
+	{
+		for (int32 Index = 0; Index < RecordsBefore; ++Index)
+		{
+			if (Blueprint->ComponentTemplates[Index].Get() != ReferencedTemplates[Index])
+			{
+				bNeedsUpdate = true;
+				break;
+			}
+		}
+	}
+
+	TArray<TSharedPtr<FJsonValue>> RemovedTemplates;
+	for (UActorComponent* Template : Blueprint->ComponentTemplates)
+	{
+		if (!Template || ReferencedTemplates.Contains(Template))
+		{
+			continue;
+		}
+		TSharedPtr<FJsonObject> Identity = MakeShared<FJsonObject>();
+		Identity->SetStringField(TEXT("name"), Template->GetName());
+		Identity->SetStringField(TEXT("objectPath"), Template->GetPathName());
+		Identity->SetStringField(TEXT("classPath"), Template->GetClass()->GetPathName());
+		RemovedTemplates.Add(MakeShared<FJsonValueObject>(Identity));
+	}
+
+	if (bNeedsUpdate)
+	{
+		Blueprint->Modify();
+		FBlueprintEditorUtils::UpdateComponentTemplates(Blueprint);
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		FKismetEditorUtilities::CompileBlueprint(Blueprint);
+		if (!SaveAssetPackage(Blueprint))
+		{
+			return MCPError(FString::Printf(TEXT("Failed to save Blueprint after flushing component templates: %s"), *AssetPath));
+		}
+	}
+
+	auto Result = MCPSuccess();
+	if (bNeedsUpdate) MCPSetUpdated(Result); else MCPSetExisted(Result);
+	Result->SetStringField(TEXT("path"), AssetPath);
+	Result->SetNumberField(TEXT("recordsBefore"), RecordsBefore);
+	Result->SetNumberField(TEXT("recordsAfter"), Blueprint->ComponentTemplates.Num());
+	Result->SetNumberField(TEXT("recordsRemoved"), RemovedTemplates.Num());
+	Result->SetArrayField(TEXT("removedTemplates"), RemovedTemplates);
 	return MCPResult(Result);
 }
 
