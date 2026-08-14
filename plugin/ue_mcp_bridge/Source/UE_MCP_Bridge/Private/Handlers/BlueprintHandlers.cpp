@@ -7,6 +7,7 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "BlueprintEditorLibrary.h"
 #include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "K2Node.h"
@@ -17,6 +18,7 @@
 #include "Editor.h"
 #include "Editor/EditorEngine.h"
 #include "UObject/UObjectGlobals.h"
+#include "UObject/UObjectHash.h"
 #include "UObject/UnrealType.h"
 #include "UObject/Package.h"
 #include "Misc/PackageName.h"
@@ -25,6 +27,7 @@
 #include "UObject/TopLevelAssetPath.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
+#include "PackageTools.h"
 #include "Factories/BlueprintFactory.h"
 #include "EdGraph/EdGraph.h"
 #include "K2Node_CallFunction.h"
@@ -2557,12 +2560,33 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::FlushComponentTemplates(const TShared
 	}
 
 	TArray<TSharedPtr<FJsonValue>> RemovedTemplates;
+	TArray<UActorComponent*> OrphanTemplates;
 	for (UActorComponent* Template : Blueprint->ComponentTemplates)
 	{
-		if (!Template || ReferencedTemplates.Contains(Template))
+		if (Template && !ReferencedTemplates.Contains(Template))
 		{
-			continue;
+			OrphanTemplates.AddUnique(Template);
 		}
+	}
+	if (Blueprint->GeneratedClass)
+	{
+		TArray<UObject*> OwnedObjects;
+		GetObjectsWithOuter(Blueprint->GeneratedClass, OwnedObjects, EGetObjectsFlags::None);
+		for (UObject* OwnedObject : OwnedObjects)
+		{
+			UActorComponent* Template = Cast<UActorComponent>(OwnedObject);
+			if (Template
+				&& Template->GetName().StartsWith(UK2Node_AddComponent::ComponentTemplateNamePrefix)
+				&& !ReferencedTemplates.Contains(Template))
+			{
+				OrphanTemplates.AddUnique(Template);
+			}
+		}
+	}
+	bNeedsUpdate |= !OrphanTemplates.IsEmpty();
+
+	for (UActorComponent* Template : OrphanTemplates)
+	{
 		TSharedPtr<FJsonObject> Identity = MakeShared<FJsonObject>();
 		Identity->SetStringField(TEXT("name"), Template->GetName());
 		Identity->SetStringField(TEXT("objectPath"), Template->GetPathName());
@@ -2574,21 +2598,66 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::FlushComponentTemplates(const TShared
 	{
 		Blueprint->Modify();
 		FBlueprintEditorUtils::UpdateComponentTemplates(Blueprint);
+		if (UBlueprintGeneratedClass* GeneratedClass = Cast<UBlueprintGeneratedClass>(Blueprint->GeneratedClass))
+		{
+			for (UActorComponent* Template : OrphanTemplates)
+			{
+				GeneratedClass->ComponentTemplates.Remove(Template);
+			}
+		}
+		for (UActorComponent* Template : OrphanTemplates)
+		{
+			Template->Modify();
+			Template->ClearFlags(RF_Public | RF_Standalone);
+			if (!Template->Rename(nullptr, GetTransientPackage(),
+				REN_DoNotDirty | REN_DontCreateRedirectors | REN_AllowPackageLinkerMismatch | REN_NonTransactional))
+			{
+				return MCPError(FString::Printf(TEXT("Failed to retire orphan component template: %s"), *Template->GetPathName()));
+			}
+		}
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 		FKismetEditorUtilities::CompileBlueprint(Blueprint);
+		const int32 RecordsAfter = Blueprint->ComponentTemplates.Num();
 		if (!SaveAssetPackage(Blueprint))
 		{
 			return MCPError(FString::Printf(TEXT("Failed to save Blueprint after flushing component templates: %s"), *AssetPath));
 		}
+
+		if (!OrphanTemplates.IsEmpty())
+		{
+			FText ReloadError;
+			TArray<UPackage*> PackagesToReload{Blueprint->GetOutermost()};
+			if (!UPackageTools::ReloadPackages(
+				PackagesToReload, ReloadError, EReloadPackagesInteractionMode::AssumePositive))
+			{
+				return MCPError(FString::Printf(TEXT("Failed to reload Blueprint after retiring orphan templates: %s"), *ReloadError.ToString()));
+			}
+			Blueprint = LoadBlueprint(AssetPath);
+			if (!Blueprint || !SaveAssetPackage(Blueprint))
+			{
+				return MCPError(FString::Printf(TEXT("Failed final Blueprint save after retiring orphan templates: %s"), *AssetPath));
+			}
+		}
+
+		auto Result = MCPSuccess();
+		MCPSetUpdated(Result);
+		Result->SetStringField(TEXT("path"), AssetPath);
+		Result->SetNumberField(TEXT("recordsBefore"), RecordsBefore);
+		Result->SetNumberField(TEXT("recordsAfter"), RecordsAfter);
+		Result->SetNumberField(TEXT("recordsRemoved"), RemovedTemplates.Num());
+		Result->SetArrayField(TEXT("removedTemplates"), RemovedTemplates);
+		Result->SetBoolField(TEXT("reloadedAfterCleanup"), !OrphanTemplates.IsEmpty());
+		return MCPResult(Result);
 	}
 
 	auto Result = MCPSuccess();
-	if (bNeedsUpdate) MCPSetUpdated(Result); else MCPSetExisted(Result);
+	MCPSetExisted(Result);
 	Result->SetStringField(TEXT("path"), AssetPath);
 	Result->SetNumberField(TEXT("recordsBefore"), RecordsBefore);
 	Result->SetNumberField(TEXT("recordsAfter"), Blueprint->ComponentTemplates.Num());
 	Result->SetNumberField(TEXT("recordsRemoved"), RemovedTemplates.Num());
 	Result->SetArrayField(TEXT("removedTemplates"), RemovedTemplates);
+	Result->SetBoolField(TEXT("reloadedAfterCleanup"), false);
 	return MCPResult(Result);
 }
 
