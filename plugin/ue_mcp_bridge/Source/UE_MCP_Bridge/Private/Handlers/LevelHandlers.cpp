@@ -87,6 +87,7 @@
 #include "Materials/MaterialInterface.h"
 #include "HandlerJsonProperty.h"
 #include "Engine/Blueprint.h"
+#include "Engine/LevelScriptBlueprint.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "Kismet2/BlueprintEditorUtils.h"
@@ -1335,7 +1336,7 @@ int32 FLevelHandlers::ClearBlueprintGraphNodes(
 	}
 
 	TArray<UEdGraph*> Graphs;
-	FBlueprintEditorUtils::GetAllGraphs(Blueprint, Graphs);
+	Blueprint->GetAllGraphs(Graphs);
 	int32 NodeCount = 0;
 
 	for (UEdGraph* Graph : Graphs)
@@ -1406,7 +1407,8 @@ TSharedPtr<FJsonValue> FLevelHandlers::ClearLevelScript(const TSharedPtr<FJsonOb
 	{
 		return MCPError(TEXT("Current level already has unsaved changes; save or discard them before clear_level_script with save=true"));
 	}
-	UBlueprint* LevelScript = World->PersistentLevel->GetLevelScriptBlueprint(/*bDontCreate*/ true);
+	ULevelScriptBlueprint* LevelScript =
+		World->PersistentLevel->GetLevelScriptBlueprint(/*bDontCreate*/ true);
 
 	TArray<TSharedPtr<FJsonValue>> Graphs;
 	int32 NodeCount = 0;
