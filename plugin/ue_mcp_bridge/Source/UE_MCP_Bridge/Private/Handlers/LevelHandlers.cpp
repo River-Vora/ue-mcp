@@ -1373,8 +1373,7 @@ int32 FLevelHandlers::ClearBlueprintGraphNodes(
 			if (!bDryRun)
 			{
 				Node->Modify();
-				Node->BreakAllNodeLinks();
-				Graph->RemoveNode(Node);
+				FBlueprintEditorUtils::RemoveNode(Blueprint, Node, /*bDontRecompile*/ true);
 			}
 		}
 
@@ -1411,12 +1410,23 @@ TSharedPtr<FJsonValue> FLevelHandlers::ClearLevelScript(const TSharedPtr<FJsonOb
 		World->PersistentLevel->GetLevelScriptBlueprint(/*bDontCreate*/ true);
 
 	TArray<TSharedPtr<FJsonValue>> Graphs;
+	TArray<TSharedPtr<FJsonValue>> Variables;
 	int32 NodeCount = 0;
+	int32 VariableCount = 0;
 	bool bCompileSucceeded = true;
 	bool bSaved = false;
 
 	if (LevelScript)
 	{
+		TArray<FName> VariableNames;
+		VariableNames.Reserve(LevelScript->NewVariables.Num());
+		for (const FBPVariableDescription& Variable : LevelScript->NewVariables)
+		{
+			VariableNames.Add(Variable.VarName);
+			Variables.Add(MakeShared<FJsonValueString>(Variable.VarName.ToString()));
+		}
+		VariableCount = VariableNames.Num();
+
 		if (bDryRun)
 		{
 			NodeCount = ClearBlueprintGraphNodes(LevelScript, true, Graphs);
@@ -1429,8 +1439,12 @@ TSharedPtr<FJsonValue> FLevelHandlers::ClearLevelScript(const TSharedPtr<FJsonOb
 			World->PersistentLevel->Modify();
 			LevelScript->Modify();
 			NodeCount = ClearBlueprintGraphNodes(LevelScript, false, Graphs);
+			for (const FName VariableName : VariableNames)
+			{
+				FBlueprintEditorUtils::RemoveMemberVariable(LevelScript, VariableName);
+			}
 
-			if (NodeCount > 0)
+			if (NodeCount > 0 || VariableCount > 0)
 			{
 				FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(LevelScript);
 				FKismetEditorUtilities::CompileBlueprint(LevelScript);
@@ -1442,7 +1456,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::ClearLevelScript(const TSharedPtr<FJsonOb
 				}
 			}
 
-			if (bSave && NodeCount > 0)
+			if (bSave && (NodeCount > 0 || VariableCount > 0))
 			{
 				ULevelEditorSubsystem* LevelEditorSubsystem =
 					GEditor->GetEditorSubsystem<ULevelEditorSubsystem>();
@@ -1466,6 +1480,8 @@ TSharedPtr<FJsonValue> FLevelHandlers::ClearLevelScript(const TSharedPtr<FJsonOb
 	Result->SetNumberField(TEXT("graphCount"), Graphs.Num());
 	Result->SetNumberField(TEXT("nodeCount"), NodeCount);
 	Result->SetArrayField(TEXT("graphs"), Graphs);
+	Result->SetNumberField(TEXT("variableCount"), VariableCount);
+	Result->SetArrayField(TEXT("variables"), Variables);
 	Result->SetBoolField(TEXT("compileSucceeded"), bCompileSucceeded);
 	Result->SetBoolField(TEXT("saved"), bSaved);
 	return MCPResult(Result);
