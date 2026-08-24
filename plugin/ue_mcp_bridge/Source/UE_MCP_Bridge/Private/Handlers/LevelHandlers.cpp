@@ -112,6 +112,7 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("remove_component_from_actor"), &RemoveComponentFromActor);
 	Registry.RegisterHandler(TEXT("load_level"), &LoadLevel);
 	Registry.RegisterHandler(TEXT("set_component_property"), &SetComponentProperty);
+	Registry.RegisterHandler(TEXT("nudge_component"), &NudgeComponent);
 	Registry.RegisterHandler(TEXT("get_component_details"), &GetComponentDetails);
 	Registry.RegisterHandler(TEXT("set_actor_material"), &SetActorMaterial);
 	Registry.RegisterHandler(TEXT("set_volume_properties"), &SetVolumeProperties);

@@ -79,7 +79,7 @@ const MUTATE_VERBS: ReadonlySet<string> = new Set<string>([
   "undo", "redo", "purge", "begin", "end", "lock", "unlock", "drop", "retarget",
   "install", "uninstall", "restore", "revert", "activate", "deactivate",
   "trigger", "emit", "send", "post", "publish", "upload", "convert", "promote",
-  "mark", "dirty", "refresh", "trim", "crop", "resize", "rotate", "translate",
+  "mark", "dirty", "refresh", "trim", "crop", "resize", "rotate", "translate", "nudge",
   "transform", "split", "merge", "patch", "seek", "mute", "unmute",
   // Verbs the wrapped engine surface uses that no native action does. Every one
   // of these names a tool that edits a graph, moves a control, drives the UI, or
