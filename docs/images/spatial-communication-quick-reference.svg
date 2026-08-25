@@ -85,7 +85,7 @@
       <rect y="638" width="1640" height="72" fill="#10243d"/>
       <text x="28" y="667" fill="#38bdf8" font-weight="700">Animated attachment</text>
       <text x="345" y="667" fill="#f8fafc">“Freeze at 0.42 s, tune grip, then sample the cycle.”</text>
-      <text x="1005" y="667" fill="#cbd5e1">fixed phase for tuning + motion-envelope validation</text>
+      <text x="1005" y="667" fill="#cbd5e1">freeze pose + stop actor/root movement before baseline</text>
       <text x="28" y="693" fill="#94a3b8">idle, recoil, sway, locomotion</text>
       <text x="1005" y="693" fill="#64748b">Never compare candidates from arbitrary animation frames.</text>
     </g>
@@ -96,7 +96,7 @@
     <text x="30" y="43" fill="#34d399" font-size="23" font-weight="700">VERIFY WITH TWO PAIRED ARTIFACTS</text>
     <text x="30" y="86" fill="#f8fafc" font-size="22" font-weight="600">Well-lit close multi-view packet</text>
     <text x="30" y="119" fill="#cbd5e1" font-size="18">front key light · front / side / top / three-quarter · context view optional</text>
-    <text x="30" y="151" fill="#64748b" font-size="17">Same fixed pose, camera, FOV, and lighting · contact region fills roughly 50-75%.</text>
+    <text x="30" y="151" fill="#64748b" font-size="17">Same fixed pose, actor/root transform, camera, FOV, and lighting · target fills 50-75%.</text>
     <line x1="805" y1="35" x2="805" y2="153" stroke="#334155" stroke-width="2"/>
     <text x="845" y="86" fill="#f8fafc" font-size="22" font-weight="600">Exact manifest</text>
     <text x="845" y="119" fill="#cbd5e1" font-size="18">camera · target · parent/socket · relative/world transforms · axes · deltas · bounds</text>
