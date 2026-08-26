@@ -50,8 +50,10 @@ describe("action classification", () => {
   it("never contradicts the locking classifier", () => {
     // The two answer different questions, but they cannot disagree about
     // whether something writes. The only exceptions are the session-registry
-    // actions, which address the server rather than any editor.
-    const REGISTRY_ACTIONS = new Set(["project.add_editor"]);
+    // actions, which address the server rather than any editor, and
+    // level.bulk_line_trace, whose `bulk` prefix locking treats as a write
+    // even though the batch only observes collision.
+    const REGISTRY_ACTIONS = new Set(["project.add_editor", "level.bulk_line_trace"]);
     const contradictions = nativeActions()
       .map((a) => ({ ...a, key: `${a.tool}.${a.action}` }))
       .filter((a) => !REGISTRY_ACTIONS.has(a.key))

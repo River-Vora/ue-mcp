@@ -104,6 +104,7 @@ private:
 	static TSharedPtr<FJsonValue> PlaceActorsBatch(const TSharedPtr<FJsonObject>& Params);
 	// #420: raycast + #419 snap-to-floor (spatial level operations)
 	static TSharedPtr<FJsonValue> LineTrace(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> BulkLineTrace(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SnapActorToFloor(const TSharedPtr<FJsonObject>& Params);
 	// #453: per-actor motion snapshot for telemetry / driving probes.
 	static TSharedPtr<FJsonValue> ReadActorMotion(const TSharedPtr<FJsonObject>& Params);

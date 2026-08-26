@@ -115,80 +115,131 @@ namespace
 		if (Hit.BoneName != NAME_None) Result->SetStringField(TEXT("boneName"), Hit.BoneName.ToString());
 		if (Hit.PhysMaterial.IsValid()) Result->SetStringField(TEXT("physicalMaterial"), Hit.PhysMaterial->GetPathName());
 	}
+
+	/** One line_trace. Shared by the single-item handler and bulk_line_trace. */
+	static TSharedPtr<FJsonValue> ExecuteLineTrace(UWorld* World, const TSharedPtr<FJsonObject>& Params)
+	{
+		if (!Params->HasField(TEXT("start")))
+		{
+			return MCPError(TEXT("Missing 'start' vector"));
+		}
+		const FVector Start = OptionalVec3(Params, TEXT("start"));
+		FVector End;
+		if (Params->HasField(TEXT("end")))
+		{
+			End = OptionalVec3(Params, TEXT("end"));
+		}
+		else if (Params->HasField(TEXT("direction")))
+		{
+			FVector Dir = OptionalVec3(Params, TEXT("direction"));
+			if (!Dir.Normalize())
+			{
+				return MCPError(TEXT("'direction' must be a non-zero vector"));
+			}
+			const double Distance = OptionalNumber(Params, TEXT("distance"), 200000.0);
+			End = Start + Dir * Distance;
+		}
+		else
+		{
+			return MCPError(TEXT("Pass either 'end' (Vec3) or 'direction' (Vec3) + 'distance?'"));
+		}
+
+		// Gameplay traces run against simple collision unless they ask otherwise, so a
+		// trace taken here to verify in-game behaviour has to do the same by default.
+		// Complex geometry and its simple hull can be far apart, and a per-triangle hit
+		// the running game never produces reads as a confirmed impact point.
+		const bool bTraceComplex = OptionalBool(Params, TEXT("traceComplex"), false);
+
+		// Visibility is the editor picking channel. A gameplay trace usually runs on
+		// another one, and blocking differs per channel, so the channel has to be
+		// selectable for the result to mean anything about the game.
+		ECollisionChannel Channel = ECC_Visibility;
+		FString ChannelName = TEXT("Visibility");
+		const FString RequestedChannel = OptionalString(Params, TEXT("channel"));
+		if (!RequestedChannel.IsEmpty() && !ResolveTraceChannel(RequestedChannel, Channel, ChannelName))
+		{
+			return MCPError(FString::Printf(
+				TEXT("Unknown collision channel '%s'. Available channels: %s"),
+				*RequestedChannel, *DescribeTraceChannels()));
+		}
+
+		FCollisionQueryParams Query(SCENE_QUERY_STAT(MCPLineTrace), bTraceComplex);
+		Query.bReturnPhysicalMaterial = true;
+		Query.bReturnFaceIndex = bTraceComplex;
+
+		const TArray<TSharedPtr<FJsonValue>>* IgnoreArr = nullptr;
+		if (Params->TryGetArrayField(TEXT("ignoreActors"), IgnoreArr) && IgnoreArr)
+		{
+			for (const TSharedPtr<FJsonValue>& V : *IgnoreArr)
+			{
+				FString Label;
+				if (!V->TryGetString(Label)) continue;
+				if (AActor* A = FindActorByLabel(World, Label)) Query.AddIgnoredActor(A);
+			}
+		}
+
+		FHitResult Hit;
+		const bool bHit = World->LineTraceSingleByChannel(Hit, Start, End, Channel, Query);
+
+		auto Result = MCPSuccess();
+		Result->SetBoolField(TEXT("hit"), bHit);
+		Result->SetObjectField(TEXT("start"), MCPVec3ToJsonObject(Start));
+		Result->SetObjectField(TEXT("end"), MCPVec3ToJsonObject(End));
+		// Report the collision semantics the result was produced under, so a caller
+		// comparing against the game can see which one it got.
+		Result->SetBoolField(TEXT("traceComplex"), bTraceComplex);
+		Result->SetStringField(TEXT("channel"), ChannelName);
+		if (bHit) EmitHitFields(Result, Hit);
+		return MCPResult(Result);
+	}
 }
 
 
 TSharedPtr<FJsonValue> FLevelHandlers::LineTrace(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);
+	return ExecuteLineTrace(World, Params);
+}
 
-	const FVector Start = OptionalVec3(Params, TEXT("start"));
-	FVector End;
-	if (Params->HasField(TEXT("end")))
-	{
-		End = OptionalVec3(Params, TEXT("end"));
-	}
-	else if (Params->HasField(TEXT("direction")))
-	{
-		FVector Dir = OptionalVec3(Params, TEXT("direction"));
-		if (!Dir.Normalize())
-		{
-			return MCPError(TEXT("'direction' must be a non-zero vector"));
-		}
-		const double Distance = OptionalNumber(Params, TEXT("distance"), 200000.0);
-		End = Start + Dir * Distance;
-	}
-	else
-	{
-		return MCPError(TEXT("Pass either 'end' (Vec3) or 'direction' (Vec3) + 'distance?'"));
-	}
 
-	// Gameplay traces run against simple collision unless they ask otherwise, so a
-	// trace taken here to verify in-game behaviour has to do the same by default.
-	// Complex geometry and its simple hull can be far apart, and a per-triangle hit
-	// the running game never produces reads as a confirmed impact point.
-	const bool bTraceComplex = OptionalBool(Params, TEXT("traceComplex"), false);
+TSharedPtr<FJsonValue> FLevelHandlers::BulkLineTrace(const TSharedPtr<FJsonObject>& Params)
+{
+	REQUIRE_EDITOR_WORLD(World);
 
-	// Visibility is the editor picking channel. A gameplay trace usually runs on
-	// another one, and blocking differs per channel, so the channel has to be
-	// selectable for the result to mean anything about the game.
-	ECollisionChannel Channel = ECC_Visibility;
-	FString ChannelName = TEXT("Visibility");
-	const FString RequestedChannel = OptionalString(Params, TEXT("channel"));
-	if (!RequestedChannel.IsEmpty() && !ResolveTraceChannel(RequestedChannel, Channel, ChannelName))
+	constexpr int32 MaxBulkLineTraces = 256;
+	const TArray<TSharedPtr<FJsonValue>>* Traces = nullptr;
+	if (!Params->TryGetArrayField(TEXT("traces"), Traces) || !Traces)
+	{
+		return MCPError(TEXT("Missing 'traces' array"));
+	}
+	if (Traces->Num() == 0)
+	{
+		return MCPError(TEXT("'traces' must contain at least one line trace"));
+	}
+	if (Traces->Num() > MaxBulkLineTraces)
 	{
 		return MCPError(FString::Printf(
-			TEXT("Unknown collision channel '%s'. Available channels: %s"),
-			*RequestedChannel, *DescribeTraceChannels()));
+			TEXT("'traces' exceeds the maximum batch size of %d (received %d)"),
+			MaxBulkLineTraces, Traces->Num()));
 	}
 
-	FCollisionQueryParams Query(SCENE_QUERY_STAT(MCPLineTrace), bTraceComplex);
-	Query.bReturnPhysicalMaterial = true;
-	Query.bReturnFaceIndex = bTraceComplex;
-
-	const TArray<TSharedPtr<FJsonValue>>* IgnoreArr = nullptr;
-	if (Params->TryGetArrayField(TEXT("ignoreActors"), IgnoreArr) && IgnoreArr)
+	TArray<TSharedPtr<FJsonValue>> Results;
+	Results.Reserve(Traces->Num());
+	for (int32 Index = 0; Index < Traces->Num(); ++Index)
 	{
-		for (const TSharedPtr<FJsonValue>& V : *IgnoreArr)
+		const TSharedPtr<FJsonValue>& Entry = (*Traces)[Index];
+		const TSharedPtr<FJsonObject> Item = Entry.IsValid() ? Entry->AsObject() : nullptr;
+		if (!Item.IsValid())
 		{
-			FString Label;
-			if (!V->TryGetString(Label)) continue;
-			if (AActor* A = FindActorByLabel(World, Label)) Query.AddIgnoredActor(A);
+			Results.Add(MCPError(FString::Printf(TEXT("traces[%d] must be an object"), Index)));
+			continue;
 		}
+		Results.Add(ExecuteLineTrace(World, Item));
 	}
-
-	FHitResult Hit;
-	const bool bHit = World->LineTraceSingleByChannel(Hit, Start, End, Channel, Query);
 
 	auto Result = MCPSuccess();
-	Result->SetBoolField(TEXT("hit"), bHit);
-	Result->SetObjectField(TEXT("start"), MCPVec3ToJsonObject(Start));
-	Result->SetObjectField(TEXT("end"), MCPVec3ToJsonObject(End));
-	// Report the collision semantics the result was produced under, so a caller
-	// comparing against the game can see which one it got.
-	Result->SetBoolField(TEXT("traceComplex"), bTraceComplex);
-	Result->SetStringField(TEXT("channel"), ChannelName);
-	if (bHit) EmitHitFields(Result, Hit);
+	Result->SetArrayField(TEXT("results"), Results);
+	Result->SetNumberField(TEXT("count"), Results.Num());
 	return MCPResult(Result);
 }
 

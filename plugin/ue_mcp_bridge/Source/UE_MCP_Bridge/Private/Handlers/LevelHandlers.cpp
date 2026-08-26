@@ -127,6 +127,7 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("resolve_actor"), &ResolveActor);
 	Registry.RegisterHandler(TEXT("set_actor_property"), &SetActorProperty);
 	Registry.RegisterHandler(TEXT("line_trace"), &LineTrace);
+	Registry.RegisterHandler(TEXT("bulk_line_trace"), &BulkLineTrace);
 	// #453: per-actor motion snapshot for telemetry probes. Reads location,
 	// rotation, velocity, angular velocity, scale, and ground state in one
 	// call. Caller is expected to invoke at the desired sample interval.
