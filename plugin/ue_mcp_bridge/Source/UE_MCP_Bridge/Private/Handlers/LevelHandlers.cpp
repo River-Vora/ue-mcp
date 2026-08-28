@@ -3020,21 +3020,25 @@ TSharedPtr<FJsonValue> FLevelHandlers::ReadActorMotion(const TSharedPtr<FJsonObj
 		}
 	}
 	// #983: the same list spelled as object paths, which is what a caller
-	// reaches for when several actors share a label.
+	// reaches for when several actors share a label. These are kept apart from
+	// the label list and resolved by MCPFindActorByPath rather than folded into
+	// the label token tier, so the export-text form and a case difference both
+	// resolve here exactly as they do everywhere else.
+	TArray<FString> Paths;
 	FString SinglePath;
 	if (Params->TryGetStringField(TEXT("actorPath"), SinglePath) && !SinglePath.IsEmpty())
 	{
-		Labels.Add(SinglePath);
+		Paths.Add(SinglePath);
 	}
 	const TArray<TSharedPtr<FJsonValue>>* PathsArr = nullptr;
 	if (Params->TryGetArrayField(TEXT("actorPaths"), PathsArr) && PathsArr)
 	{
 		for (const TSharedPtr<FJsonValue>& V : *PathsArr)
 		{
-			FString P; if (V->TryGetString(P) && !P.IsEmpty()) Labels.Add(P);
+			FString P; if (V->TryGetString(P) && !P.IsEmpty()) Paths.Add(P);
 		}
 	}
-	if (Labels.Num() == 0)
+	if (Labels.Num() == 0 && Paths.Num() == 0)
 	{
 		return MCPError(TEXT("Pass at least one of 'actorLabel', 'actorLabels', 'actorPath' or 'actorPaths'"));
 	}
@@ -3068,6 +3072,17 @@ TSharedPtr<FJsonValue> FLevelHandlers::ReadActorMotion(const TSharedPtr<FJsonObj
 			continue;
 		}
 		for (AActor* Match : Matches) Targets.AddUnique(Match);
+	}
+	for (const FString& Path : Paths)
+	{
+		if (AActor* ByPath = MCPFindActorByPath(TargetWorld, Path))
+		{
+			Targets.AddUnique(ByPath);
+		}
+		else
+		{
+			Missing.Add(MakeShared<FJsonValueString>(Path));
+		}
 	}
 	for (AActor* Actor : Targets)
 	{

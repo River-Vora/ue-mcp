@@ -569,12 +569,18 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::SampleLandscape(const TSharedPtr<FJso
 	// which is what a World Partition map full of streaming proxies looks like.
 	const FString ActorLabel = OptionalString(Params, TEXT("actorLabel"));
 	const FString ActorPath = OptionalString(Params, TEXT("actorPath"));
+	// Normalised the same way MCPFindActorByPath normalises, so the export-text
+	// form (Actor'/Game/...') resolves here exactly as it does on every other
+	// action rather than silently matching nothing (#983).
+	const FString WantedPath = ActorPath.IsEmpty()
+		? FString()
+		: FPackageName::ExportTextPathToObjectPath(ActorPath).TrimStartAndEnd();
 	TArray<ULandscapeInfo*> Candidates;
 	for (TActorIterator<ALandscapeProxy> It(World); It; ++It)
 	{
 		ALandscapeProxy* Proxy = *It;
 		if (!Proxy) continue;
-		if (!ActorPath.IsEmpty() && !Proxy->GetPathName().Equals(ActorPath, ESearchCase::IgnoreCase)) continue;
+		if (!WantedPath.IsEmpty() && !Proxy->GetPathName().Equals(WantedPath, ESearchCase::IgnoreCase)) continue;
 		if (!ActorLabel.IsEmpty() && !Proxy->GetActorLabel().Equals(ActorLabel, ESearchCase::IgnoreCase)) continue;
 		ULandscapeInfo* ProxyInfo = Proxy->GetLandscapeInfo();
 		if (!ProxyInfo) continue;

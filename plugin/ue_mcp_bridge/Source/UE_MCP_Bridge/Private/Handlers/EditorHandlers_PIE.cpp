@@ -387,6 +387,12 @@ TSharedPtr<FJsonValue> FEditorHandlers::PieGetRuntimeValue(const TSharedPtr<FJso
 		return MCPError(TEXT("PIE is not active. Start a PIE session first."));
 	}
 
+	// This action shipped before #983 with 'actorPath' as a label|name|path
+	// token, not a strict path, and with 'actorLabel' as its fallback spelling.
+	// The shared resolver treats a path as precise, so the loose reading is
+	// kept here explicitly rather than silently dropped: a caller who has been
+	// passing a label in 'actorPath' for two releases must not start getting
+	// "no actor at that path".
 	FString ActorPath;
 	if (!Params->TryGetStringField(TEXT("actorPath"), ActorPath))
 	{
@@ -411,6 +417,16 @@ TSharedPtr<FJsonValue> FEditorHandlers::PieGetRuntimeValue(const TSharedPtr<FJso
 	TSharedPtr<FJsonValue> PieActorErr;
 	AActor* TargetActor = MCPResolveActor(PIEWorld, Params, PieActorErr, PieSel);
 	if (!TargetActor && MCPIsAmbiguousActorError(PieActorErr)) return PieActorErr;
+
+	// The legacy tolerance: retry the value of 'actorPath' as a label / name
+	// token. Ambiguity is still refused, so the loose reading cannot bring the
+	// silent wrong pick back with it.
+	if (!TargetActor && !ActorPath.IsEmpty())
+	{
+		TSharedPtr<FJsonValue> LegacyErr;
+		TargetActor = MCPResolveActorToken(PIEWorld, ActorPath, LegacyErr, PieSel);
+		if (!TargetActor && MCPIsAmbiguousActorError(LegacyErr)) return LegacyErr;
+	}
 
 	if (!TargetActor)
 	{

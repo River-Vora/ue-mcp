@@ -518,8 +518,6 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetFogProperties(const TSharedPtr<FJsonOb
 	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
-	FString ActorLabel = OptionalString(Params, TEXT("actorLabel"));
-
 	// #983: a named selector goes through the shared resolver, so a duplicated
 	// label is refused with the candidate paths rather than tuning whichever
 	// fog the actor iterator reached first. Without one, "the only fog in the
@@ -538,7 +536,6 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetFogProperties(const TSharedPtr<FJsonOb
 				TEXT("Actor '%s' is a %s, not an ExponentialHeightFog"),
 				*Named->GetActorLabel(), *Named->GetClass()->GetName()));
 		}
-		ActorLabel = Fog->GetActorLabel();
 	}
 	else if (FogError.IsValid())
 	{
@@ -560,7 +557,6 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetFogProperties(const TSharedPtr<FJsonOb
 				Fogs.Num(), *FString::Join(Labels, TEXT(", "))));
 		}
 		Fog = Fogs.Num() == 1 ? Fogs[0] : nullptr;
-		if (Fog) ActorLabel = Fog->GetActorLabel();
 	}
 	if (!Fog) return MCPError(TEXT("No ExponentialHeightFog actor found"));
 

@@ -212,8 +212,12 @@ namespace
 		FMCPPostProcessTarget& OutTarget,
 		TSharedPtr<FJsonValue>& OutError)
 	{
-		FString ActorLabel;
-		if (TSharedPtr<FJsonValue> Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel))
+		// Presence check only, so a call with no selector at all fails naming
+		// both parameters before the world is touched. The value is discarded:
+		// the resolver reads the parameters itself, and every message below
+		// names the actor that actually answered.
+		FString UnusedSelector;
+		if (TSharedPtr<FJsonValue> Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), UnusedSelector))
 		{
 			OutError = Err;
 			return false;
