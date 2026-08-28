@@ -14,6 +14,7 @@ public class UE_MCP_Bridge : ModuleRules
 	// Private/Tests/SequencerHandlerTests.cpp: same reason.
 	// Private/Handlers/LevelHandlers_InstanceProjection.cpp and
 	// Private/Tests/LevelInstanceProjectionTests.cpp: same reason.
+	// Private/Tests/PackageSaveExtensionTests.cpp: same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
