@@ -195,71 +195,6 @@ namespace
 		return Missing;
 	}
 
-	/**
-	 * When a selector matches nothing, what a caller would have matched
-	 * instead. The filter strings are compared under the OTHER level actions'
-	 * semantics, so "labelPrefix found nothing but 15 labels CONTAIN it" is
-	 * reported rather than left for the caller to discover (#963).
-	 */
-	TSharedPtr<FJsonObject> MCPBatchZeroMatchHint(UWorld* World, const FMCPBatchSelector& Selector)
-	{
-		TSharedPtr<FJsonObject> Hint = MakeShared<FJsonObject>();
-		int32 LabelContainsCount = 0;
-		int32 InternalNameContainsCount = 0;
-		int32 CaseInsensitivePrefixCount = 0;
-		TArray<FString> Samples;
-
-		const FString Needle = !Selector.LabelPrefix.IsEmpty()
-			? Selector.LabelPrefix
-			: (!Selector.LabelContains.IsEmpty() ? Selector.LabelContains : FString());
-		if (Needle.IsEmpty())
-		{
-			return nullptr;
-		}
-
-		for (TActorIterator<AActor> It(World); It; ++It)
-		{
-			AActor* Actor = *It;
-			if (!Actor) continue;
-			const FString Label = Actor->GetActorLabel();
-			const bool bLabelContains = Label.Contains(Needle, ESearchCase::IgnoreCase);
-			const bool bNameContains = Actor->GetName().Contains(Needle, ESearchCase::IgnoreCase);
-			const bool bPrefixNoCase = Label.StartsWith(Needle, ESearchCase::IgnoreCase);
-			if (bLabelContains) ++LabelContainsCount;
-			if (bNameContains) ++InternalNameContainsCount;
-			if (bPrefixNoCase) ++CaseInsensitivePrefixCount;
-			if ((bLabelContains || bNameContains) && Samples.Num() < 5)
-			{
-				Samples.Add(FString::Printf(TEXT("%s (name %s)"), *Label, *Actor->GetName()));
-			}
-		}
-
-		if (LabelContainsCount == 0 && InternalNameContainsCount == 0 && CaseInsensitivePrefixCount == 0)
-		{
-			return nullptr;
-		}
-		Hint->SetStringField(TEXT("filter"), Needle);
-		Hint->SetNumberField(TEXT("actorsWhoseLabelContainsIt"), LabelContainsCount);
-		Hint->SetNumberField(TEXT("actorsWhoseInternalNameContainsIt"), InternalNameContainsCount);
-		Hint->SetNumberField(TEXT("actorsWhoseLabelStartsWithItIgnoringCase"), CaseInsensitivePrefixCount);
-		Hint->SetArrayField(TEXT("samples"), MCPStringListToJson(Samples));
-		Hint->SetStringField(TEXT("note"),
-			TEXT("labelPrefix is a case-sensitive prefix over the EDITOR LABEL. get_outliner's nameFilter is a case-insensitive substring over the label OR the internal name, so the two select different sets from the same string."));
-		return Hint;
-	}
-
-	/** Only actors currently loaded are visible to a world iterator. On a World
-	 *  Partition map that is a real answer, not the whole answer. */
-	void MCPBatchNoteStreaming(UWorld* World, TSharedPtr<FJsonObject> Result)
-	{
-		if (World && World->IsPartitionedWorld())
-		{
-			Result->SetBoolField(TEXT("partitionedWorld"), true);
-			Result->SetStringField(TEXT("enumerationNote"),
-				TEXT("This is a World Partition map and only LOADED actors were enumerated. Use level(list_actor_descs) to see unloaded ones and level(load_actor_descs) to pin them first."));
-		}
-	}
-
 	FVector MCPBatchReadVector(const TSharedPtr<FJsonObject>& Obj, const FVector& Default)
 	{
 		if (!Obj.IsValid()) return Default;
@@ -359,7 +294,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::BatchSetActorProperties(const TSharedPtr<
 	auto Result = MCPSuccess();
 	Result->SetBoolField(TEXT("dryRun"), bDryRun);
 	Result->SetNumberField(TEXT("matched"), Actors.Num());
-	MCPBatchNoteStreaming(World, Result);
+	MCPNoteLoadedOnlyEnumeration(World, Result);
 	{
 		const TArray<FString> Missing = MCPBatchMissingLabels(Selector, Actors);
 		if (Missing.Num() > 0)
@@ -369,7 +304,10 @@ TSharedPtr<FJsonValue> FLevelHandlers::BatchSetActorProperties(const TSharedPtr<
 	}
 	if (Actors.IsEmpty())
 	{
-		if (const TSharedPtr<FJsonObject> Hint = MCPBatchZeroMatchHint(World, Selector))
+		const FString Needle = !Selector.LabelPrefix.IsEmpty()
+			? Selector.LabelPrefix
+			: Selector.LabelContains;
+		if (const TSharedPtr<FJsonObject> Hint = MCPDescribeZeroActorMatch(World, Needle))
 		{
 			Result->SetObjectField(TEXT("zeroMatchHint"), Hint);
 		}
@@ -534,7 +472,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::BulkSetComponentProperty(const TSharedPtr
 	Result->SetStringField(TEXT("componentName"), ComponentName);
 	Result->SetStringField(TEXT("propertyName"), PropertyName);
 	Result->SetNumberField(TEXT("matchedActors"), Actors.Num());
-	MCPBatchNoteStreaming(World, Result);
+	MCPNoteLoadedOnlyEnumeration(World, Result);
 	{
 		const TArray<FString> Missing = MCPBatchMissingLabels(Selector, Actors);
 		if (Missing.Num() > 0)
@@ -703,7 +641,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::RemoveComponentsByClass(const TSharedPtr<
 	auto Result = MCPSuccess();
 	Result->SetBoolField(TEXT("dryRun"), bDryRun);
 	Result->SetStringField(TEXT("componentClass"), ComponentClass->GetName());
-	MCPBatchNoteStreaming(World, Result);
+	MCPNoteLoadedOnlyEnumeration(World, Result);
 	{
 		const TArray<FString> Missing = MCPBatchMissingLabels(Selector, Actors);
 		if (Missing.Num() > 0)

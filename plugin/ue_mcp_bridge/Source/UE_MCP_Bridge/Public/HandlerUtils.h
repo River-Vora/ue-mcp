@@ -400,6 +400,86 @@ inline bool OptionalBool(
 	return Params->TryGetBoolField(Key, Value) ? Value : DefaultValue;
 }
 
+/**
+ * Why an actor filter matched nothing, in terms of what it WOULD have matched.
+ *
+ * Level actions do not agree on filter semantics and their parameter names do
+ * not warn you: get_outliner's nameFilter is a case-insensitive substring over
+ * the label OR the internal name, while delete_actors' labelPrefix is a
+ * case-sensitive prefix over the label only. The same string selects different
+ * sets, and the losing call returns success with matched:0, which a caller
+ * reasonably reads as "nothing to do".
+ *
+ * So a zero match reports the counts under the OTHER semantics rather than
+ * leaving the caller to discover them. Returns an unset pointer when the
+ * string would have matched nothing under any of them, because then a zero
+ * really does mean zero.
+ */
+inline TSharedPtr<FJsonObject> MCPDescribeZeroActorMatch(UWorld* World, const FString& Needle)
+{
+	if (!World || Needle.IsEmpty())
+	{
+		return nullptr;
+	}
+
+	int32 LabelContains = 0;
+	int32 NameContains = 0;
+	int32 PrefixIgnoringCase = 0;
+	TArray<TSharedPtr<FJsonValue>> Samples;
+
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* Actor = *It;
+		if (!Actor) continue;
+		const FString Label = Actor->GetActorLabel();
+		const FString Name = Actor->GetName();
+		const bool bLabelContains = Label.Contains(Needle, ESearchCase::IgnoreCase);
+		const bool bNameContains = Name.Contains(Needle, ESearchCase::IgnoreCase);
+		const bool bPrefix = Label.StartsWith(Needle, ESearchCase::IgnoreCase);
+		if (bLabelContains) ++LabelContains;
+		if (bNameContains) ++NameContains;
+		if (bPrefix) ++PrefixIgnoringCase;
+		if ((bLabelContains || bNameContains) && Samples.Num() < 5)
+		{
+			Samples.Add(MakeShared<FJsonValueString>(
+				FString::Printf(TEXT("%s (internal name %s)"), *Label, *Name)));
+		}
+	}
+
+	if (LabelContains == 0 && NameContains == 0 && PrefixIgnoringCase == 0)
+	{
+		return nullptr;
+	}
+
+	TSharedPtr<FJsonObject> Hint = MakeShared<FJsonObject>();
+	Hint->SetStringField(TEXT("filter"), Needle);
+	Hint->SetNumberField(TEXT("actorsWhoseLabelContainsIt"), LabelContains);
+	Hint->SetNumberField(TEXT("actorsWhoseInternalNameContainsIt"), NameContains);
+	Hint->SetNumberField(TEXT("actorsWhoseLabelStartsWithItIgnoringCase"), PrefixIgnoringCase);
+	Hint->SetArrayField(TEXT("samples"), Samples);
+	Hint->SetStringField(TEXT("note"),
+		TEXT("labelPrefix is a case-sensitive PREFIX over the EDITOR LABEL. level(get_outliner)'s nameFilter is a case-insensitive SUBSTRING over the label OR the internal name, so the same string selects a different set there. Use labelContains for a substring over the label, or nameContains for one over the internal name."));
+	return Hint;
+}
+
+/**
+ * Note that an actor enumeration only saw the actors that are loaded.
+ *
+ * Every actor query in this plugin iterates the world, and on a World
+ * Partition map that is a real answer but not the whole answer. Saying so
+ * turns a silently wrong zero into an actionable one.
+ */
+inline void MCPNoteLoadedOnlyEnumeration(UWorld* World, TSharedPtr<FJsonObject> Result)
+{
+	if (!World || !Result.IsValid() || !World->IsPartitionedWorld())
+	{
+		return;
+	}
+	Result->SetBoolField(TEXT("partitionedWorld"), true);
+	Result->SetStringField(TEXT("enumerationNote"),
+		TEXT("This is a World Partition map and only LOADED actors were enumerated. An actor whose cell is not streamed in is invisible to every world query, including this one. Use level(list_actor_descs) to see the unloaded ones and level(load_actor_descs) to pin them first."));
+}
+
 /** Render a TArray<FString> as a JSON string array. The inverse of
  *  JsonArrayToStringList, shared so batch handlers that report label lists do
  *  not each define their own file-local copy (unity build: two anonymous

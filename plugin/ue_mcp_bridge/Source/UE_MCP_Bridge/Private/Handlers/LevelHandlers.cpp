@@ -3238,14 +3238,24 @@ TSharedPtr<FJsonValue> FLevelHandlers::DeleteActors(const TSharedPtr<FJsonObject
 {
 	REQUIRE_EDITOR_WORLD(World);
 
+	// #963: the filter names say what they match, and the two that were
+	// previously reachable only through get_outliner's looser nameFilter are
+	// now first class here. labelPrefix stays a CASE-SENSITIVE PREFIX over the
+	// EDITOR LABEL, which is what it always was; labelContains and nameContains
+	// are the substring forms, over the label and the internal name
+	// respectively. Overloading one parameter to mean both is how a filter that
+	// selects fifteen actors in one action selects none in another.
 	const FString LabelPrefix = OptionalString(Params, TEXT("labelPrefix"));
+	const FString LabelContains = OptionalString(Params, TEXT("labelContains"));
+	const FString NameContains = OptionalString(Params, TEXT("nameContains"));
 	const FString ClassName = OptionalString(Params, TEXT("className"));
 	const FString Tag = OptionalString(Params, TEXT("tag"));
 	const bool bDryRun = OptionalBool(Params, TEXT("dryRun"), false);
 
-	if (LabelPrefix.IsEmpty() && ClassName.IsEmpty() && Tag.IsEmpty())
+	if (LabelPrefix.IsEmpty() && LabelContains.IsEmpty() && NameContains.IsEmpty() &&
+		ClassName.IsEmpty() && Tag.IsEmpty())
 	{
-		return MCPError(TEXT("Provide at least one filter: labelPrefix, className, or tag"));
+		return MCPError(TEXT("Provide at least one filter: labelPrefix (case-sensitive prefix over the editor label), labelContains (case-insensitive substring over the label), nameContains (case-insensitive substring over the internal name), className, or tag"));
 	}
 
 	TArray<AActor*> Matches;
@@ -3254,6 +3264,8 @@ TSharedPtr<FJsonValue> FLevelHandlers::DeleteActors(const TSharedPtr<FJsonObject
 		AActor* A = *It;
 		if (!A) continue;
 		if (!LabelPrefix.IsEmpty() && !A->GetActorLabel().StartsWith(LabelPrefix)) continue;
+		if (!LabelContains.IsEmpty() && !A->GetActorLabel().Contains(LabelContains, ESearchCase::IgnoreCase)) continue;
+		if (!NameContains.IsEmpty() && !A->GetName().Contains(NameContains, ESearchCase::IgnoreCase)) continue;
 		if (!ClassName.IsEmpty())
 		{
 			const FString CName = A->GetClass()->GetName();
@@ -3293,6 +3305,24 @@ TSharedPtr<FJsonValue> FLevelHandlers::DeleteActors(const TSharedPtr<FJsonObject
 	Result->SetNumberField(TEXT("matched"), Matches.Num());
 	Result->SetNumberField(TEXT("deleted"), Deleted);
 	Result->SetArrayField(TEXT("labels"), Labels);
+
+	// #963: a destructive action that matched nothing must not answer with a
+	// bare success and a zero. A caller who trusts that concludes there is
+	// nothing to delete and moves on, which is exactly what happened. Two
+	// things can produce a wrong zero here, and the response now names both.
+	if (Matches.IsEmpty())
+	{
+		Result->SetStringField(TEXT("zeroMatchNote"),
+			TEXT("No actor matched. This is a filter result, not a statement that the actors do not exist."));
+		const FString Needle = !LabelPrefix.IsEmpty()
+			? LabelPrefix
+			: (!LabelContains.IsEmpty() ? LabelContains : NameContains);
+		if (const TSharedPtr<FJsonObject> Hint = MCPDescribeZeroActorMatch(World, Needle))
+		{
+			Result->SetObjectField(TEXT("zeroMatchHint"), Hint);
+		}
+		MCPNoteLoadedOnlyEnumeration(World, Result);
+	}
 	return MCPResult(Result);
 }
 
