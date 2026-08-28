@@ -54,6 +54,7 @@ const PER_SESSION: Record<string, string> = {
   "hook-session.ts": "Resolves which project a hook invocation is about.",
   "hook-installer.ts": "Installs the hook for one project.",
   "workaround-tracker.ts": "The workaround stack is partitioned per session, because it is posted publicly.",
+  "python-gate.ts": "Remembers which candidate actions a session ruled out, partitioned the same way the workaround stack is.",
   "privacy-scrub.ts": "Redacts the other registered roots and session names.",
   "feedback-routing.ts": "Routes using the addressed session's plugin set.",
   "feedback-deferred.ts": "Deferred entries record the editor they came from and are filtered by it.",
