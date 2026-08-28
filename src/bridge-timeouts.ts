@@ -54,20 +54,31 @@ export const TIMEOUT_ENV_VAR = "UE_MCP_BRIDGE_TIMEOUT_MS";
  */
 export const REGISTERED_HANDLER_TIMEOUT_SECONDS: Readonly<Record<string, number>> = {
   batch_retarget_animations: 300,
+  batch_set_actor_properties: 300,
+  batch_set_foliage_settings_where: 300,
+  bulk_read_asset_properties: 300,
   bulk_restore_data_assets: 120,
+  bulk_set_component_property: 300,
   bulk_upsert_data_assets: 120,
+  convert_brushes_to_static_mesh: 600,
   create_cpp_class: 300,
   delete_exact_labeled_actors_in_levels: 300,
   invoke_object_functions: 300,
   live_coding_compile: 300,
   load_actor_descs: 300,
   paint_landscape_layer: 120,
+  query_components: 300,
   read_blueprint_graph: 180,
+  recreate_physics_state: 300,
   refresh_landscape_physical_material_collision: 600,
+  remove_components_by_class: 300,
+  rerun_construction_scripts: 300,
   run_automation_tests: 300,
   sculpt_landscape: 120,
   search_blueprint_call_sites: 600,
+  set_component_materials: 300,
   snap_instances_to_surface: 300,
+  spawn_actors_batch: 300,
 };
 
 /** What the editor will wait for this method, in ms, or undefined for the default. */
