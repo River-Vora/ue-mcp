@@ -29,6 +29,7 @@
 #include "Handlers/AssetHandlers_Geometry.h"
 #include "Handlers/AssetHandlers_BulkRead.h"
 #include "Handlers/BlueprintHandlers.h"
+#include "Handlers/BlueprintHandlers_Collision.h"
 #include "Handlers/ProjectHandlers.h"
 #include "Handlers/LevelHandlers.h"
 #include "Handlers/ReflectionHandlers.h"
@@ -138,6 +139,7 @@ FMCPBridgeServer::FMCPBridgeServer(int32 Port, const FString& InPortSource, bool
 	// library-wide read lands without reopening AssetHandlers.cpp.
 	FAssetBulkReadHandlers::RegisterHandlers(HandlerRegistry);
 	FBlueprintHandlers::RegisterHandlers(HandlerRegistry);
+	FCollisionQueryHandlers::RegisterHandlers(HandlerRegistry);
 	FLevelHandlers::RegisterHandlers(HandlerRegistry);
 	FReflectionHandlers::RegisterHandlers(HandlerRegistry);
 	FGasHandlers::RegisterHandlers(HandlerRegistry);
