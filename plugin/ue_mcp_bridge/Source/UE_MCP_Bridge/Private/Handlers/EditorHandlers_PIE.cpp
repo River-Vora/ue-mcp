@@ -657,6 +657,14 @@ namespace
 				Out->SetObjectField(Field, O); return true;
 			}
 		}
+		// #885: a container is real JSON here too. The export-text fallback
+		// below renders a TArray<FString> as an empty string, so a path whose
+		// leaf is an array read back as though it held nothing.
+		if (MCPFunctionCall::IsContainerProperty(Prop))
+		{
+			Out->SetField(Field, MCPFunctionCall::ValueToJson(Prop, ValuePtr, nullptr));
+			return true;
+		}
 		FString Exported;
 		Prop->ExportTextItem_Direct(Exported, ValuePtr, nullptr, nullptr, PPF_None);
 		Out->SetStringField(Field, Exported);
