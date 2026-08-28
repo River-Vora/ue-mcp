@@ -337,7 +337,16 @@ TSharedPtr<FJsonValue> FAssetHandlers::FixupRedirectors(const TSharedPtr<FJsonOb
 	Result->SetBoolField(TEXT("fixupInProgress"), bFixupStillRunning);
 
 	// ── Save exactly those packages ────────────────────────────────────────
+	// save=false skips this explicit pass only. The editor's own fix-up writes
+	// what it can on its own, so this is not a way to preview the change:
+	// dryRun is, and it returns before anything is loaded.
 	int32 SavedCount = 0;
+	if (!bSave)
+	{
+		Result->SetStringField(TEXT("saveNote"),
+			TEXT("save=false skipped the explicit save pass. The editor's referencer fix-up writes what it can regardless, ")
+			TEXT("so use dryRun=true to preview instead. Redirectors are still only deleted when the registry says nothing references them."));
+	}
 	if (bSave && !bFixupStillRunning)
 	{
 		TArray<UPackage*> ToSave;
