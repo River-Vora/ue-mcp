@@ -262,6 +262,9 @@ TSharedPtr<FJsonValue> FAnimationHandlers::GetBoneTransform(const TSharedPtr<FJs
 	AActor* Actor = nullptr;
 	FString ResolvedWorldScope;
 	if (auto Err = ResolveSkeletalActorForQuery(Params, ActorLabel, TEXT("auto"), World, Actor, ResolvedWorldScope)) return Err;
+	// A caller who passed only actorPath left ActorLabel holding the path, and
+	// every message below reads better naming the actor that answered (#983).
+	ActorLabel = Actor->GetActorLabel();
 	USkeletalMeshComponent* SK = ResolveSkeletalMeshComp(Actor, ComponentName);
 	if (!SK) return MakeSkeletalComponentNotFoundError(Actor, ActorLabel, ComponentName);
 
@@ -321,6 +324,9 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ListBones(const TSharedPtr<FJsonObjec
 	AActor* Actor = nullptr;
 	FString ResolvedWorldScope;
 	if (auto Err = ResolveSkeletalActorForQuery(Params, ActorLabel, TEXT("auto"), World, Actor, ResolvedWorldScope)) return Err;
+	// A caller who passed only actorPath left ActorLabel holding the path, and
+	// every message below reads better naming the actor that answered (#983).
+	ActorLabel = Actor->GetActorLabel();
 	USkeletalMeshComponent* SK = ResolveSkeletalMeshComp(Actor, ComponentName);
 	if (!SK) return MakeSkeletalComponentNotFoundError(Actor, ActorLabel, ComponentName);
 	if (!SK->GetSkeletalMeshAsset()) return MCPError(FString::Printf(TEXT("SkeletalMeshComponent '%s' on actor '%s' has no SkeletalMesh asset"), *SK->GetName(), *ActorLabel));
@@ -483,6 +489,9 @@ TSharedPtr<FJsonValue> FAnimationHandlers::GetLiveBoneTransforms(const TSharedPt
 	AActor* Actor = nullptr;
 	FString ResolvedWorldScope;
 	if (auto Err = ResolveSkeletalActorForQuery(Params, ActorLabel, TEXT("auto"), World, Actor, ResolvedWorldScope)) return Err;
+	// A caller who passed only actorPath left ActorLabel holding the path, and
+	// every message below reads better naming the actor that answered (#983).
+	ActorLabel = Actor->GetActorLabel();
 	USkeletalMeshComponent* SK = ResolveSkeletalMeshComp(Actor, ComponentName);
 	if (!SK) return MakeSkeletalComponentNotFoundError(Actor, ActorLabel, ComponentName);
 	USkeletalMesh* Mesh = SK->GetSkeletalMeshAsset();
