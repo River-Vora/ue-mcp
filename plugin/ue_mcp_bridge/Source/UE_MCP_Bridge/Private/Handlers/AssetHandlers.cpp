@@ -563,12 +563,10 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReadAsset(const TSharedPtr<FJsonObject>& 
 	FString AssetPath;
 	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
 
-	UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	if (!Asset)
-	{
-		// Fallback to LoadObject for full object paths
-		Asset = LoadObject<UObject>(nullptr, *AssetPath);
-	}
+	// The LoadAsset-then-LoadObject pair this action has always used now lives
+	// in MCPLoadAssetObject, so the type-specific readers resolve a path the
+	// same way this one does (#930).
+	UObject* Asset = MCPLoadAssetObject(AssetPath);
 	if (!Asset)
 	{
 		return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));

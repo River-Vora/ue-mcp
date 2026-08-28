@@ -12,6 +12,7 @@
 #include "Engine/Blueprint.h"
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
+#include "EditorAssetLibrary.h"
 
 // Engine API tiers. One macro per supported minor version, so a gate reads the
 // same everywhere and nobody writes a second scheme. The supported range is
@@ -133,6 +134,30 @@ inline TSharedPtr<FJsonValue> MCPCheckAssetExists(
 		return MCPResult(Res);
 	}
 	return TSharedPtr<FJsonValue>();
+}
+
+/** Load the asset at `AssetPath`, the way asset(read) does.
+ *
+ *  UEditorAssetLibrary::LoadAsset is the usual entry point, but it validates
+ *  the path through EditorScriptingHelpers before it loads anything and
+ *  answers null for path forms it does not accept, and for any call made
+ *  while the editor is in play-in-editor. asset(read) has always had a
+ *  LoadObject fallback for exactly that reason, and the type-specific readers
+ *  did not: read_datatable, get_datatable_row and export all reported
+ *  "Asset not found" or "Asset is not a DataTable" for assets that
+ *  asset(read) opened and correctly named as DataTables (#930).
+ *
+ *  This lives here rather than as a copy per handler file: the asset handlers
+ *  share one unity blob, and a second copy would either collide at compile
+ *  time or drift into resolving differently from its neighbours. */
+inline UObject* MCPLoadAssetObject(const FString& AssetPath)
+{
+	if (AssetPath.IsEmpty()) return nullptr;
+	if (UObject* ViaEditorLibrary = UEditorAssetLibrary::LoadAsset(AssetPath))
+	{
+		return ViaEditorLibrary;
+	}
+	return LoadObject<UObject>(nullptr, *AssetPath);
 }
 
 /** Protected mount guardrail. Engine-shipped content (/Engine/, /Script/,

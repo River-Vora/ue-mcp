@@ -1613,22 +1613,44 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateDataTable(const TSharedPtr<FJsonObj
 }
 
 
+namespace
+{
+	// #930: resolve the DataTable parameter the way asset(read) resolves any
+	// asset, so the type-specific actions succeed on every path form the
+	// generic reader already opens. Returns a ready-to-return error, or an
+	// unset pointer on success with OutAssetPath and OutTable filled in.
+	//
+	// The "not a DataTable" message names the class that was found, because
+	// the old wording was also what a caller saw when the path resolved to
+	// nothing at all.
+	TSharedPtr<FJsonValue> LoadDataTableParam(
+		const TSharedPtr<FJsonObject>& Params,
+		FString& OutAssetPath,
+		UDataTable*& OutTable)
+	{
+		if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), OutAssetPath)) return Err;
+
+		UObject* Asset = MCPLoadAssetObject(OutAssetPath);
+		if (!Asset)
+		{
+			return MCPError(FString::Printf(TEXT("Asset not found: %s"), *OutAssetPath));
+		}
+		OutTable = Cast<UDataTable>(Asset);
+		if (!OutTable)
+		{
+			return MCPError(FString::Printf(
+				TEXT("Asset is not a DataTable: %s (found a %s)"),
+				*OutAssetPath, *Asset->GetClass()->GetName()));
+		}
+		return nullptr;
+	}
+}
+
 TSharedPtr<FJsonValue> FAssetHandlers::ReadDataTable(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
-
-	UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
-	}
-
-	UDataTable* DataTable = Cast<UDataTable>(Asset);
-	if (!DataTable)
-	{
-		return MCPError(FString::Printf(TEXT("Asset is not a DataTable: %s"), *AssetPath));
-	}
+	UDataTable* DataTable = nullptr;
+	if (auto Err = LoadDataTableParam(Params, AssetPath, DataTable)) return Err;
 
 	FString RowFilter = OptionalString(Params, TEXT("rowFilter"));
 
@@ -1698,19 +1720,8 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReadDataTable(const TSharedPtr<FJsonObjec
 TSharedPtr<FJsonValue> FAssetHandlers::ReimportDataTable(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
-
-	UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
-	}
-
-	UDataTable* DataTable = Cast<UDataTable>(Asset);
-	if (!DataTable)
-	{
-		return MCPError(FString::Printf(TEXT("Asset is not a DataTable: %s"), *AssetPath));
-	}
+	UDataTable* DataTable = nullptr;
+	if (auto Err = LoadDataTableParam(Params, AssetPath, DataTable)) return Err;
 
 	// Get JSON string from either inline jsonString or from a file path
 	FString JsonString;
@@ -1768,7 +1779,8 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReimportDataTable(const TSharedPtr<FJsonO
 TSharedPtr<FJsonValue> FAssetHandlers::SetDataTableRow(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+	UDataTable* DataTable = nullptr;
+	if (auto Err = LoadDataTableParam(Params, AssetPath, DataTable)) return Err;
 	FString RowName;
 	if (auto Err = RequireString(Params, TEXT("rowName"), RowName)) return Err;
 
@@ -1786,12 +1798,6 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetDataTableRow(const TSharedPtr<FJsonObj
 		return MCPError(TEXT("Missing 'row' (or 'fields'/'data') JSON object with the row struct fields"));
 	}
 
-	UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	UDataTable* DataTable = Cast<UDataTable>(Asset);
-	if (!DataTable)
-	{
-		return MCPError(FString::Printf(TEXT("Asset is not a DataTable: %s"), *AssetPath));
-	}
 	const UScriptStruct* RowStruct = DataTable->GetRowStruct();
 	if (!RowStruct)
 	{
@@ -2000,16 +2006,11 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetDataTableRow(const TSharedPtr<FJsonObj
 TSharedPtr<FJsonValue> FAssetHandlers::RemoveDataTableRow(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+	UDataTable* DataTable = nullptr;
+	if (auto Err = LoadDataTableParam(Params, AssetPath, DataTable)) return Err;
 	FString RowName;
 	if (auto Err = RequireString(Params, TEXT("rowName"), RowName)) return Err;
 
-	UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	UDataTable* DataTable = Cast<UDataTable>(Asset);
-	if (!DataTable)
-	{
-		return MCPError(FString::Printf(TEXT("Asset is not a DataTable: %s"), *AssetPath));
-	}
 	const FName RowKey(*RowName);
 	if (!DataTable->GetRowMap().Contains(RowKey))
 	{
@@ -2037,12 +2038,11 @@ TSharedPtr<FJsonValue> FAssetHandlers::RemoveDataTableRow(const TSharedPtr<FJson
 TSharedPtr<FJsonValue> FAssetHandlers::GetDataTableRow(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+	UDataTable* DataTable = nullptr;
+	if (auto Err = LoadDataTableParam(Params, AssetPath, DataTable)) return Err;
 	FString RowName;
 	if (auto Err = RequireString(Params, TEXT("rowName"), RowName)) return Err;
 
-	UDataTable* DataTable = Cast<UDataTable>(UEditorAssetLibrary::LoadAsset(AssetPath));
-	if (!DataTable) return MCPError(FString::Printf(TEXT("Asset is not a DataTable: %s"), *AssetPath));
 	const UScriptStruct* RowStruct = DataTable->GetRowStruct();
 	if (!RowStruct) return MCPError(TEXT("DataTable has no row struct"));
 
@@ -2069,8 +2069,8 @@ TSharedPtr<FJsonValue> FAssetHandlers::GetDataTableRow(const TSharedPtr<FJsonObj
 }
 
 // #535: write a single field on a single row. Thin wrapper over the row-merge
-// upsert (SetDataTableRow), which seeds from the existing row so only the named
-// cell changes. Params: assetPath, rowName, fieldName, value.
+// upsert (SetDataTableRow), which edits the existing row in place so only the
+// named cell changes. Params: assetPath, rowName, fieldName, value.
 TSharedPtr<FJsonValue> FAssetHandlers::SetDataTableCell(const TSharedPtr<FJsonObject>& Params)
 {
 	FString FieldName;
@@ -2084,11 +2084,10 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetDataTableCell(const TSharedPtr<FJsonOb
 	// Build a one-field row object and delegate to the row upsert, which
 	// requires the row to exist for a cell edit (no accidental row creation).
 	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+	UDataTable* DataTable = nullptr;
+	if (auto Err = LoadDataTableParam(Params, AssetPath, DataTable)) return Err;
 	FString RowName;
 	if (auto Err = RequireString(Params, TEXT("rowName"), RowName)) return Err;
-	UDataTable* DataTable = Cast<UDataTable>(UEditorAssetLibrary::LoadAsset(AssetPath));
-	if (!DataTable) return MCPError(FString::Printf(TEXT("Asset is not a DataTable: %s"), *AssetPath));
 	if (!DataTable->GetRowMap().Contains(FName(*RowName)))
 	{
 		return MCPError(FString::Printf(TEXT("Row not found: %s (use set_datatable_row to create it)"), *RowName));
@@ -2108,14 +2107,13 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetDataTableCell(const TSharedPtr<FJsonOb
 TSharedPtr<FJsonValue> FAssetHandlers::RenameDataTableRow(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+	UDataTable* DataTable = nullptr;
+	if (auto Err = LoadDataTableParam(Params, AssetPath, DataTable)) return Err;
 	FString OldName;
 	if (auto Err = RequireStringAlt(Params, TEXT("oldName"), TEXT("rowName"), OldName)) return Err;
 	FString NewName;
 	if (auto Err = RequireString(Params, TEXT("newName"), NewName)) return Err;
 
-	UDataTable* DataTable = Cast<UDataTable>(UEditorAssetLibrary::LoadAsset(AssetPath));
-	if (!DataTable) return MCPError(FString::Printf(TEXT("Asset is not a DataTable: %s"), *AssetPath));
 	const UScriptStruct* RowStruct = DataTable->GetRowStruct();
 	if (!RowStruct) return MCPError(TEXT("DataTable has no row struct"));
 
@@ -2164,7 +2162,8 @@ TSharedPtr<FJsonValue> FAssetHandlers::RenameDataTableRow(const TSharedPtr<FJson
 TSharedPtr<FJsonValue> FAssetHandlers::FillDataTableFromJson(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+	UDataTable* DataTable = nullptr;
+	if (auto Err = LoadDataTableParam(Params, AssetPath, DataTable)) return Err;
 
 	const TSharedPtr<FJsonObject>* RowsObj = nullptr;
 	TSharedPtr<FJsonObject> ParsedRows;
@@ -2186,8 +2185,6 @@ TSharedPtr<FJsonValue> FAssetHandlers::FillDataTableFromJson(const TSharedPtr<FJ
 		return MCPError(TEXT("Missing 'rows' object (or 'jsonString') mapping rowName -> {field: value}"));
 	}
 
-	UDataTable* DataTable = Cast<UDataTable>(UEditorAssetLibrary::LoadAsset(AssetPath));
-	if (!DataTable) return MCPError(FString::Printf(TEXT("Asset is not a DataTable: %s"), *AssetPath));
 	const UScriptStruct* RowStruct = DataTable->GetRowStruct();
 	if (!RowStruct) return MCPError(TEXT("DataTable has no row struct"));
 
@@ -2664,7 +2661,9 @@ TSharedPtr<FJsonValue> FAssetHandlers::ExportAsset(const TSharedPtr<FJsonObject>
 	FString OutputPath;
 	if (auto Err = RequireString(Params, TEXT("outputPath"), OutputPath)) return Err;
 
-	UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
+	// #930: same resolution as asset(read), which opened assets this action
+	// reported as missing.
+	UObject* Asset = MCPLoadAssetObject(AssetPath);
 	if (!Asset)
 	{
 		return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
