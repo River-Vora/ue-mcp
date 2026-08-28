@@ -21,6 +21,29 @@
 namespace
 {
 	/**
+	 * #933: the world a trace runs in, taken from the request's own `world`
+	 * (editor|pie|game|auto) plus `pieInstance`, through ResolveWorldFromParams -
+	 * the one resolver every other world-scoped action in this category already
+	 * goes through. Written once here because all three trace actions need it and
+	 * a second copy of the resolution is how the two would drift apart again.
+	 *
+	 * On failure OutError carries the response to return, so the caller does not
+	 * restate the message and the three actions cannot disagree about it.
+	 */
+	static UWorld* ResolveTraceWorld(const TSharedPtr<FJsonObject>& Params, TSharedPtr<FJsonValue>& OutError)
+	{
+		const FString Scope = OptionalString(Params, TEXT("world"), TEXT("editor"));
+		UWorld* World = ResolveWorldFromParams(Params, *Scope);
+		if (!World)
+		{
+			OutError = MCPError(FString::Printf(
+				TEXT("World not available for scope '%s'. world='pie' needs a running PIE session; see editor(list_pie_instances)."),
+				*Scope));
+		}
+		return World;
+	}
+
+	/**
 	 * Channel display names come from the project's collision settings, so a project
 	 * that renamed GameTraceChannel1 to "Weapon" can be traced by that name. The
 	 * built-in table is the fallback for the case where the profile config has not
@@ -88,6 +111,20 @@ namespace
 					  TEXT("Camera"), TEXT("PhysicsBody"), TEXT("Vehicle"), TEXT("Destructible") };
 		}
 		return FString::Join(Names, TEXT(", "));
+	}
+
+	/** Which world answered: "editor", "pie", "game" or "other". */
+	static FString DescribeTracedWorld(const UWorld* World)
+	{
+		if (!World) return TEXT("none");
+		switch (World->WorldType)
+		{
+			case EWorldType::Editor:        return TEXT("editor");
+			case EWorldType::EditorPreview: return TEXT("editorPreview");
+			case EWorldType::PIE:           return TEXT("pie");
+			case EWorldType::Game:          return TEXT("game");
+			default:                        return TEXT("other");
+		}
 	}
 
 	static void EmitHitFields(TSharedPtr<FJsonObject> Result, const FHitResult& Hit)
@@ -189,22 +226,38 @@ namespace
 		// comparing against the game can see which one it got.
 		Result->SetBoolField(TEXT("traceComplex"), bTraceComplex);
 		Result->SetStringField(TEXT("channel"), ChannelName);
+		// #933: name the world that actually answered. A caller comparing a PIE
+		// trace against an editor trace has no other way to tell them apart, and
+		// silently answering from the wrong one is the bug this closes.
+		Result->SetStringField(TEXT("world"), DescribeTracedWorld(World));
 		if (bHit) EmitHitFields(Result, Hit);
 		return MCPResult(Result);
 	}
 }
 
 
+// #933: `world` selects the world the trace runs against, the same way every
+// other PIE-aware action in this category does. REQUIRE_EDITOR_WORLD ignored the
+// parameter, so a trace asked for during PIE answered from the editor world and
+// reported the pre-play geometry as though it were the running game's. That is
+// the worst shape of wrong answer: nothing about it looks wrong.
 TSharedPtr<FJsonValue> FLevelHandlers::LineTrace(const TSharedPtr<FJsonObject>& Params)
 {
-	REQUIRE_EDITOR_WORLD(World);
+	TSharedPtr<FJsonValue> WorldError;
+	UWorld* World = ResolveTraceWorld(Params, WorldError);
+	if (!World) return WorldError;
 	return ExecuteLineTrace(World, Params);
 }
 
 
 TSharedPtr<FJsonValue> FLevelHandlers::BulkLineTrace(const TSharedPtr<FJsonObject>& Params)
 {
-	REQUIRE_EDITOR_WORLD(World);
+	// #933: one world for the whole batch, chosen by the top-level `world`. A
+	// per-item scope would let one batch straddle two worlds and report the
+	// results in one array as though they were comparable.
+	TSharedPtr<FJsonValue> WorldError;
+	UWorld* World = ResolveTraceWorld(Params, WorldError);
+	if (!World) return WorldError;
 
 	constexpr int32 MaxBulkLineTraces = 256;
 	const TArray<TSharedPtr<FJsonValue>>* Traces = nullptr;
@@ -246,7 +299,11 @@ TSharedPtr<FJsonValue> FLevelHandlers::BulkLineTrace(const TSharedPtr<FJsonObjec
 
 TSharedPtr<FJsonValue> FLevelHandlers::SnapActorToFloor(const TSharedPtr<FJsonObject>& Params)
 {
-	REQUIRE_EDITOR_WORLD(World);
+	// #933: same defect as line_trace. The actor is looked up in this world and
+	// the downward trace runs in it, so both halves have to agree on which one.
+	TSharedPtr<FJsonValue> WorldError;
+	UWorld* World = ResolveTraceWorld(Params, WorldError);
+	if (!World) return WorldError;
 	FString ActorLabel;
 	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
 
