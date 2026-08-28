@@ -1,12 +1,14 @@
 #pragma once
 
-// Helpers shared by more than one FLevelHandlers translation unit.
+// Editor-state helpers shared by more than one handler translation unit.
 //
 // The module is compiled as a unity build, so a file-local helper copied into a
 // second .cpp becomes a redefinition the moment UBT groups the two files into
 // one blob (error C2084), and the grouping is not stable across machines.
-// Anything two level handlers both need lives here, in a named namespace, as an
-// inline function.
+// Anything two handlers both need lives here, in a named namespace, as an
+// inline function. It is a Private header rather than Public/HandlerUtils.h
+// because it pulls in the editor file utilities, and HandlerUtils.h is also
+// included by UE_MCP_BridgeStatus, which does not link UnrealEd.
 
 #include "CoreMinimal.h"
 #include "Dom/JsonObject.h"
@@ -17,7 +19,7 @@
 #include "Misc/PackageName.h"
 #include "UObject/Package.h"
 
-namespace MCPLevelInternal
+namespace MCPEditorState
 {
 	/**
 	 * Long package names of every dirty content or map package in the editor.

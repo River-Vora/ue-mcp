@@ -1,7 +1,7 @@
 #include "LevelHandlers.h"
 
 #include "HandlerUtils.h"
-#include "LevelHandlers_Internal.h"
+#include "HandlerEditorState.h"
 
 #include "Editor.h"
 #include "Engine/Brush.h"
@@ -365,7 +365,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::DeleteExactLabeledActorsInLevels(
 	}
 
 	TArray<FString> InitialDirtyPackages;
-	MCPLevelInternal::CollectDirtyEditorPackageNames(InitialDirtyPackages);
+	MCPEditorState::CollectDirtyEditorPackageNames(InitialDirtyPackages);
 	if (!InitialDirtyPackages.IsEmpty())
 	{
 		auto Result = MCPSuccess();
@@ -495,7 +495,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::DeleteExactLabeledActorsInLevels(
 		}
 
 		TArray<FString> DirtyAfterLoad;
-		MCPLevelInternal::CollectDirtyEditorPackageNames(DirtyAfterLoad);
+		MCPEditorState::CollectDirtyEditorPackageNames(DirtyAfterLoad);
 		if (!DirtyAfterLoad.IsEmpty())
 		{
 			return BuildResult(
@@ -571,7 +571,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::DeleteExactLabeledActorsInLevels(
 		}
 
 		TArray<FString> DirtyAfterLoad;
-		MCPLevelInternal::CollectDirtyEditorPackageNames(DirtyAfterLoad);
+		MCPEditorState::CollectDirtyEditorPackageNames(DirtyAfterLoad);
 		if (!DirtyAfterLoad.IsEmpty())
 		{
 			return BuildResult(
@@ -683,7 +683,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::DeleteExactLabeledActorsInLevels(
 		Request.bSaved = true;
 
 		TArray<FString> DirtyAfterSave;
-		MCPLevelInternal::CollectDirtyEditorPackageNames(DirtyAfterSave);
+		MCPEditorState::CollectDirtyEditorPackageNames(DirtyAfterSave);
 		if (!DirtyAfterSave.IsEmpty())
 		{
 			return BuildResult(

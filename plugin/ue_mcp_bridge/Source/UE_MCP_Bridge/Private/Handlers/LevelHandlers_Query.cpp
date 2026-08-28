@@ -27,7 +27,7 @@
 #include "HandlerRegistry.h"
 #include "HandlerQuery.h"
 #include "HandlerUtils.h"
-#include "LevelHandlers_Internal.h"
+#include "HandlerEditorState.h"
 
 #include "Components/ActorComponent.h"
 #include "Components/BoxComponent.h"
@@ -420,12 +420,12 @@ TSharedPtr<FJsonValue> FLevelHandlers::QueryComponents(const TSharedPtr<FJsonObj
 		{
 			return MCPError(TEXT("'levelPath' queries the editor world; drop 'world' or set it to 'editor'"));
 		}
-		if (!MCPLevelInternal::IsExistingMapPackage(LevelPath))
+		if (!MCPEditorState::IsExistingMapPackage(LevelPath))
 		{
 			return MCPError(FString::Printf(TEXT("Level package was not found as a .umap: %s"), *LevelPath));
 		}
 
-		MCPLevelInternal::CollectDirtyEditorPackageNames(InitialDirtyPackages);
+		MCPEditorState::CollectDirtyEditorPackageNames(InitialDirtyPackages);
 		if (!InitialDirtyPackages.IsEmpty())
 		{
 			auto DirtyResult = MCPSuccess();
@@ -437,10 +437,10 @@ TSharedPtr<FJsonValue> FLevelHandlers::QueryComponents(const TSharedPtr<FJsonObj
 			return MCPResult(DirtyResult);
 		}
 
-		const FString CurrentLevelPath = MCPLevelInternal::CurrentEditorLevelPackageName();
+		const FString CurrentLevelPath = MCPEditorState::CurrentEditorLevelPackageName();
 		if (CurrentLevelPath != LevelPath)
 		{
-			if (!MCPLevelInternal::IsExistingMapPackage(CurrentLevelPath))
+			if (!MCPEditorState::IsExistingMapPackage(CurrentLevelPath))
 			{
 				return MCPError(FString::Printf(
 					TEXT("The currently open level cannot be restored from package path '%s', so this refuses to leave it"),
@@ -1029,7 +1029,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::QueryComponents(const TSharedPtr<FJsonObj
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("worldName"), World->GetName());
-	Result->SetStringField(TEXT("levelPath"), MCPLevelInternal::CurrentEditorLevelPackageName());
+	Result->SetStringField(TEXT("levelPath"), MCPEditorState::CurrentEditorLevelPackageName());
 	Result->SetNumberField(TEXT("scannedActors"), ScannedActors);
 	Result->SetNumberField(TEXT("scannedComponents"), ScannedComponents);
 	Result->SetNumberField(TEXT("matched"), Matched);
@@ -1134,7 +1134,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::QueryComponents(const TSharedPtr<FJsonObj
 	// anything about this call dirtied a package, say so instead of leaving a
 	// map-wide audit as an unexplained unsaved-changes marker.
 	TArray<FString> DirtyAfterQuery;
-	MCPLevelInternal::CollectDirtyEditorPackageNames(DirtyAfterQuery);
+	MCPEditorState::CollectDirtyEditorPackageNames(DirtyAfterQuery);
 	for (const FString& Already : InitialDirtyPackages)
 	{
 		DirtyAfterQuery.Remove(Already);
