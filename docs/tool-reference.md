@@ -177,7 +177,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `unlock` | Release an asset lock held by this editor (or force=true to break any holder's lock). Params: `assetPath, force?, sessionId?` |
 | `list_locks` | List all currently-held asset locks with holder session id, acquiredAt, and ttlSecondsRemaining |
 | `unlock_all` | Release every lock held by one session in a single call, returning the number released. Defaults to the addressed editor's own session; pass sessionId to clear a different one (for example after a crashed session left assets wedged). Params: `sessionId?` |
-| `diff` | Semantic structural diff between two assets of any type, dispatching on the asset's class. Blueprints are diffed structurally (parent class, variables, functions, components, per-graph node and connection deltas); other asset types report that diffing is not supported yet rather than failing opaquely. Params: `assetPath, otherPath` |
+| `diff` | Semantic structural diff between two assets, dispatching on the asset's class. Blueprints: parent class, variables, functions, components, per-graph node and connection deltas. Skeleton and SkeletalMesh: raw bone additions and removals, reparenting, raw-index changes, and declared virtual-bone deltas, with `hierarchyCompatible` and `editorCompatible` reported separately so the result answers whether two skeletons can register as Compatible Skeletons or need a retarget (#879). Reference-pose transforms, export names, sockets and retarget sources are out of scope, and the result says so. Other asset types report that diffing is not supported yet rather than failing opaquely. Params: `assetPath, otherPath` |
 
 ---
 
