@@ -135,7 +135,12 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("set_fog_properties"), &SetFogProperties);
 	Registry.RegisterHandler(TEXT("get_actors_by_class"), &GetActorsByClass);
 	Registry.RegisterHandler(TEXT("get_actors_by_component_class"), &GetActorsByComponentClass);
-	Registry.RegisterHandler(TEXT("summarize_static_mesh_usage"), &SummarizeStaticMeshUsage);
+	// Same budget as query_components, and for the same reason: this is a full
+	// TActorIterator pass on the game thread. It additionally sorts every actor
+	// by path name and sorts each actor's components, so it is the heavier of
+	// the two whole-map scans and had no business inheriting the 30 second
+	// default. Mirrored in src/bridge-timeouts.ts, which a parity test checks.
+	Registry.RegisterHandlerWithTimeout(TEXT("summarize_static_mesh_usage"), &SummarizeStaticMeshUsage, 300.0f);
 	Registry.RegisterHandler(TEXT("count_actors_by_class"), &CountActorsByClass);
 	Registry.RegisterHandler(TEXT("get_runtime_virtual_texture_summary"), &GetRVTSummary);
 	Registry.RegisterHandler(TEXT("set_water_body_property"), &SetWaterBodyProperty);
