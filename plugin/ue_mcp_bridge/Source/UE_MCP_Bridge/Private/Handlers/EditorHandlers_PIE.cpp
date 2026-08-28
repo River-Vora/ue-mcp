@@ -671,13 +671,113 @@ namespace
 		return true;
 	}
 
+	/**
+	 * #969: evaluate a path segment that resolved to a UFUNCTION, binding the
+	 * literal arguments the segment carried.
+	 *
+	 * A read-only accessor keyed by an id (a tally by option id, a balance by
+	 * currency id, an attribute by tag) is a very common shape and used to be
+	 * unreachable here: anything taking a parameter was refused, and the
+	 * workaround was one invoke_object_function per key with an exact
+	 * objectPath, which loses the multi-instance table this action exists for.
+	 *
+	 * The literals are coerced by MCPJsonProperty::SetJsonOnProperty, the same
+	 * setter invoke_object_function's `args` go through. There is deliberately
+	 * no second coercion: a string reads into an FName, an FString, an integer,
+	 * a float, a bool or an enum there already, so a keyed accessor behaves the
+	 * same whichever action reaches it.
+	 */
+	static bool CallPathGetter(
+		UObject* Target,
+		UFunction* Fn,
+		const TArray<FString>& ArgLiterals,
+		TSharedPtr<FJsonObject> Out,
+		const TCHAR* FieldKey,
+		FString& OutErr)
+	{
+		FProperty* RetProp = Fn->GetReturnProperty();
+		if (!RetProp)
+		{
+			OutErr = FString::Printf(TEXT("UFUNCTION '%s' has no return value"), *Fn->GetName());
+			return false;
+		}
+
+		// Inputs are the parameters a caller can supply: not the return, and not
+		// a plain out param, which the function writes rather than reads.
+		TArray<FProperty*> Inputs;
+		for (TFieldIterator<FProperty> It(Fn); It && (It->PropertyFlags & CPF_Parm); ++It)
+		{
+			FProperty* Parm = *It;
+			if (Parm->PropertyFlags & CPF_ReturnParm) continue;
+			if ((Parm->PropertyFlags & CPF_OutParm) && !(Parm->PropertyFlags & CPF_ReferenceParm)) continue;
+			Inputs.Add(Parm);
+		}
+
+		if (ArgLiterals.Num() != Inputs.Num())
+		{
+			TArray<FString> Signature;
+			for (FProperty* Parm : Inputs)
+			{
+				Signature.Add(FString::Printf(TEXT("%s %s"), *Parm->GetCPPType(), *Parm->GetName()));
+			}
+			OutErr = FString::Printf(
+				TEXT("UFUNCTION '%s' takes %d argument(s) (%s) but the path supplied %d. Write them into the path, e.g. '%s(key)'."),
+				*Fn->GetName(), Inputs.Num(), *FString::Join(Signature, TEXT(", ")), ArgLiterals.Num(), *Fn->GetName());
+			return false;
+		}
+
+		// ParmsSize, not PropertiesSize: a Blueprint function's locals live past
+		// the parameter block and initialising them would run off the frame.
+		TArray<uint8> Frame;
+		Frame.SetNumZeroed(Fn->ParmsSize);
+		for (TFieldIterator<FProperty> It(Fn); It && (It->PropertyFlags & CPF_Parm); ++It)
+		{
+			It->InitializeValue_InContainer(Frame.GetData());
+		}
+
+		bool bBound = true;
+		for (int32 ArgIndex = 0; ArgIndex < Inputs.Num(); ++ArgIndex)
+		{
+			FProperty* Parm = Inputs[ArgIndex];
+			const TSharedPtr<FJsonValue> AsJson = MakeShared<FJsonValueString>(ArgLiterals[ArgIndex]);
+			FString BindErr;
+			if (!MCPJsonProperty::SetJsonOnProperty(
+					Parm, Parm->ContainerPtrToValuePtr<void>(Frame.GetData()), AsJson, BindErr))
+			{
+				OutErr = FString::Printf(
+					TEXT("UFUNCTION '%s' argument '%s': %s"), *Fn->GetName(), *Parm->GetName(), *BindErr);
+				bBound = false;
+				break;
+			}
+		}
+
+		if (bBound)
+		{
+			{
+				// #806: without this guard an actor getter called against the
+				// editor world is skipped and the zeroed frame reads back as a
+				// real value.
+				FEditorScriptExecutionGuard ScriptGuard;
+				Target->ProcessEvent(Fn, Frame.GetData());
+			}
+			WritePropertyValue(Out, FieldKey, RetProp, RetProp->ContainerPtrToValuePtr<void>(Frame.GetData()));
+		}
+
+		MCPFunctionCall::DestroyFrame(Fn, Frame.GetData());
+		return bBound;
+	}
+
 	// Walk one dotted path starting at Root. Per segment: property hop, sub-object
-	// hop, or - at the leaf - a zero-arg UFUNCTION call. Writes the result onto Out.
+	// hop, or - at the leaf - a UFUNCTION call, which may carry literal arguments
+	// as 'GetTallyWeight(overclock)'. Writes the result onto Out.
 	static void ResolvePath(UObject* Root, const FString& Path, TSharedPtr<FJsonObject> Out, const TCHAR* FieldKey, FString& OutErr)
 	{
 		if (!Root) { OutErr = TEXT("null root"); return; }
 		TArray<FString> Parts;
-		Path.ParseIntoArray(Parts, TEXT("."));
+		// Split on dots that separate segments, not on a dot inside an argument
+		// list: 'GetWeightAt(1.5)' is one segment, and splitting it would look
+		// up a property named 'GetWeightAt(1'.
+		MCPFunctionCall::SplitPathSegments(Path, Parts);
 		if (Parts.Num() == 0) { OutErr = TEXT("empty path"); return; }
 
 		UStruct* CurStruct = Root->GetClass();
@@ -686,9 +786,24 @@ namespace
 
 		for (int32 i = 0; i < Parts.Num(); ++i)
 		{
-			const FString& Seg = Parts[i];
+			const FString& RawSeg = Parts[i];
 			const bool bLast = (i == Parts.Num() - 1);
-			FProperty* Prop = CurStruct->FindPropertyByName(FName(*Seg));
+
+			// A segment may be 'Name' or 'Name(literal, literal)'. Reading the
+			// argument list off the front makes the rest of this loop the same
+			// as it always was.
+			FString Seg;
+			TArray<FString> CallArgs;
+			bool bHasArgList = false;
+			if (!MCPFunctionCall::ParseCallSegment(RawSeg, Seg, CallArgs, bHasArgList, OutErr))
+			{
+				return;
+			}
+
+			// An argument list says "call this", so no property or component of
+			// that name is considered: silently reading a property while the
+			// caller asked for a call would answer a question nobody asked.
+			FProperty* Prop = bHasArgList ? nullptr : CurStruct->FindPropertyByName(FName(*Seg));
 
 			if (bLast && Prop)
 			{
@@ -720,9 +835,9 @@ namespace
 
 			// No property by that name. At the head of the path, try matching an
 			// actor component by name (mirrors get_runtime_value behavior). At
-			// any later segment OR the leaf, try a zero-arg UFUNCTION call - that
-			// covers GetRequired() / IsPowered() etc.
-			if (i == 0)
+			// any later segment OR the leaf, try a UFUNCTION call - that covers
+			// GetRequired() / IsPowered() and, since #969, GetTally(overclock).
+			if (i == 0 && !bHasArgList)
 			{
 				if (AActor* AsActor = Cast<AActor>(CurObject))
 				{
@@ -739,53 +854,21 @@ namespace
 				}
 			}
 
-			// UFUNCTION zero-arg getter at this segment.
+			// UFUNCTION getter at this segment, with or without arguments.
 			if (UFunction* Fn = CurObject ? CurObject->FindFunction(FName(*Seg)) : nullptr)
 			{
-				if (Fn->NumParms == 1 && Fn->ReturnValueOffset != MAX_uint16)
+				if (!bLast)
 				{
-					uint8* Frame = (uint8*)FMemory_Alloca(Fn->ParmsSize);
-					FMemory::Memzero(Frame, Fn->ParmsSize);
-					for (TFieldIterator<FProperty> It(Fn); It; ++It)
-					{
-						It->InitializeValue_InContainer(Frame);
-					}
-					{
-						// #806: without this guard an actor getter called against
-						// the editor world is skipped and the zeroed frame reads
-						// back as a real value.
-						FEditorScriptExecutionGuard ScriptGuard;
-						CurObject->ProcessEvent(Fn, Frame);
-					}
-					FProperty* RetProp = Fn->GetReturnProperty();
-					if (RetProp)
-					{
-						if (bLast)
-						{
-							void* RetVal = RetProp->ContainerPtrToValuePtr<void>(Frame);
-							WritePropertyValue(Out, FieldKey, RetProp, RetVal);
-						}
-						else
-						{
-							OutErr = FString::Printf(TEXT("UFUNCTION '%s' must be the leaf segment - cannot descend into its return"), *Seg);
-						}
-					}
-					else
-					{
-						OutErr = FString::Printf(TEXT("UFUNCTION '%s' has no return value"), *Seg);
-					}
-					for (TFieldIterator<FProperty> It(Fn); It; ++It)
-					{
-						It->DestroyValue_InContainer(Frame);
-					}
+					OutErr = FString::Printf(TEXT("UFUNCTION '%s' must be the leaf segment - cannot descend into its return"), *Seg);
 					return;
 				}
-				OutErr = FString::Printf(TEXT("UFUNCTION '%s' must be zero-arg with a return"), *Seg);
+				CallPathGetter(CurObject, Fn, CallArgs, Out, FieldKey, OutErr);
 				return;
 			}
 
-			OutErr = FString::Printf(TEXT("Segment '%s' is neither a property, component, nor a zero-arg UFUNCTION on %s"),
-				*Seg, *CurStruct->GetName());
+			OutErr = FString::Printf(
+				TEXT("Segment '%s' is neither a property, component, nor a UFUNCTION on %s. A UFUNCTION that takes arguments is written '%s(value)'."),
+				*Seg, *CurStruct->GetName(), *Seg);
 			return;
 
 		NextSegment:;
