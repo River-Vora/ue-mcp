@@ -41,7 +41,7 @@ export const landscapeTool: ToolDef = categoryTool(
     mode: z.string().optional().describe("sculpt: raise | lower | flatten (#742)"),
     amount: z.number().optional().describe("sculpt: world centimetres to move at full brush strength (#742)"),
     actorLabel: z.string().optional().describe("sample/sculpt/paint_layer: which Landscape actor, when the level has more than one (#742)"),
-    actorPath: z.string().optional().describe("sample/sculpt/paint_layer: full object path of the Landscape actor. Wins over actorLabel, and a label matching several landscapes is refused with the candidates rather than sculpting one of them (#983)"),
+    actorPath: z.string().optional().describe("sample/sculpt/paint_layer: full object path of the Landscape actor. The unambiguous selector, and it wins over actorLabel when both are given. Editor labels are NOT unique, and a label matching several landscapes is refused with the candidates rather than sculpting one of them (#983)"),
     editLayer: z.string().optional().describe("sculpt/paint_layer: edit layer NAME to write into; without one the write targets the merged heightmap and is regenerated away (#742)"),
     editLayerIndex: z.number().optional().describe("sculpt/paint_layer: edit layer index (default 0) when editLayer is not given (#742)"),
     maxVertices: z.number().optional().describe("sculpt/paint_layer: refuse a brush covering more than this many vertices (default 4,000,000) (#742)"),
