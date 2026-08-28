@@ -58,6 +58,7 @@ export const REGISTERED_HANDLER_TIMEOUT_SECONDS: Readonly<Record<string, number>
   bulk_upsert_data_assets: 120,
   create_cpp_class: 300,
   delete_exact_labeled_actors_in_levels: 300,
+  fixup_redirectors: 300,
   invoke_object_functions: 300,
   live_coding_compile: 300,
   load_actor_descs: 300,

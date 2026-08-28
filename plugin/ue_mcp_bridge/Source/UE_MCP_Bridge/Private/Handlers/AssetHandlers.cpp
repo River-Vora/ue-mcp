@@ -152,6 +152,9 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("delete_asset"), &DeleteAsset);
 	Registry.RegisterHandler(TEXT("delete_asset_batch"), &DeleteAssetBatch);
 	Registry.RegisterHandler(TEXT("bulk_rename_assets"), &BulkRename);
+	// #908: bounded redirector clean-up after a move. Timeout raised because a
+	// fix-up loads and resaves every referencing package.
+	Registry.RegisterHandlerWithTimeout(TEXT("fixup_redirectors"), &FixupRedirectors, 300.0f);
 	Registry.RegisterHandler(TEXT("create_data_asset"), &CreateDataAsset);
 	// Bounded batch upsert plus its rollback inverse. A 500-item batch that
 	// preflights every item on a transient copy before touching a package can
@@ -2082,6 +2085,48 @@ TSharedPtr<FJsonValue> FAssetHandlers::BulkRename(const TSharedPtr<FJsonObject>&
 		}
 	}
 
+	// #908: RenameAssets runs one redirector fix-up pass, and a referencer that
+	// is not loaded is invisible to it, so a stub is left at the old path with
+	// nothing in the response saying so. 29 renames left 19 of them, and the
+	// first sign of it was a later search finding redirectors nobody expected.
+	IAssetRegistry& RenameRegistry =
+		FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+	int32 RedirectorsLeft = 0;
+	TArray<TSharedPtr<FJsonValue>> RedirectorPackages;
+	for (const TSharedPtr<FJsonValue>& Value : PerItem)
+	{
+		TSharedPtr<FJsonObject> Rec = Value.IsValid() ? Value->AsObject() : nullptr;
+		if (!Rec.IsValid()) continue;
+		FString Status;
+		Rec->TryGetStringField(TEXT("status"), Status);
+		if (Status != TEXT("renamed")) continue;
+
+		FString SourcePath;
+		Rec->TryGetStringField(TEXT("sourcePath"), SourcePath);
+		const FMCPAssetPathForms SourceForms = MCPAssetPathForms(SourcePath);
+
+		bool bRedirectorLeft = false;
+		TArray<FAssetData> AtOldPath;
+		RenameRegistry.GetAssetsByPackageName(FName(*SourceForms.PackagePath), AtOldPath);
+		for (const FAssetData& Data : AtOldPath)
+		{
+			if (Data.IsRedirector()) { bRedirectorLeft = true; break; }
+		}
+		// The registry can lag a rename that just happened, so an in-memory
+		// redirector counts too rather than reading as a clean result.
+		if (!bRedirectorLeft && FindObject<UObjectRedirector>(nullptr, *SourceForms.ObjectPath))
+		{
+			bRedirectorLeft = true;
+		}
+
+		Rec->SetBoolField(TEXT("redirectorLeft"), bRedirectorLeft);
+		if (bRedirectorLeft)
+		{
+			++RedirectorsLeft;
+			RedirectorPackages.Add(MakeShared<FJsonValueString>(SourceForms.PackagePath));
+		}
+	}
+
 	auto Result = MCPSuccess();
 	if (Succeeded > 0) MCPSetUpdated(Result);
 	Result->SetBoolField(TEXT("success"), bOk);
@@ -2090,6 +2135,16 @@ TSharedPtr<FJsonValue> FAssetHandlers::BulkRename(const TSharedPtr<FJsonObject>&
 	Result->SetNumberField(TEXT("skipped"), Skipped);
 	Result->SetNumberField(TEXT("total"), PerItem.Num());
 	Result->SetArrayField(TEXT("results"), PerItem);
+	Result->SetNumberField(TEXT("redirectorsLeft"), RedirectorsLeft);
+	Result->SetNumberField(TEXT("redirectorsRemoved"), FMath::Max(0, Succeeded - RedirectorsLeft));
+	Result->SetArrayField(TEXT("redirectorPackages"), RedirectorPackages);
+	if (RedirectorsLeft > 0)
+	{
+		Result->SetStringField(TEXT("note"), FString::Printf(
+			TEXT("%d of %d renamed assets left an ObjectRedirector at the old path, still pointed at by packages this rename did not load. ")
+			TEXT("Pass redirectorPackages to asset(fixup_redirectors) to load exactly those referencers, rewrite them, and delete the stubs that come out unreferenced."),
+			RedirectorsLeft, Succeeded));
+	}
 	return MCPResult(Result);
 }
 

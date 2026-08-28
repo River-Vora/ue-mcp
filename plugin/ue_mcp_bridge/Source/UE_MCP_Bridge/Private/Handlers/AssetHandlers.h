@@ -22,6 +22,9 @@ private:
 	static TSharedPtr<FJsonValue> DeleteAsset(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> DeleteAssetBatch(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> BulkRename(const TSharedPtr<FJsonObject>& Params);
+	// Bounded redirector clean-up after a move (#908). Lives in
+	// AssetHandlers_Redirectors.cpp.
+	static TSharedPtr<FJsonValue> FixupRedirectors(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> CreateDataAsset(const TSharedPtr<FJsonObject>& Params);
 	// Bounded batch create-or-update of UDataAsset instances. Lives in
 	// AssetHandlers_BulkUpsert.cpp.

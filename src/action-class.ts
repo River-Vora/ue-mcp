@@ -195,6 +195,11 @@ const OVERRIDES: Readonly<Record<string, ActionClass>> = {
   "audio.extract_pcm": "mutate",
   // Rebuilds the full-text index in the editor's own database.
   "asset.reindex_fts": "mutate",
+  // Loads, rewrites and saves the packages that reference a set of
+  // ObjectRedirectors, then deletes the redirectors that come out unreferenced
+  // (#908). "fixup" is not a verb the lexicon knows, and this is about as far
+  // from a read as an asset action gets.
+  "asset.fixup_redirectors": "mutate",
   // Posts to a public issue tracker.
   "feedback.submit": "mutate",
 };
