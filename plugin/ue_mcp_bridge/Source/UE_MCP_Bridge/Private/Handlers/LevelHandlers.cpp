@@ -14,6 +14,9 @@
 #include "Components/AudioComponent.h"
 #include "Sound/SoundBase.h"
 #include "Components/InstancedStaticMeshComponent.h"
+// #986: get_component_tree distinguishes HISM from plain ISM, because per
+// instance culling and LOD change what an edit to one costs.
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/SkeletalMesh.h"
 #include "Animation/SkeletalMeshActor.h"
@@ -104,6 +107,10 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("get_component_tree"), &GetComponentTree);
 	Registry.RegisterHandler(TEXT("get_relative_transform"), &GetRelativeTransform);
 	Registry.RegisterHandler(TEXT("get_current_level"), &GetCurrentLevel);
+	// #964: LevelHandlers_Save.cpp. Saves through the same package path
+	// editor(save_dirty) uses, so the two cannot disagree about one package,
+	// and reports the package, the file and the engine's own reason on failure.
+	Registry.RegisterHandler(TEXT("save_level"), &SaveLevel);
 	Registry.RegisterHandler(TEXT("list_levels"), &ListLevels);
 	Registry.RegisterHandler(TEXT("get_selected_actors"), &GetSelectedActors);
 	Registry.RegisterHandler(TEXT("list_volumes"), &ListVolumes);
@@ -128,7 +135,12 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("set_fog_properties"), &SetFogProperties);
 	Registry.RegisterHandler(TEXT("get_actors_by_class"), &GetActorsByClass);
 	Registry.RegisterHandler(TEXT("get_actors_by_component_class"), &GetActorsByComponentClass);
-	Registry.RegisterHandler(TEXT("summarize_static_mesh_usage"), &SummarizeStaticMeshUsage);
+	// Same budget as query_components, and for the same reason: this is a full
+	// TActorIterator pass on the game thread. It additionally sorts every actor
+	// by path name and sorts each actor's components, so it is the heavier of
+	// the two whole-map scans and had no business inheriting the 30 second
+	// default. Mirrored in src/bridge-timeouts.ts, which a parity test checks.
+	Registry.RegisterHandlerWithTimeout(TEXT("summarize_static_mesh_usage"), &SummarizeStaticMeshUsage, 300.0f);
 	Registry.RegisterHandler(TEXT("count_actors_by_class"), &CountActorsByClass);
 	Registry.RegisterHandler(TEXT("get_runtime_virtual_texture_summary"), &GetRVTSummary);
 	Registry.RegisterHandler(TEXT("set_water_body_property"), &SetWaterBodyProperty);
@@ -162,6 +174,11 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("place_skeletal_actor"), &SpawnSkeletalMeshActor);
 	// #666: add a material blendable to a PostProcessVolume.
 	Registry.RegisterHandler(TEXT("add_post_process_blendable"), &AddPostProcessBlendable);
+	// #950: LevelHandlers_PostProcess.cpp. The value half and the bOverride_ half
+	// of FPostProcessSettings, written together.
+	Registry.RegisterHandler(TEXT("set_post_process_settings"), &SetPostProcessSettings);
+	Registry.RegisterHandler(TEXT("get_post_process_settings"), &GetPostProcessSettings);
+	Registry.RegisterHandler(TEXT("set_fixed_exposure"), &SetFixedExposure);
 	// #637: export a selected actor's mesh to FBX + metadata sidecar.
 	Registry.RegisterHandler(TEXT("export_actor_fbx"), &ExportActorFbx);
 	Registry.RegisterHandler(TEXT("snap_actor_to_floor"), &SnapActorToFloor);
@@ -170,6 +187,16 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("set_actor_folder_path"), &SetActorFolderPath);
 	Registry.RegisterHandler(TEXT("list_actor_descs"), &ListActorDescs);
 	Registry.RegisterHandlerWithTimeout(TEXT("load_actor_descs"), &LoadActorDescs, 300.0f);
+	// #985: LevelHandlers_WorldPartitionSettings.cpp. The streaming knobs and
+	// the runtime cell transformer stack live with the other World Partition
+	// actions rather than in a category of their own.
+	Registry.RegisterHandler(TEXT("get_world_partition_settings"), &GetWorldPartitionSettings);
+	Registry.RegisterHandler(TEXT("set_world_partition_settings"), &SetWorldPartitionSettings);
+	Registry.RegisterHandler(TEXT("add_runtime_cell_transformer"), &AddRuntimeCellTransformer);
+	// #985: bulk HLOD layer assignment. A whole-map selector, so it takes the
+	// same 300 second budget as the other batch writes. Mirrored in
+	// src/bridge-timeouts.ts, which a parity test checks.
+	Registry.RegisterHandlerWithTimeout(TEXT("set_actor_hlod_layer"), &SetActorHLODLayer, 300.0f);
 	Registry.RegisterHandler(TEXT("add_actor_tag"), &AddActorTag);
 	Registry.RegisterHandler(TEXT("remove_actor_tag"), &RemoveActorTag);
 	Registry.RegisterHandler(TEXT("set_actor_tags"), &SetActorTags);
@@ -813,6 +840,24 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentTree(const TSharedPtr<FJsonOb
 						Mats.Add(MakeShared<FJsonValueString>(Mat ? Mat->GetPathName() : TEXT("")));
 					}
 					C->SetArrayField(TEXT("materials"), Mats);
+
+					// #986: an ISM/HISM reported its class and its mesh and not
+					// how many instances it holds, which is the one number that
+					// decides whether to touch it at all. A component with three
+					// instances and one with three hundred thousand looked
+					// identical here, so the decision was made blind or cost a
+					// separate get_instance_transforms dump of every transform.
+					if (UInstancedStaticMeshComponent* ISMC = Cast<UInstancedStaticMeshComponent>(SMC))
+					{
+						C->SetNumberField(TEXT("instanceCount"), ISMC->GetInstanceCount());
+						TSharedPtr<FJsonObject> Instanced = MakeShared<FJsonObject>();
+						// HISM culls and LODs per instance and ISM does not, so
+						// the distinction changes what an edit costs.
+						Instanced->SetBoolField(TEXT("hierarchical"),
+							ISMC->IsA<UHierarchicalInstancedStaticMeshComponent>());
+						Instanced->SetNumberField(TEXT("numCustomDataFloats"), ISMC->NumCustomDataFloats);
+						C->SetObjectField(TEXT("instanced"), Instanced);
+					}
 				}
 				else if (USkeletalMeshComponent* SKMC = Cast<USkeletalMeshComponent>(PC))
 				{

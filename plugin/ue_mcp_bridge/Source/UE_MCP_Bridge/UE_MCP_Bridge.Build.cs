@@ -60,6 +60,15 @@ public class UE_MCP_Bridge : ModuleRules
 	// Private/Tests/CollisionQueryTests.cpp (#925): same reason.
 	// Private/Handlers/AssetHandlers_MeshBoolean.cpp and
 	// Private/Tests/MeshBooleanTests.cpp (#916): same reason.
+	// Private/Tests/LevelTraceWorldScopeTests.cpp (#933): same reason.
+	// Private/Tests/LandscapeSampleTests.cpp (#939): same reason.
+	// Private/Handlers/LevelHandlers_PostProcess.cpp and
+	// Private/Tests/LevelPostProcessOverrideTests.cpp (#950): same reason.
+	// Private/Handlers/LevelHandlers_Save.cpp and
+	// Private/Tests/LevelSaveReportTests.cpp (#964): same reason.
+	// Private/Tests/LevelComponentTreeInstanceCountTests.cpp (#986): same reason.
+	// Private/Handlers/LevelHandlers_WorldPartitionSettings.cpp and
+	// Private/Tests/LevelWorldPartitionSettingsTests.cpp (#985): same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;

@@ -31,6 +31,19 @@ private:
 	// expressed in reference's local space).
 	static TSharedPtr<FJsonValue> GetRelativeTransform(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetCurrentLevel(const TSharedPtr<FJsonObject>& Params);
+	// #964: save the level currently being edited, through the same package
+	// path editor(save_dirty) uses, and report what happened to each package
+	// rather than one bare boolean. LevelHandlers_Save.cpp.
+	static TSharedPtr<FJsonValue> SaveLevel(const TSharedPtr<FJsonObject>& Params);
+	// #985: World Partition streaming settings (CellSize / LoadingRange) and the
+	// runtime cell transformer stack, whose instanced transformer object had no
+	// writable path at all. LevelHandlers_WorldPartitionSettings.cpp.
+	static TSharedPtr<FJsonValue> GetWorldPartitionSettings(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetWorldPartitionSettings(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> AddRuntimeCellTransformer(const TSharedPtr<FJsonObject>& Params);
+	// #985: bulk HLOD layer assignment, with the other selector-driven batch
+	// writes in LevelHandlers_BatchWrite.cpp.
+	static TSharedPtr<FJsonValue> SetActorHLODLayer(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ListLevels(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetSelectedActors(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ListVolumes(const TSharedPtr<FJsonObject>& Params);
@@ -140,6 +153,13 @@ private:
 	static TSharedPtr<FJsonValue> SpawnSkeletalMeshActor(const TSharedPtr<FJsonObject>& Params);
 	// #666: add a material blendable to a PostProcessVolume's WeightedBlendables.
 	static TSharedPtr<FJsonValue> AddPostProcessBlendable(const TSharedPtr<FJsonObject>& Params);
+	// #950: FPostProcessSettings values only apply when their bOverride_<Name>
+	// bit is on, so the setter writes both halves and the reader reports which
+	// settings a volume is actually overriding.
+	// LevelHandlers_PostProcess.cpp.
+	static TSharedPtr<FJsonValue> SetPostProcessSettings(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> GetPostProcessSettings(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetFixedExposure(const TSharedPtr<FJsonObject>& Params);
 	// #637: export a selected actor's mesh to FBX plus a metadata sidecar JSON.
 	static TSharedPtr<FJsonValue> ExportActorFbx(const TSharedPtr<FJsonObject>& Params);
 	// #910/#943/#912: one editor-side component query. Filters, projection,

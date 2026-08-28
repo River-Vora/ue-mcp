@@ -78,9 +78,11 @@ export const REGISTERED_HANDLER_TIMEOUT_SECONDS: Readonly<Record<string, number>
   run_automation_tests: 300,
   sculpt_landscape: 120,
   search_blueprint_call_sites: 600,
+  set_actor_hlod_layer: 300,
   set_component_materials: 300,
   snap_instances_to_surface: 300,
   spawn_actors_batch: 300,
+  summarize_static_mesh_usage: 300,
 };
 
 /** What the editor will wait for this method, in ms, or undefined for the default. */

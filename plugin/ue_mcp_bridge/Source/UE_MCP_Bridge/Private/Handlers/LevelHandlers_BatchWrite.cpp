@@ -43,6 +43,9 @@
 #include "HandlerUtils.h"
 #include "Materials/MaterialInterface.h"
 #include "ScopedTransaction.h"
+// #985: bulk HLOD layer assignment. UHLODLayer has to be a complete type for
+// AActor::SetHLODLayer and for the asset load.
+#include "WorldPartition/HLOD/HLODLayer.h"
 
 namespace
 {
@@ -1416,6 +1419,151 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentMaterials(const TSharedPtr<FJ
 		MCPSetUpdated(Result);
 		Result->SetStringField(TEXT("saveNote"),
 			TEXT("These are COMPONENT overrides on placed actors, so the LEVEL is dirty and is NOT saved. The mesh ASSET is untouched; use material(build_material) or asset(set_property) to write the asset's own slots."));
+	}
+	return MCPResult(Result);
+}
+
+// ---------------------------------------------------------------------------
+// set_actor_hlod_layer (#985)
+// ---------------------------------------------------------------------------
+//
+// Assigning an HLODLayer override across 295 InstancedFoliageActors was a
+// Python loop, for the same reason every other action in this file exists: the
+// selector vocabulary lived on the client and every actor cost a round trip.
+//
+// This lives beside the other selector-driven batch writes rather than with the
+// World Partition settings, because the selector, the bounds, the dry run and
+// the missing-label reporting are all shared with them, and a second copy of
+// that vocabulary would be one more thing to drift.
+//
+// The write goes through AActor::SetHLODLayer rather than through the reflected
+// property. HLODLayer is a private UPROPERTY and reflection would reach it, but
+// the engine's own setter is what the HLOD system expects to have been called,
+// and a bulk write that skipped it would be the kind of edit that looks applied
+// and behaves differently from one made in the details panel.
+TSharedPtr<FJsonValue> FLevelHandlers::SetActorHLODLayer(const TSharedPtr<FJsonObject>& Params)
+{
+	MCP_CHECK_GAME_THREAD();
+	REQUIRE_EDITOR_WORLD(World);
+
+	// null clears the override, which is a legitimate request and has to be
+	// distinguishable from "the parameter was omitted".
+	if (!Params->HasField(TEXT("hlodLayer")))
+	{
+		return MCPError(TEXT("Missing 'hlodLayer': an HLODLayer asset path, or null to clear the per-actor override"));
+	}
+	FString LayerPath;
+	Params->TryGetStringField(TEXT("hlodLayer"), LayerPath);
+	LayerPath.TrimStartAndEndInline();
+
+	UHLODLayer* Layer = nullptr;
+	if (!LayerPath.IsEmpty())
+	{
+		Layer = LoadAssetByPath<UHLODLayer>(LayerPath);
+		if (!Layer) return MCPAssetLoadError(LayerPath, TEXT("UHLODLayer"));
+	}
+
+	FMCPBatchSelector Selector;
+	if (auto Err = MCPBatchReadSelector(Params, Selector)) return Err;
+	if (!Selector.bAny)
+	{
+		return MCPError(TEXT("Pass at least one selector: actorLabels, labelPrefix, labelContains, tag, classFilter, folderPath or folderPathPrefix"));
+	}
+
+	const bool bDryRun = OptionalBool(Params, TEXT("dryRun"), false);
+	const bool bHasAutoLODField = Params->HasField(TEXT("enableAutoLODGeneration"));
+	const bool bEnableAutoLOD = OptionalBool(Params, TEXT("enableAutoLODGeneration"), true);
+	const FString TransactionLabel = OptionalString(
+		Params, TEXT("transactionLabel"), TEXT("MCP set actor HLOD layer"));
+
+	TArray<AActor*> Actors;
+	MCPBatchCollectActors(World, Selector, Actors);
+	if (Actors.Num() > MCPBatchMaxActors)
+	{
+		return MCPError(FString::Printf(
+			TEXT("The selector matched %d actors, over the maximum of %d. Narrow it."),
+			Actors.Num(), MCPBatchMaxActors));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetBoolField(TEXT("dryRun"), bDryRun);
+	Result->SetStringField(TEXT("hlodLayer"), Layer ? Layer->GetPathName() : FString());
+	Result->SetBoolField(TEXT("clearing"), Layer == nullptr);
+	Result->SetNumberField(TEXT("matched"), Actors.Num());
+	MCPNoteLoadedOnlyEnumeration(World, Result);
+	{
+		const TArray<FString> Missing = MCPBatchMissingLabels(Selector, Actors);
+		if (Missing.Num() > 0)
+		{
+			Result->SetArrayField(TEXT("missingLabels"), MCPStringListToJson(Missing));
+		}
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Rows;
+	int32 Updated = 0;
+	int32 Unchanged = 0;
+	{
+		const FScopedTransaction Transaction(FText::FromString(TransactionLabel));
+		for (AActor* Actor : Actors)
+		{
+			if (!Actor) continue;
+			UHLODLayer* Previous = Actor->GetHLODLayer();
+			const bool bWouldChange = Previous != Layer;
+
+			TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+			Row->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
+			Row->SetStringField(TEXT("actorClass"), Actor->GetClass()->GetName());
+			Row->SetStringField(TEXT("previousHLODLayer"), Previous ? Previous->GetPathName() : FString());
+
+			if (!bWouldChange && !bHasAutoLODField)
+			{
+				// Already what was asked for. Reporting it as an update would
+				// make a no-op look like work, which is what makes a rerun
+				// impossible to reason about.
+				++Unchanged;
+				Row->SetStringField(TEXT("status"), TEXT("unchanged"));
+				if (Rows.Num() < MCPBatchMaxResultRows) Rows.Add(MakeShared<FJsonValueObject>(Row));
+				continue;
+			}
+
+			if (bDryRun)
+			{
+				Row->SetStringField(TEXT("status"), TEXT("would_write"));
+				if (Rows.Num() < MCPBatchMaxResultRows) Rows.Add(MakeShared<FJsonValueObject>(Row));
+				continue;
+			}
+
+			Actor->Modify();
+			Actor->SetHLODLayer(Layer);
+			if (bHasAutoLODField)
+			{
+				// The layer only matters when the actor is allowed to build
+				// HLODs at all, so the two are settable in one call.
+				Actor->bEnableAutoLODGeneration = bEnableAutoLOD;
+			}
+			Actor->PostEditChange();
+			Actor->MarkPackageDirty();
+			++Updated;
+
+			UHLODLayer* After = Actor->GetHLODLayer();
+			Row->SetStringField(TEXT("hlodLayer"), After ? After->GetPathName() : FString());
+			Row->SetBoolField(TEXT("enableAutoLODGeneration"), Actor->bEnableAutoLODGeneration);
+			Row->SetStringField(TEXT("status"), TEXT("written"));
+			if (Rows.Num() < MCPBatchMaxResultRows) Rows.Add(MakeShared<FJsonValueObject>(Row));
+		}
+	}
+
+	Result->SetNumberField(bDryRun ? TEXT("wouldUpdate") : TEXT("updated"),
+		bDryRun ? Actors.Num() - Unchanged : Updated);
+	Result->SetNumberField(TEXT("unchanged"), Unchanged);
+	Result->SetNumberField(TEXT("returnedResults"), Rows.Num());
+	Result->SetBoolField(TEXT("resultsTruncated"), Rows.Num() < Actors.Num());
+	Result->SetArrayField(TEXT("results"), Rows);
+	if (!bDryRun && Updated > 0)
+	{
+		MCPSetUpdated(Result);
+		Result->SetStringField(TEXT("saveNote"),
+			TEXT("On a World Partition map each actor lives in its own package, so this dirties one package per actor. Save them with level(save) or editor(save_dirty). HLOD assignment takes effect on the next HLOD build."));
 	}
 	return MCPResult(Result);
 }

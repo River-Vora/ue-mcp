@@ -8,6 +8,10 @@
 #include "EngineUtils.h"
 #include "Landscape.h"
 #include "LandscapeDataAccess.h"
+// #939: FLandscapeEditDataInterface, the same height/weight accessor
+// landscape(sculpt) and landscape(paint_layer) write through, so a sample reads
+// back exactly what a paint wrote.
+#include "LandscapeEdit.h"
 #include "LandscapeEditTypes.h"
 #include "LandscapeProxy.h"
 #include "LandscapeStreamingProxy.h"
@@ -18,6 +22,9 @@
 #include "LandscapeSplinesComponent.h"
 #include "LandscapeSplineControlPoint.h"
 #include "LandscapeSplineSegment.h"
+#include "CollisionQueryParams.h"
+#include "Engine/HitResult.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "Misc/FileHelper.h"
 #include "Misc/SecureHash.h"
@@ -501,61 +508,284 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::ListLandscapeLayers(const TSharedPtr<
 	return MCPResult(Result);
 }
 
+// landscape(sample): height AND paint-layer weights at a world XY (#939).
+//
+// The action advertised "Params: x, y" and the handler required an object
+// called `point`, so BOTH documented call shapes failed with "Missing 'point'
+// parameter" and there was no working call at all. It also never returned a
+// single layer weight despite advertising "height/layers", which left reading a
+// weight to rendering the weightmap into a render target and reading that back.
+//
+// Both halves are fixed here. The position is accepted in every shape the
+// category already uses (x/y, point{x,y}, worldX/worldY, all named in the
+// schema), and the weights come from the same FLandscapeEditDataInterface that
+// landscape(paint_layer) writes through, so a sample taken after a paint reads
+// back the number that was painted. No edit layer is selected, which is what
+// makes the read the MERGED result the renderer and the physics use, rather
+// than one layer's contribution to it.
 TSharedPtr<FJsonValue> FLandscapeHandlers::SampleLandscape(const TSharedPtr<FJsonObject>& Params)
 {
-	const TSharedPtr<FJsonObject>* PointObj = nullptr;
-	if (!Params->TryGetObjectField(TEXT("point"), PointObj))
-	{
-		return MCPError(TEXT("Missing 'point' parameter"));
-	}
+	// Position, in every shape the schema names. `point` may carry a z, which is
+	// only ever used as the origin of the confirmation trace: the surface height
+	// is what this action answers, so it is never an input to itself.
+	double WorldX = 0.0;
+	double WorldY = 0.0;
+	double TraceOriginZ = 0.0;
+	bool bHavePosition = false;
 
-	FVector Point;
-	Point.X = (*PointObj)->GetNumberField(TEXT("x"));
-	Point.Y = (*PointObj)->GetNumberField(TEXT("y"));
-	Point.Z = (*PointObj)->GetNumberField(TEXT("z"));
+	const TSharedPtr<FJsonObject>* PointObj = nullptr;
+	if (Params->TryGetObjectField(TEXT("point"), PointObj) && PointObj && PointObj->IsValid())
+	{
+		(*PointObj)->TryGetNumberField(TEXT("x"), WorldX);
+		(*PointObj)->TryGetNumberField(TEXT("y"), WorldY);
+		(*PointObj)->TryGetNumberField(TEXT("z"), TraceOriginZ);
+		bHavePosition = true;
+	}
+	else if (Params->HasField(TEXT("x")) && Params->HasField(TEXT("y")))
+	{
+		WorldX = OptionalNumber(Params, TEXT("x"), 0.0);
+		WorldY = OptionalNumber(Params, TEXT("y"), 0.0);
+		bHavePosition = true;
+	}
+	else if (Params->HasField(TEXT("worldX")) && Params->HasField(TEXT("worldY")))
+	{
+		// The names landscape(find_proxy_at) takes. A caller moving between the
+		// two actions should not have to rename the same two numbers.
+		WorldX = OptionalNumber(Params, TEXT("worldX"), 0.0);
+		WorldY = OptionalNumber(Params, TEXT("worldY"), 0.0);
+		bHavePosition = true;
+	}
+	if (!bHavePosition)
+	{
+		return MCPError(TEXT("Missing sample position. Pass x and y, or point {x, y}, or worldX and worldY (all world space)."));
+	}
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	// Find the first landscape and sample height
+	// Which landscape. A label picks one explicitly; without one, every proxy in
+	// the world contributes its ULandscapeInfo and the point decides between
+	// them, because a map with two landscapes has no single right default.
+	const FString ActorLabel = OptionalString(Params, TEXT("actorLabel"));
+	TArray<ULandscapeInfo*> Candidates;
 	for (TActorIterator<ALandscapeProxy> It(World); It; ++It)
 	{
-		ALandscapeProxy* Landscape = *It;
-		if (!Landscape) continue;
-
-		// Use line trace to get the landscape height at the given point
-		FVector TraceStart(Point.X, Point.Y, Point.Z + 100000.0f);
-		FVector TraceEnd(Point.X, Point.Y, Point.Z - 100000.0f);
-
-		FHitResult HitResult;
-		FCollisionQueryParams QueryParams;
-		QueryParams.bTraceComplex = true;
-
-		if (World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_WorldStatic, QueryParams))
+		ALandscapeProxy* Proxy = *It;
+		if (!Proxy) continue;
+		if (!ActorLabel.IsEmpty() && !Proxy->GetActorLabel().Equals(ActorLabel, ESearchCase::IgnoreCase)) continue;
+		ULandscapeInfo* ProxyInfo = Proxy->GetLandscapeInfo();
+		if (!ProxyInfo) continue;
+		if (Candidates.Contains(ProxyInfo)) continue;
+		Candidates.Add(ProxyInfo);
+	}
+	if (Candidates.Num() == 0)
+	{
+		if (ActorLabel.IsEmpty())
 		{
-			if (HitResult.GetActor() && HitResult.GetActor()->IsA(ALandscapeProxy::StaticClass()))
-			{
-				auto Result = MCPSuccess();
-				Result->SetNumberField(TEXT("height"), HitResult.Location.Z);
-				TSharedPtr<FJsonObject> HitPoint = MakeShared<FJsonObject>();
-				HitPoint->SetNumberField(TEXT("x"), HitResult.Location.X);
-				HitPoint->SetNumberField(TEXT("y"), HitResult.Location.Y);
-				HitPoint->SetNumberField(TEXT("z"), HitResult.Location.Z);
-				Result->SetObjectField(TEXT("hitLocation"), HitPoint);
+			return MCPError(TEXT("No landscape in the current level. Create one with landscape(create)."));
+		}
+		return MCPError(FString::Printf(
+			TEXT("No landscape actor labelled '%s' (nothing with a registered LandscapeInfo matched)"), *ActorLabel));
+	}
 
-				TSharedPtr<FJsonObject> Normal = MakeShared<FJsonObject>();
-				Normal->SetNumberField(TEXT("x"), HitResult.Normal.X);
-				Normal->SetNumberField(TEXT("y"), HitResult.Normal.Y);
-				Normal->SetNumberField(TEXT("z"), HitResult.Normal.Z);
-				Result->SetObjectField(TEXT("normal"), Normal);
+	// Pick the landscape whose quad extent actually covers the point. With one
+	// landscape this is the only candidate and the extent test still reports
+	// whether the point is on it, which is the difference between "weight is
+	// zero here" and "this position is not on the landscape at all".
+	ULandscapeInfo* Info = nullptr;
+	FTransform LandscapeToWorld;
+	FVector LocalPoint = FVector::ZeroVector;
+	FIntRect Extent(0, 0, 0, 0);
+	for (ULandscapeInfo* Candidate : Candidates)
+	{
+		ALandscapeProxy* Reference = Candidate->GetLandscapeProxy();
+		if (!Reference) continue;
+		FIntRect CandidateExtent;
+		if (!Candidate->GetLandscapeExtent(CandidateExtent)) continue;
 
-				Result->SetBoolField(TEXT("hit"), true);
-				return MCPResult(Result);
-			}
+		const FTransform CandidateTransform = Reference->ActorToWorld();
+		const FVector CandidateLocal =
+			CandidateTransform.InverseTransformPosition(FVector(WorldX, WorldY, 0.0));
+		// RoundToInt32, not RoundToInt: the double overload of the latter
+		// returns int64 and would narrow on the way into these.
+		const int32 QuadX = FMath::RoundToInt32(CandidateLocal.X);
+		const int32 QuadY = FMath::RoundToInt32(CandidateLocal.Y);
+		const bool bCovers =
+			QuadX >= CandidateExtent.Min.X && QuadX <= CandidateExtent.Max.X &&
+			QuadY >= CandidateExtent.Min.Y && QuadY <= CandidateExtent.Max.Y;
+
+		// Remember the first candidate either way, so a point off every
+		// landscape still reports which one it was measured against.
+		if (!Info || bCovers)
+		{
+			Info = Candidate;
+			LandscapeToWorld = CandidateTransform;
+			LocalPoint = CandidateLocal;
+			Extent = CandidateExtent;
+		}
+		if (bCovers) break;
+	}
+	if (!Info)
+	{
+		return MCPError(TEXT("Landscape found but its LandscapeInfo has no registered extent yet (are its components loaded?)"));
+	}
+
+	ALandscapeProxy* ReferenceProxy = Info->GetLandscapeProxy();
+	const int32 QuadX = FMath::RoundToInt32(LocalPoint.X);
+	const int32 QuadY = FMath::RoundToInt32(LocalPoint.Y);
+	const bool bInBounds =
+		QuadX >= Extent.Min.X && QuadX <= Extent.Max.X &&
+		QuadY >= Extent.Min.Y && QuadY <= Extent.Max.Y;
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("landscape"), ReferenceProxy ? ReferenceProxy->GetActorLabel() : FString());
+	TSharedPtr<FJsonObject> QuadObj = MakeShared<FJsonObject>();
+	QuadObj->SetNumberField(TEXT("x"), QuadX);
+	QuadObj->SetNumberField(TEXT("y"), QuadY);
+	Result->SetObjectField(TEXT("quad"), QuadObj);
+	Result->SetBoolField(TEXT("inBounds"), bInBounds);
+	TSharedPtr<FJsonObject> ExtentObj = MakeShared<FJsonObject>();
+	ExtentObj->SetNumberField(TEXT("minX"), Extent.Min.X);
+	ExtentObj->SetNumberField(TEXT("minY"), Extent.Min.Y);
+	ExtentObj->SetNumberField(TEXT("maxX"), Extent.Max.X);
+	ExtentObj->SetNumberField(TEXT("maxY"), Extent.Max.Y);
+	Result->SetObjectField(TEXT("quadExtent"), ExtentObj);
+
+	if (!bInBounds)
+	{
+		Result->SetBoolField(TEXT("hit"), false);
+		Result->SetStringField(TEXT("reason"),
+			TEXT("The world position is outside this landscape's loaded quad extent, so height and weights would both read as zero rather than as measurements. On a World Partition map check landscape(find_proxy_at) first."));
+		return MCPResult(Result);
+	}
+
+	// One edit-data interface for the height and every layer, with no edit layer
+	// selected so the read is the merged result rather than one layer's own
+	// contribution to it.
+	FLandscapeEditDataInterface EditData(Info);
+
+	uint16 RawHeight = 0;
+	{
+		int32 X1 = QuadX, Y1 = QuadY, X2 = QuadX, Y2 = QuadY;
+		// GetHeightData rewrites the rect with the range it could actually
+		// serve, so an unloaded component comes back as an inverted rect rather
+		// than as a zero sample that reads like real data.
+		EditData.GetHeightData(X1, Y1, X2, Y2, &RawHeight, 0);
+		if (X2 < X1 || Y2 < Y1)
+		{
+			Result->SetBoolField(TEXT("hit"), false);
+			Result->SetStringField(TEXT("reason"),
+				TEXT("No landscape height data at this position (the covering component is not loaded). Pin it with level(load_actor_descs) first."));
+			return MCPResult(Result);
 		}
 	}
 
-	auto Result = MCPSuccess();
-	Result->SetBoolField(TEXT("hit"), false);
+	const double LocalHeight = LandscapeDataAccess::GetLocalHeight(RawHeight);
+	const FVector SurfaceWorld = LandscapeToWorld.TransformPosition(
+		FVector(static_cast<double>(QuadX), static_cast<double>(QuadY), static_cast<double>(LocalHeight)));
+
+	Result->SetBoolField(TEXT("hit"), true);
+	Result->SetNumberField(TEXT("height"), SurfaceWorld.Z);
+	Result->SetNumberField(TEXT("rawHeight"), RawHeight);
+	TSharedPtr<FJsonObject> LocationObj = MakeShared<FJsonObject>();
+	LocationObj->SetNumberField(TEXT("x"), SurfaceWorld.X);
+	LocationObj->SetNumberField(TEXT("y"), SurfaceWorld.Y);
+	LocationObj->SetNumberField(TEXT("z"), SurfaceWorld.Z);
+	Result->SetObjectField(TEXT("location"), LocationObj);
+
+	// Paint-layer weights, the half that had no read at all. Each layer is
+	// reported both as the raw 0..255 weightmap byte and as the 0..1 fraction,
+	// because the editor shows one and a material reads the other.
+	if (OptionalBool(Params, TEXT("includeLayers"), true))
+	{
+		const FString LayerFilter = OptionalString(Params, TEXT("layerName"));
+		TArray<TSharedPtr<FJsonValue>> LayerArray;
+		double TotalWeight = 0.0;
+		FString DominantLayer;
+		double DominantWeight = -1.0;
+		TArray<FString> KnownLayers;
+
+		for (const FLandscapeInfoLayerSettings& LayerSettings : Info->Layers)
+		{
+			ULandscapeLayerInfoObject* LayerInfo = LayerSettings.LayerInfoObj;
+			if (!LayerInfo) continue;
+			const FString LayerName = LayerSettings.GetLayerName().ToString();
+			KnownLayers.Add(LayerName);
+			if (!LayerFilter.IsEmpty() && !LayerName.Equals(LayerFilter, ESearchCase::IgnoreCase)) continue;
+
+			uint8 RawWeight = 0;
+			int32 X1 = QuadX, Y1 = QuadY, X2 = QuadX, Y2 = QuadY;
+			EditData.GetWeightData(LayerInfo, X1, Y1, X2, Y2, &RawWeight, 0);
+			if (X2 < X1 || Y2 < Y1) continue;
+
+			const double Weight = static_cast<double>(RawWeight) / 255.0;
+			TotalWeight += Weight;
+			if (Weight > DominantWeight)
+			{
+				DominantWeight = Weight;
+				DominantLayer = LayerName;
+			}
+
+			TSharedPtr<FJsonObject> LayerObj = MakeShared<FJsonObject>();
+			LayerObj->SetStringField(TEXT("name"), LayerName);
+			LayerObj->SetNumberField(TEXT("weight"), Weight);
+			LayerObj->SetNumberField(TEXT("weight255"), RawWeight);
+			LayerObj->SetStringField(TEXT("layerInfo"), LayerInfo->GetPathName());
+			if (UPhysicalMaterial* PhysMat = LayerInfo->GetPhysicalMaterial())
+			{
+				LayerObj->SetStringField(TEXT("physicalMaterial"), PhysMat->GetPathName());
+			}
+			LayerArray.Add(MakeShared<FJsonValueObject>(LayerObj));
+		}
+
+		Result->SetArrayField(TEXT("layers"), LayerArray);
+		Result->SetNumberField(TEXT("layerCount"), LayerArray.Num());
+		Result->SetNumberField(TEXT("totalWeight"), TotalWeight);
+		if (!DominantLayer.IsEmpty())
+		{
+			Result->SetStringField(TEXT("dominantLayer"), DominantLayer);
+			Result->SetNumberField(TEXT("dominantWeight"), DominantWeight);
+		}
+		if (!LayerFilter.IsEmpty() && LayerArray.Num() == 0)
+		{
+			Result->SetStringField(TEXT("layerNote"), FString::Printf(
+				TEXT("No layer named '%s' is registered on this landscape. Registered layers: [%s]. Add one with landscape(add_layer_info)."),
+				*LayerFilter, *FString::Join(KnownLayers, TEXT(", "))));
+		}
+	}
+
+	// A confirmation trace against the collision heightfield, kept because it is
+	// the only source of a surface normal and because a disagreement between it
+	// and the heightmap is itself the answer to "is my collision stale".
+	{
+		const double TraceZ = FMath::Max(TraceOriginZ, SurfaceWorld.Z);
+		const FVector TraceStart(SurfaceWorld.X, SurfaceWorld.Y, TraceZ + 100000.0);
+		const FVector TraceEnd(SurfaceWorld.X, SurfaceWorld.Y, TraceZ - 200000.0);
+		FHitResult HitResult;
+		FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(MCPLandscapeSample), /*bTraceComplex*/ true);
+		const bool bTraceHit =
+			World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_WorldStatic, QueryParams) &&
+			HitResult.GetActor() != nullptr &&
+			HitResult.GetActor()->IsA(ALandscapeProxy::StaticClass());
+		Result->SetBoolField(TEXT("traceHit"), bTraceHit);
+		if (bTraceHit)
+		{
+			TSharedPtr<FJsonObject> HitPoint = MakeShared<FJsonObject>();
+			HitPoint->SetNumberField(TEXT("x"), HitResult.Location.X);
+			HitPoint->SetNumberField(TEXT("y"), HitResult.Location.Y);
+			HitPoint->SetNumberField(TEXT("z"), HitResult.Location.Z);
+			Result->SetObjectField(TEXT("hitLocation"), HitPoint);
+			Result->SetNumberField(TEXT("traceHeight"), HitResult.Location.Z);
+
+			TSharedPtr<FJsonObject> Normal = MakeShared<FJsonObject>();
+			Normal->SetNumberField(TEXT("x"), HitResult.ImpactNormal.X);
+			Normal->SetNumberField(TEXT("y"), HitResult.ImpactNormal.Y);
+			Normal->SetNumberField(TEXT("z"), HitResult.ImpactNormal.Z);
+			Result->SetObjectField(TEXT("normal"), Normal);
+		}
+	}
+
+	Result->SetStringField(TEXT("note"),
+		TEXT("height and layer weights come from the landscape's own height and weight data (the merged result of every edit layer), so they are exact and do not depend on collision. traceHeight and normal come from a collision trace and are absent when collision is unbuilt or the proxy is streamed out."));
 	return MCPResult(Result);
 }
 

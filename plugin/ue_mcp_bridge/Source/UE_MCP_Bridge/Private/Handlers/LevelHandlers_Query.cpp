@@ -32,6 +32,8 @@
 #include "Components/ActorComponent.h"
 #include "Components/BoxComponent.h"
 #include "Components/DecalComponent.h"
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Components/MeshComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/SceneComponent.h"
@@ -795,6 +797,18 @@ TSharedPtr<FJsonValue> FLevelHandlers::QueryComponents(const TSharedPtr<FJsonObj
 					MeshObject->SetField(TEXT("assetPath"), MakeShared<FJsonValueNull>());
 				}
 				MeshObject->SetBoolField(TEXT("missing"), bMissingMesh);
+				// #986: how many instances an ISM/HISM holds. Without it a
+				// component holding three instances and one holding three
+				// hundred thousand are the same row, and the decision about
+				// whether to touch it is made blind. Note this is a projected
+				// value, not an aggregate: groupBy/countBy count COMPONENTS, so
+				// use level(summarize_static_mesh_usage) for placement totals.
+				if (const UInstancedStaticMeshComponent* ISMC = Cast<UInstancedStaticMeshComponent>(Component))
+				{
+					MeshObject->SetNumberField(TEXT("instanceCount"), ISMC->GetInstanceCount());
+					MeshObject->SetBoolField(TEXT("hierarchical"),
+						ISMC->IsA<UHierarchicalInstancedStaticMeshComponent>());
+				}
 				Row->SetObjectField(TEXT("mesh"), MeshObject);
 			}
 
