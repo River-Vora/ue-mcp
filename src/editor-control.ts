@@ -4,7 +4,7 @@ import { spawn } from "child_process";
 import * as net from "net";
 import WebSocket from "ws";
 import { readUeMcpConfig, type ProjectContext } from "./project.js";
-import { findEngineInstall } from "./deployer.js";
+import { EngineResolutionError, selectEngine, trySelectEngine, type EngineLookup } from "./engine-root.js";
 import { invalidatePluginFreshness } from "./plugin-freshness.js";
 import {
   editorOwnsProject,
@@ -51,85 +51,38 @@ function readEngineAssociation(projectPath: string): string | null {
   }
 }
 
-function findUEBuildTool(engineAssociation?: string | null, configuredPath?: string | null): string | null {
-  // UE_BUILD_TOOL_PATH is one value for the process and still wins;
-  // `editor.buildToolPath` is the per-project equivalent (#817), which matters
-  // as soon as two projects are on two engine versions.
-  const envPath = process.env.UE_BUILD_TOOL_PATH;
-  if (envPath) return envPath;
-  if (typeof configuredPath === "string" && configuredPath.trim() !== "") return configuredPath.trim();
-
-  const scriptName = IS_WINDOWS ? "Build.bat" : "Build.sh";
-
-  // Prefer the engine the project's EngineAssociation actually points at, so a
-  // 5.7 project builds with 5.7's Build tool - not whatever version happens to
-  // sort first in the fallback search below. The editor launch already respects
-  // the association (findEditorExecutable); without this the CLI build could
-  // silently compile against a different engine than the editor runs, masking
-  // API incompatibilities until the editor's own rebuild fails.
-  const associatedRoot = findEngineInstall(engineAssociation ?? null);
-  if (associatedRoot) {
-    const associatedTool = path.join(associatedRoot, "Engine", "Build", "BatchFiles", scriptName);
-    if (fs.existsSync(associatedTool)) return associatedTool;
-  }
-
-  const versions = ["5.8", "5.7", "5.6", "5.5", "5.4", "5.3"];
-
-  const searchRoots: string[] = IS_WINDOWS
-    ? [
-        "C:/Program Files/Epic Games",
-        "D:/Program Files/Epic Games",
-        "E:/Program Files/Epic Games",
-        "C:/Epic Games",
-        "D:/Epic Games",
-        "E:/Epic Games",
-      ]
-    : process.platform === "darwin"
-      ? ["/Users/Shared/Epic Games"]
-      : [
-          path.join(process.env.HOME ?? "/home", "UnrealEngine"),
-          "/opt/UnrealEngine",
-        ];
-
-  for (const basePath of searchRoots) {
-    for (const version of versions) {
-      const buildToolPath = path.join(basePath, `UE_${version}`, "Engine", "Build", "BatchFiles", scriptName);
-      if (fs.existsSync(buildToolPath)) {
-        return buildToolPath;
-      }
-    }
-  }
-
-  // Linux source builds: ~/UnrealEngine/Engine/Build/BatchFiles/Build.sh (no version subdir)
-  if (!IS_WINDOWS && process.platform !== "darwin") {
-    const home = process.env.HOME ?? "/home";
-    const sourceBuild = path.join(home, "UnrealEngine", "Engine", "Build", "BatchFiles", "Build.sh");
-    if (fs.existsSync(sourceBuild)) return sourceBuild;
-  }
-
-  return null;
+/**
+ * The engine lookup for one project: its .uproject, its association and its
+ * per-project `editor:` config, handed to the single resolver in
+ * `engine-root.ts` (#959, #961, #962, #974).
+ */
+function engineLookupFor(
+  projectPath: string | null | undefined,
+  engineAssociation?: string | null,
+  editorConfig?: { path?: string; buildToolPath?: string },
+): EngineLookup {
+  return {
+    projectPath: projectPath ?? null,
+    engineAssociation: engineAssociation ?? null,
+    configBuildToolPath: editorConfig?.buildToolPath ?? null,
+    configEditorPath: editorConfig?.path ?? null,
+  };
 }
 
 /**
- * #766/#790: the editor binary lives at a different path per platform. Only the
- * Win64 path was ever checked, which is the whole reason start_editor was
- * Windows-only - engine discovery itself (findUEBuildTool) has always worked
- * cross-platform. On macOS the launchable binary is inside the .app bundle.
+ * The editor binary this project launches, or null.
+ *
+ * The whole order lives in `engine-root.ts` now: env pins, the per-project
+ * config, the EngineAssociation (as a path, a registered GUID or a launcher
+ * version), an engine tree beside or above the project, the engine the project
+ * was last opened with, then the default install locations. The build tool goes
+ * through the same list, so the editor this launches and the engine
+ * `build_project` compiles with are the same tree by construction.
+ *
+ * #766/#790: the binary lives at a different path per platform, which is what
+ * `engineEditorBinaries` covers. On macOS the launchable one is inside the .app
+ * bundle.
  */
-function editorBinaryCandidates(engineRoot: string): string[] {
-  const binaries = path.join(engineRoot, "Engine", "Binaries");
-  if (IS_WINDOWS) {
-    return [path.join(binaries, "Win64", "UnrealEditor.exe")];
-  }
-  if (process.platform === "darwin") {
-    return [
-      path.join(binaries, "Mac", "UnrealEditor.app", "Contents", "MacOS", "UnrealEditor"),
-      path.join(binaries, "Mac", "UnrealEditor"),
-    ];
-  }
-  return [path.join(binaries, "Linux", "UnrealEditor")];
-}
-
 function findEditorExecutable(project?: ProjectContext): string | null {
   // Same rule as the build tool: the env var is the global default and wins,
   // `editor.path` is how one project names its own binary (#817).
@@ -138,22 +91,26 @@ function findEditorExecutable(project?: ProjectContext): string | null {
   const configured = project?.config.editor?.path;
   if (typeof configured === "string" && configured.trim() !== "") return configured.trim();
 
-  const associatedEngineRoot = findEngineInstall(project?.engineAssociation ?? null);
-  if (associatedEngineRoot) {
-    for (const candidate of editorBinaryCandidates(associatedEngineRoot)) {
-      if (fs.existsSync(candidate)) return candidate;
-    }
+  const lookup = engineLookupFor(project?.projectPath, project?.engineAssociation, project?.config.editor);
+  return trySelectEngine(lookup, "editor")?.editorExecutable ?? null;
+}
+
+/**
+ * Why no editor binary was found, naming every path probed.
+ *
+ * A user who is told only to set an env var cannot tell a missing install from
+ * a wrong root from a layout the resolver does not understand (#974).
+ */
+function editorExecutableFailure(project?: ProjectContext): string {
+  try {
+    selectEngine(
+      engineLookupFor(project?.projectPath, project?.engineAssociation, project?.config.editor),
+      "editor",
+    );
+  } catch (err) {
+    if (err instanceof EngineResolutionError) return err.message;
   }
-
-  const buildTool = findUEBuildTool(project?.engineAssociation ?? null, project?.config.editor?.buildToolPath);
-  if (!buildTool) return null;
-
-  const engineRoot = path.resolve(buildTool, "..", "..", "..", "..");
-  for (const candidate of editorBinaryCandidates(engineRoot)) {
-    if (fs.existsSync(candidate)) return candidate;
-  }
-
-  return null;
+  return NO_EDITOR_BINARY_MSG;
 }
 
 /**
@@ -561,7 +518,7 @@ export async function startEditor(
   if (!editorExe) {
     return {
       success: false,
-      message: NO_EDITOR_BINARY_MSG,
+      message: editorExecutableFailure(project),
     };
   }
 
@@ -923,31 +880,60 @@ function getPlatformString(): string {
   return "Linux";
 }
 
+export interface BuildOptions {
+  onOutput?: (line: string) => void;
+  /** Development (default), DebugGame, Shipping, Test. */
+  configuration?: string;
+  /** Win64, Mac, Linux. Defaults to the host platform. */
+  platform?: string;
+  /** Pass -Clean, which makes UnrealBuildTool rebuild from scratch. */
+  clean?: boolean;
+}
+
+/**
+ * Compile a project's C++ out of process, with UnrealBuildTool.
+ *
+ * Out of process is the point: UnrealBuildTool refuses to link while an editor
+ * holds the module DLLs, so a full rebuild is exactly the case where the editor
+ * must be down, and an editor that is down cannot answer a bridge call (#958).
+ */
 export async function buildProject(
   projectPath: string,
-  opts: { onOutput?: (line: string) => void } = {},
+  opts: BuildOptions = {},
 ): Promise<BuildResult> {
   const resolvedPath = path.resolve(projectPath);
-  const buildTool = findUEBuildTool(
-    readEngineAssociation(resolvedPath),
-    readProjectEditorConfig(resolvedPath).buildToolPath,
-  );
-  if (!buildTool) {
-    return {
-      success: false,
-      exitCode: null,
-      message:
-        "Unreal Engine build tool not found. Set UE_BUILD_TOOL_PATH or install UE5.3+ to a default location.",
-    };
-  }
 
   if (!fs.existsSync(resolvedPath)) {
     return { success: false, exitCode: null, message: `Project file not found: ${resolvedPath}` };
   }
 
+  // The failure names every location probed. The old message named one env var
+  // and nothing else, so a missing tool, a wrong root and an unsupported layout
+  // all read identically (#974).
+  let buildTool: string;
+  try {
+    const engine = selectEngine(
+      engineLookupFor(
+        resolvedPath,
+        readEngineAssociation(resolvedPath),
+        readProjectEditorConfig(resolvedPath),
+      ),
+      "buildTool",
+    );
+    if (!engine.buildTool) throw new EngineResolutionError("Resolved engine names no build tool.", []);
+    buildTool = engine.buildTool;
+  } catch (err) {
+    return {
+      success: false,
+      exitCode: null,
+      message: err instanceof EngineResolutionError ? err.message : String(err),
+    };
+  }
+
   const projectName = path.basename(resolvedPath, ".uproject");
   const target = `${projectName}Editor`;
-  const platform = getPlatformString();
+  const platform = opts.platform?.trim() || getPlatformString();
+  const configuration = opts.configuration?.trim() || "Development";
 
   // #740: the quotes around the project path are SHELL syntax, not part of the
   // value. On Windows the args are joined into a single `cmd /c` string, so
@@ -956,8 +942,8 @@ export async function buildProject(
   // characters and reported "Unable to find project file" for a file that was
   // plainly there - while the same command pasted into a terminal worked,
   // because the shell removed them first.
-  const commonArgs = [target, platform, "Development"];
-  const tailArgs = ["-WaitMutex", "-FromMsBuild"];
+  const commonArgs = [target, platform, configuration];
+  const tailArgs = ["-WaitMutex", "-FromMsBuild", ...(opts.clean ? ["-Clean"] : [])];
   const windowsArgs = [...commonArgs, `-Project="${resolvedPath}"`, ...tailArgs];
   const posixArgs = [...commonArgs, `-Project=${resolvedPath}`, ...tailArgs];
 
@@ -988,7 +974,7 @@ export async function buildProject(
       invalidatePluginFreshness(resolvedPath);
       resolve(
         code === 0
-          ? { success: true, exitCode: 0, message: "Build succeeded" }
+          ? { success: true, exitCode: 0, message: `Build succeeded (${target} ${platform} ${configuration})` }
           : { success: false, exitCode: code, message: `Build failed with exit code ${code}` },
       );
     });
