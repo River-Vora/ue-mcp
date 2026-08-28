@@ -2575,6 +2575,256 @@ TSharedPtr<FJsonValue> FAssetHandlers::ImportStringTable(const TSharedPtr<FJsonO
 	return MCPResult(Result);
 }
 
+// ---------------------------------------------------------------------------
+// import_stringtable_csv (#978)
+//
+// String Tables could be created and inspected but not refreshed from a CSV
+// source with any confidence, so a user kept the CSV as the canonical copy and
+// ran a custom editor script instead. This is the same engine importer
+// FStringTable exposes, wrapped so the caller gets the three things the script
+// was written to provide: the CSV is proved to parse and to carry the expected
+// keys BEFORE the asset is touched, the result names exactly which keys were
+// added, updated and removed, and the save is reported rather than assumed.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+	/** Every key and source string in a table, as a plain map. */
+	void MCPSnapshotStringTable(const UStringTable* Table, TMap<FString, FString>& Out)
+	{
+		Out.Reset();
+		if (!Table) return;
+		Table->GetStringTable()->EnumerateKeysAndSourceStrings(
+			[&Out](const FTextKey& Key, const FString& SourceString) -> bool
+			{
+				Out.Add(Key.ToString(), SourceString);
+				return true;
+			});
+	}
+
+	/** Run the engine's CSV importer over Table, on whichever engine this is. */
+	bool MCPImportStringTableCsvFile(UStringTable* Table, const FString& FilePath)
+	{
+		if (!Table) return false;
+#if UE_MCP_HAS_5_8_API
+		return Table->GetMutableStringTable()->ImportStringsFromCSVFile(FilePath);
+#else
+		return Table->GetMutableStringTable()->ImportStrings(FilePath);
+#endif
+	}
+
+	TArray<TSharedPtr<FJsonValue>> MCPSortedKeysToJson(const TArray<FString>& Keys)
+	{
+		TArray<FString> Sorted = Keys;
+		Sorted.Sort();
+		TArray<TSharedPtr<FJsonValue>> Out;
+		Out.Reserve(Sorted.Num());
+		for (const FString& Key : Sorted) Out.Add(MakeShared<FJsonValueString>(Key));
+		return Out;
+	}
+}
+
+TSharedPtr<FJsonValue> FAssetHandlers::ImportStringTableCsv(const TSharedPtr<FJsonObject>& Params)
+{
+	MCP_CHECK_GAME_THREAD();
+
+	FString AssetPath;
+	UStringTable* StringTable = nullptr;
+	if (auto Err = LoadStringTableAsset(Params, AssetPath, StringTable)) return Err;
+
+	if (MCPIsProtectedAssetPath(AssetPath))
+	{
+		return MCPError(FString::Printf(
+			TEXT("'%s' is on a protected mount (/Engine/, /Script/, /Memory/, /Temp/), which the bridge never writes to."),
+			*AssetPath));
+	}
+
+	FString CsvPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("csvPath"), TEXT("filePath"), CsvPath)) return Err;
+	// A relative path is read against the project directory, not the editor's
+	// working directory, which is not something a caller can predict.
+	if (FPaths::IsRelative(CsvPath))
+	{
+		CsvPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir(), CsvPath);
+	}
+	if (!FPaths::FileExists(CsvPath))
+	{
+		return MCPError(FString::Printf(TEXT("CSV file not found: %s"), *CsvPath));
+	}
+
+	const bool bReplaceExisting = OptionalBool(Params, TEXT("replaceExisting"), false);
+	const bool bRequireExactKeys = OptionalBool(Params, TEXT("requireExactKeys"), false);
+	const bool bSave = OptionalBool(Params, TEXT("save"), true);
+
+	TArray<FString> ExpectedKeys;
+	const TArray<TSharedPtr<FJsonValue>>* ExpectedField = nullptr;
+	if (Params->TryGetArrayField(TEXT("expectedKeys"), ExpectedField) && ExpectedField)
+	{
+		ExpectedKeys = JsonArrayToStringList(ExpectedField);
+	}
+
+	// Parse and validate against a throwaway table first, so a malformed CSV or
+	// a key set that does not match expectations never reaches the asset.
+	UStringTable* Staged = NewObject<UStringTable>(GetTransientPackage(), NAME_None, RF_Transient);
+	if (!Staged)
+	{
+		return MCPError(TEXT("Could not create the staging StringTable used to validate the CSV."));
+	}
+	const FGCRootScope KeepStagedAlive(Staged);
+	if (!MCPImportStringTableCsvFile(Staged, CsvPath))
+	{
+		return MCPError(FString::Printf(
+			TEXT("The engine's String Table importer rejected '%s'. Nothing was changed. ")
+			TEXT("The file must be a CSV whose first column is the entry key; the editor log carries the parse error."),
+			*CsvPath));
+	}
+
+	TMap<FString, FString> Incoming;
+	MCPSnapshotStringTable(Staged, Incoming);
+	if (Incoming.Num() == 0)
+	{
+		return MCPError(FString::Printf(
+			TEXT("'%s' parsed but carried no entries, so nothing was changed."), *CsvPath));
+	}
+
+	if (ExpectedKeys.Num() > 0)
+	{
+		TArray<FString> MissingKeys;
+		for (const FString& Expected : ExpectedKeys)
+		{
+			if (!Incoming.Contains(Expected)) MissingKeys.Add(Expected);
+		}
+		TArray<FString> UnexpectedKeys;
+		if (bRequireExactKeys)
+		{
+			for (const TPair<FString, FString>& Entry : Incoming)
+			{
+				if (!ExpectedKeys.Contains(Entry.Key)) UnexpectedKeys.Add(Entry.Key);
+			}
+		}
+		if (MissingKeys.Num() > 0 || UnexpectedKeys.Num() > 0)
+		{
+			TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+			Obj->SetBoolField(TEXT("success"), false);
+			Obj->SetStringField(TEXT("error"), FString::Printf(
+				TEXT("'%s' does not match the expected key set, so the String Table was not touched: %d expected key(s) missing%s."),
+				*CsvPath, MissingKeys.Num(),
+				bRequireExactKeys
+					? *FString::Printf(TEXT(", %d unexpected"), UnexpectedKeys.Num())
+					: TEXT("")));
+			Obj->SetStringField(TEXT("reason"), TEXT("key_set_mismatch"));
+			Obj->SetStringField(TEXT("assetPath"), AssetPath);
+			Obj->SetStringField(TEXT("csvPath"), CsvPath);
+			Obj->SetNumberField(TEXT("csvKeyCount"), Incoming.Num());
+			Obj->SetArrayField(TEXT("missingKeys"), MCPSortedKeysToJson(MissingKeys));
+			Obj->SetArrayField(TEXT("unexpectedKeys"), MCPSortedKeysToJson(UnexpectedKeys));
+			return MakeShared<FJsonValueObject>(Obj);
+		}
+	}
+
+	TMap<FString, FString> Before;
+	MCPSnapshotStringTable(StringTable, Before);
+
+	// The merge runs first and the pruning second, so a parse that somehow
+	// fails on the second pass cannot leave the table emptied.
+	StringTable->Modify(true);
+	if (!MCPImportStringTableCsvFile(StringTable, CsvPath))
+	{
+		return MCPError(FString::Printf(
+			TEXT("'%s' parsed into the staging table but not into '%s'. The table is unchanged apart from any partial merge the importer applied; re-read it before retrying."),
+			*CsvPath, *AssetPath));
+	}
+
+	TArray<FString> RemovedKeys;
+	if (bReplaceExisting)
+	{
+		for (const TPair<FString, FString>& Entry : Before)
+		{
+			if (!Incoming.Contains(Entry.Key))
+			{
+				StringTable->GetMutableStringTable()->RemoveSourceString(FTextKey(Entry.Key));
+				RemovedKeys.Add(Entry.Key);
+			}
+		}
+	}
+
+	TMap<FString, FString> After;
+	MCPSnapshotStringTable(StringTable, After);
+
+	TArray<FString> AddedKeys;
+	TArray<FString> UpdatedKeys;
+	for (const TPair<FString, FString>& Entry : After)
+	{
+		if (const FString* Previous = Before.Find(Entry.Key))
+		{
+			if (!Previous->Equals(Entry.Value, ESearchCase::CaseSensitive))
+			{
+				UpdatedKeys.Add(Entry.Key);
+			}
+		}
+		else
+		{
+			AddedKeys.Add(Entry.Key);
+		}
+	}
+
+	UPackage* Package = StringTable->GetOutermost();
+	bool bPersisted = false;
+	FString PersistReason;
+	if (bSave)
+	{
+		bPersisted = SaveAssetPackage(StringTable);
+		if (!bPersisted)
+		{
+			PersistReason = FString::Printf(
+				TEXT("The editor refused to write '%s'. The entries are in memory only."),
+				Package ? *Package->GetName() : *AssetPath);
+		}
+	}
+	else
+	{
+		PersistReason = TEXT("save=false was requested, so the imported entries are in memory only until the package is saved.");
+	}
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	SetStringTableInfoFields(Result, StringTable);
+	Result->SetStringField(TEXT("assetPath"), AssetPath);
+	Result->SetStringField(TEXT("csvPath"), CsvPath);
+	Result->SetBoolField(TEXT("replaceExisting"), bReplaceExisting);
+	Result->SetNumberField(TEXT("csvKeyCount"), Incoming.Num());
+	Result->SetNumberField(TEXT("entryCountBefore"), Before.Num());
+	Result->SetNumberField(TEXT("entryCountAfter"), After.Num());
+	Result->SetArrayField(TEXT("addedKeys"), MCPSortedKeysToJson(AddedKeys));
+	Result->SetArrayField(TEXT("updatedKeys"), MCPSortedKeysToJson(UpdatedKeys));
+	Result->SetArrayField(TEXT("removedKeys"), MCPSortedKeysToJson(RemovedKeys));
+	TArray<FString> AllKeys;
+	After.GetKeys(AllKeys);
+	Result->SetArrayField(TEXT("keys"), MCPSortedKeysToJson(AllKeys));
+	if (ExpectedKeys.Num() > 0)
+	{
+		Result->SetNumberField(TEXT("expectedKeyCount"), ExpectedKeys.Num());
+		Result->SetBoolField(TEXT("expectedKeysPresent"), true);
+	}
+	Result->SetBoolField(TEXT("persisted"), bPersisted);
+	Result->SetBoolField(TEXT("saved"), bPersisted);
+	if (Package)
+	{
+		Result->SetStringField(TEXT("packageName"), Package->GetName());
+		Result->SetBoolField(TEXT("packageDirty"), Package->IsDirty());
+	}
+	if (!bPersisted)
+	{
+		Result->SetStringField(TEXT("persistError"), PersistReason);
+		if (bSave)
+		{
+			Result->SetBoolField(TEXT("success"), false);
+			Result->SetStringField(TEXT("error"), PersistReason);
+		}
+	}
+	return MCPResult(Result);
+}
+
 // --- Reimport ---------------------------------------------------------
 
 
