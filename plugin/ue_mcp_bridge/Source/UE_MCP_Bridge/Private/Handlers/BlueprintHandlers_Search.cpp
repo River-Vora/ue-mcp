@@ -293,6 +293,17 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SearchCallSites(const TSharedPtr<FJso
 		FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 	IAssetRegistry& Registry = AssetRegistryModule.Get();
 
+	// An audit run while the registry is still scanning would silently miss
+	// every asset it has not reached yet, and report the shortfall as "no call
+	// sites". Waiting is the correct trade here: this handler carries its own
+	// long timeout precisely because it is allowed to be slow, and a wrong
+	// answer to "does anything still call this" is worse than a slow one.
+	const bool bWaitedForRegistry = Registry.IsLoadingAssets();
+	if (bWaitedForRegistry)
+	{
+		Registry.WaitForCompletion();
+	}
+
 	FARFilter Filter;
 	Filter.PackagePaths.Add(FName(*Directory));
 	Filter.bRecursivePaths = true;
@@ -568,6 +579,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SearchCallSites(const TSharedPtr<FJso
 		Stats->SetNumberField(TEXT("graphsScanned"), GraphsScanned);
 		Stats->SetNumberField(TEXT("nodesScanned"), NodesScanned);
 		Stats->SetBoolField(TEXT("narrowedByRegistry"), bNarrowing);
+		Stats->SetBoolField(TEXT("waitedForAssetRegistryScan"), bWaitedForRegistry);
 		Stats->SetBoolField(TEXT("includedLevelScripts"), bIncludeLevelScripts);
 		if (bIncludeLevelScripts)
 		{
