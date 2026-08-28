@@ -142,4 +142,35 @@ private:
 	static TSharedPtr<FJsonValue> AddPostProcessBlendable(const TSharedPtr<FJsonObject>& Params);
 	// #637: export a selected actor's mesh to FBX plus a metadata sidecar JSON.
 	static TSharedPtr<FJsonValue> ExportActorFbx(const TSharedPtr<FJsonObject>& Params);
+	// #910/#943/#912: one editor-side component query. Filters, projection,
+	// predicates, grouping and counts all evaluate here, because shipping the
+	// candidates out to be filtered by the client is what made these questions
+	// megabyte payloads and Python loops.
+	static TSharedPtr<FJsonValue> QueryComponents(const TSharedPtr<FJsonObject>& Params);
+	// #984/#941/#907/#987: the write side of the same complaint. A selector
+	// that runs in the editor, so a level-wide edit is one call rather than a
+	// generated label list and a loop.
+	static TSharedPtr<FJsonValue> BatchSetActorProperties(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> BulkSetComponentProperty(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> RemoveComponentsByClass(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SpawnActorsBatch(const TSharedPtr<FJsonObject>& Params);
+	// #944: rerun construction on PLACED instances. blueprint(run_construction_script)
+	// only touches a temporary actor, and the Python wrapper has no equivalent.
+	static TSharedPtr<FJsonValue> RerunConstruction(const TSharedPtr<FJsonObject>& Params);
+	// #915: rebuild collision after mesh data changed under it. Stale collision
+	// makes line_trace report a miss through solid geometry.
+	static TSharedPtr<FJsonValue> RecreatePhysicsState(const TSharedPtr<FJsonObject>& Params);
+	// #914: geometric overlap between two components, with the unscaled local
+	// bounds a caller needs to reason about the answer.
+	static TSharedPtr<FJsonValue> TestComponentOverlap(const TSharedPtr<FJsonObject>& Params);
+	// #911: wrap UEditorActorSubsystem::ConvertActors for Brush to StaticMesh,
+	// with the safety checks that operation needs because it destroys its input.
+	static TSharedPtr<FJsonValue> ConvertBrushesToStaticMesh(const TSharedPtr<FJsonObject>& Params);
+	// #946: per-slot COMPONENT material overrides on placed actors, which is a
+	// different thing from the mesh asset's own slots.
+	static TSharedPtr<FJsonValue> SetComponentMaterials(const TSharedPtr<FJsonObject>& Params);
+	// #956: a verification subject that cannot be saved into the map.
+	static TSharedPtr<FJsonValue> SpawnTransientActor(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> DestroyTransientActor(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ListTransientActors(const TSharedPtr<FJsonObject>& Params);
 };

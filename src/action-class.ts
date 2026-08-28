@@ -78,6 +78,9 @@ const MUTATE_VERBS: ReadonlySet<string> = new Set<string>([
   "toggle", "reactivate", "reorder", "wrap", "sculpt", "paint", "snap", "aim",
   "undo", "redo", "purge", "begin", "end", "lock", "unlock", "drop", "retarget",
   "install", "uninstall", "restore", "revert", "activate", "deactivate",
+  // "destroy" is what the engine calls deleting an actor, and the asset
+  // lexicon never needed it because assets are deleted rather than destroyed.
+  "destroy",
   "trigger", "emit", "send", "post", "publish", "upload", "convert", "promote",
   "mark", "dirty", "refresh", "trim", "crop", "resize", "rotate", "translate", "nudge",
   "transform", "split", "merge", "patch", "seek", "mute", "unmute",
@@ -172,6 +175,18 @@ const OVERRIDES: Readonly<Record<string, ActionClass>> = {
   // "measure" is in the read lexicon, so this entry is belt and braces rather
   // than load bearing, and it documents the intent at the point of use.
   "animation.measure_natural_speed": "read",
+  // ── Level refresh and inspect actions the verb lexicon cannot read ──
+  // "rerun" is not "run" and "recreate" is not "create", so neither reaches
+  // the lexicon. Both destroy and rebuild engine state on placed actors.
+  "level.rerun_construction": "mutate",
+  "level.recreate_physics_state": "mutate",
+  // Compares two components' bounds and transforms. "test" is not a verb the
+  // lexicon knows, and this one only measures.
+  "level.test_component_overlap": "read",
+  // Reads a property off many assets at once. "bulk" is a mutate verb because
+  // every batch action before this one wrote, but the shape word is not the
+  // verb: the read verb after it is.
+  "asset.bulk_read_properties": "read",
   // Reads whose first segment is not a verb at all.
   "level.line_trace": "read",
   // Batch of the same collision queries. `bulk` is a mutate verb because most

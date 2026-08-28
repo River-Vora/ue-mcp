@@ -188,6 +188,31 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("spawn_grid"), &SpawnGrid);
 	Registry.RegisterHandler(TEXT("batch_translate"), &BatchTranslate);
 	Registry.RegisterHandler(TEXT("place_actors_batch"), &PlaceActorsBatch);
+	// #910/#943/#912: the general editor-side component query. A whole-map
+	// scan with a projection can take a while on a 4,000 actor level, so it
+	// gets its own timeout rather than the 30 second default.
+	Registry.RegisterHandlerWithTimeout(TEXT("query_components"), &QueryComponents, 300.0f);
+	// #984/#941/#907/#987: level-wide writes driven by an editor-side selector.
+	// Each can touch thousands of actors, so each gets its own timeout.
+	Registry.RegisterHandlerWithTimeout(TEXT("batch_set_actor_properties"), &BatchSetActorProperties, 300.0f);
+	Registry.RegisterHandlerWithTimeout(TEXT("bulk_set_component_property"), &BulkSetComponentProperty, 300.0f);
+	Registry.RegisterHandlerWithTimeout(TEXT("remove_components_by_class"), &RemoveComponentsByClass, 300.0f);
+	Registry.RegisterHandlerWithTimeout(TEXT("spawn_actors_batch"), &SpawnActorsBatch, 300.0f);
+	// #944/#915/#914: refresh state the editor is caching, and read the bounds
+	// a caller needs to check the result.
+	Registry.RegisterHandlerWithTimeout(TEXT("rerun_construction_scripts"), &RerunConstruction, 300.0f);
+	Registry.RegisterHandlerWithTimeout(TEXT("recreate_physics_state"), &RecreatePhysicsState, 300.0f);
+	Registry.RegisterHandler(TEXT("test_component_overlap"), &TestComponentOverlap);
+	// #911: BSP to StaticMesh. Generating meshes for hundreds of brushes takes
+	// far longer than the default handler timeout.
+	Registry.RegisterHandlerWithTimeout(TEXT("convert_brushes_to_static_mesh"), &ConvertBrushesToStaticMesh, 600.0f);
+	// #946: component-level material overrides on placed actors.
+	Registry.RegisterHandlerWithTimeout(TEXT("set_component_materials"), &SetComponentMaterials, 300.0f);
+	// #956: a transient verification subject, and the two actions that keep it
+	// from being left behind.
+	Registry.RegisterHandler(TEXT("spawn_transient_actor"), &SpawnTransientActor);
+	Registry.RegisterHandler(TEXT("destroy_transient_actor"), &DestroyTransientActor);
+	Registry.RegisterHandler(TEXT("list_transient_actors"), &ListTransientActors);
 }
 
 TSharedPtr<FJsonValue> FLevelHandlers::GetOutliner(const TSharedPtr<FJsonObject>& Params)
@@ -198,6 +223,13 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetOutliner(const TSharedPtr<FJsonObject>
 
 	FString ClassFilter = OptionalString(Params, TEXT("classFilter"));
 	FString NameFilter = OptionalString(Params, TEXT("nameFilter"));
+	// #911: classFilter has always been a case-sensitive substring on the class
+	// name, which cannot express "only this exact class". Combined with the
+	// folder filters below, that is what forced a get_actor_details round trip
+	// per entry to narrow a folder to one class.
+	const bool bExactClass = OptionalBool(Params, TEXT("exactClass"), false);
+	const FString FolderPathFilter = OptionalString(Params, TEXT("folderPath"));
+	const FString FolderPathPrefixFilter = OptionalString(Params, TEXT("folderPathPrefix"));
 	// Default 50 keeps us snappy on World Partition projects whose levels
 	// contain hundreds of streaming-proxy / HLOD actors. Callers who need the
 	// full list can pass a larger limit explicitly.
@@ -236,13 +268,35 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetOutliner(const TSharedPtr<FJsonObject>
 
 		FString ActorLabel = Actor->GetActorLabel();
 
-		if (!ClassFilter.IsEmpty() && !ActorClass.Contains(ClassFilter))
+		if (!ClassFilter.IsEmpty())
 		{
-			continue;
+			const bool bClassMatches = bExactClass
+				? ActorClass.Equals(ClassFilter, ESearchCase::IgnoreCase)
+				: ActorClass.Contains(ClassFilter);
+			if (!bClassMatches)
+			{
+				continue;
+			}
 		}
 		if (!NameFilter.IsEmpty() && !ActorName.Contains(NameFilter) && !ActorLabel.Contains(NameFilter))
 		{
 			continue;
+		}
+		if (!FolderPathFilter.IsEmpty() || !FolderPathPrefixFilter.IsEmpty())
+		{
+			const FString Folder = Actor->GetFolderPath().ToString();
+			if (!FolderPathFilter.IsEmpty() && !Folder.Equals(FolderPathFilter, ESearchCase::IgnoreCase))
+			{
+				continue;
+			}
+			// A folder prefix matches the folder itself and everything nested
+			// under it, so "Gameplay" does not also match "GameplayOld".
+			if (!FolderPathPrefixFilter.IsEmpty() &&
+				!Folder.Equals(FolderPathPrefixFilter, ESearchCase::IgnoreCase) &&
+				!Folder.StartsWith(FolderPathPrefixFilter + TEXT("/"), ESearchCase::IgnoreCase))
+			{
+				continue;
+			}
 		}
 
 #if WITH_EDITOR
@@ -582,10 +636,26 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorDetails(const TSharedPtr<FJsonObj
 			P->SetStringField(TEXT("name"), Prop->GetName());
 			P->SetStringField(TEXT("type"), Prop->GetCPPType());
 
-			FString ValueStr;
-			const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Actor);
-			Prop->ExportText_Direct(ValueStr, ValuePtr, ValuePtr, Actor, PPF_None);
-			P->SetStringField(TEXT("value"), ValueStr);
+			// #927: a UPROPERTY declared as a C-style fixed array, `int32 Foo[3]`,
+			// is ONE FProperty with ArrayDim == 3, not three properties. Exporting
+			// it without an index writes element 0 and stops, and the value then
+			// reads as an ordinary scalar with the remaining elements invisible.
+			//
+			// This is a general serialization bug, not a navmesh one. It was
+			// noticed on RecastNavMesh's NavMeshResolutionParams, a three-element
+			// fixed array holding the Low, Default and High generation tiers, and
+			// reporting only the Low tier as if it were the whole property sent a
+			// user tuning cell sizes against numbers Recast was not using. Any
+			// fixed array on any class had the same problem.
+			//
+			// MCPExportPropertyValue returns a JSON array of one string per
+			// element when ArrayDim > 1 and a plain string otherwise, so the two
+			// cases stay distinguishable rather than being conflated.
+			P->SetField(TEXT("value"), MCPExportPropertyValue(Prop, Actor));
+			if (MCPPropertyIsFixedArray(Prop))
+			{
+				P->SetNumberField(TEXT("arrayDim"), Prop->ArrayDim);
+			}
 			PropsArr.Add(MakeShared<FJsonValueObject>(P));
 		}
 		Result->SetArrayField(TEXT("properties"), PropsArr);
@@ -798,10 +868,15 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentTree(const TSharedPtr<FJsonOb
 				TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
 				P->SetStringField(TEXT("name"), Prop->GetName());
 				P->SetStringField(TEXT("type"), Prop->GetCPPType());
-				FString ValueStr;
-				const void* VP = Prop->ContainerPtrToValuePtr<void>(Comp);
-				Prop->ExportText_Direct(ValueStr, VP, VP, Comp, PPF_None);
-				P->SetStringField(TEXT("value"), ValueStr);
+				// #927: a fixed array is one FProperty with ArrayDim > 1, and
+				// exporting it without an index reports element 0 as though it
+				// were the whole value. Same helper as the actor dump, so the
+				// two cannot drift.
+				P->SetField(TEXT("value"), MCPExportPropertyValue(Prop, Comp));
+				if (MCPPropertyIsFixedArray(Prop))
+				{
+					P->SetNumberField(TEXT("arrayDim"), Prop->ArrayDim);
+				}
 				Props.Add(MakeShared<FJsonValueObject>(P));
 			}
 			C->SetArrayField(TEXT("properties"), Props);
@@ -1603,24 +1678,65 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 	UStruct* CurrentStruct = TargetComp->GetClass();
 	void* CurrentContainer = TargetComp;
 	FProperty* Prop = nullptr;
+	// #927: same fixed-array indexing as set_actor_property. A component
+	// property declared `float Foo[4]` is one FProperty with ArrayDim 4, and
+	// without an index every write lands on element 0.
+	int32 LeafArrayIndex = 0;
 	for (int32 i = 0; i < PathParts.Num(); ++i)
 	{
-		FProperty* SegmentProp = CurrentStruct->FindPropertyByName(FName(*PathParts[i]));
+		FString Token = PathParts[i];
+		int32 SegmentIndex = 0;
+		bool bHasSegmentIndex = false;
+		{
+			int32 OpenBracket = INDEX_NONE;
+			int32 CloseBracket = INDEX_NONE;
+			if (Token.FindChar(TEXT('['), OpenBracket) &&
+				Token.FindChar(TEXT(']'), CloseBracket) &&
+				CloseBracket > OpenBracket)
+			{
+				SegmentIndex = FCString::Atoi(*Token.Mid(OpenBracket + 1, CloseBracket - OpenBracket - 1));
+				Token = Token.Left(OpenBracket);
+				bHasSegmentIndex = true;
+			}
+		}
+
+		FProperty* SegmentProp = CurrentStruct->FindPropertyByName(FName(*Token));
 		if (!SegmentProp)
 		{
-			return MCPError(FString::Printf(TEXT("Property '%s' not found at '%s'"), *PathParts[i], *PropertyName));
+			return MCPError(FString::Printf(TEXT("Property '%s' not found at '%s'"), *Token, *PropertyName));
+		}
+		if (bHasSegmentIndex)
+		{
+			if (CastField<FArrayProperty>(SegmentProp))
+			{
+				return MCPError(FString::Printf(
+					TEXT("'%s' is a TArray. Indexing a dynamic array is not supported here; use asset(set_property) for dotted TArray paths. An index on this action addresses a C-style fixed array such as `float Foo[4]`."),
+					*Token));
+			}
+			if (SegmentProp->ArrayDim <= 1)
+			{
+				return MCPError(FString::Printf(
+					TEXT("'%s' is not a fixed array, so it cannot be indexed [%d]"), *Token, SegmentIndex));
+			}
+			if (SegmentIndex < 0 || SegmentIndex >= SegmentProp->ArrayDim)
+			{
+				return MCPError(FString::Printf(
+					TEXT("Index %d is out of range on '%s', which has ArrayDim %d"),
+					SegmentIndex, *Token, SegmentProp->ArrayDim));
+			}
 		}
 		if (i < PathParts.Num() - 1)
 		{
 			if (FStructProperty* SP = CastField<FStructProperty>(SegmentProp))
 			{
-				CurrentContainer = SP->ContainerPtrToValuePtr<void>(CurrentContainer);
+				CurrentContainer = SP->ContainerPtrToValuePtr<void>(CurrentContainer, SegmentIndex);
 				CurrentStruct = SP->Struct;
 			}
 			else if (FObjectProperty* OP = CastField<FObjectProperty>(SegmentProp))
 			{
 				// #305: descend through Instanced UObject sub-objects.
-				UObject* SubObject = OP->GetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(CurrentContainer));
+				UObject* SubObject = OP->GetObjectPropertyValue(
+					OP->ContainerPtrToValuePtr<void>(CurrentContainer, SegmentIndex));
 				if (!SubObject)
 				{
 					return MCPError(FString::Printf(
@@ -1640,6 +1756,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 		else
 		{
 			Prop = SegmentProp;
+			LeafArrayIndex = SegmentIndex;
 		}
 	}
 
@@ -1649,7 +1766,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 		return MCPError(TEXT("Missing 'value' parameter"));
 	}
 
-	void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(CurrentContainer);
+	void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(CurrentContainer, LeafArrayIndex);
 
 	// Capture previous value as a string for self-inverse rollback.
 	FString PreviousValueStr;
@@ -1833,9 +1950,9 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentDetails(const TSharedPtr<FJso
 				FProperty* Prop = *It;
 				const FString PName = Prop->GetName();
 				if (PropFilter.Num() > 0 && !PropFilter.Contains(PName)) continue;
-				FString Exported;
-				Prop->ExportText_Direct(Exported, Prop->ContainerPtrToValuePtr<void>(Comp), Prop->ContainerPtrToValuePtr<void>(Comp), Comp, PPF_None);
-				Values->SetStringField(PName, Exported);
+				// #927: fixed arrays come back as a JSON array of elements
+				// rather than as element 0 wearing the whole property's name.
+				Values->SetField(PName, MCPExportPropertyValue(Prop, Comp));
 			}
 			Obj->SetObjectField(TEXT("values"), Values);
 		}
@@ -2498,15 +2615,62 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorProperty(const TSharedPtr<FJsonOb
 	UStruct* CurrentStruct = TargetActor->GetClass();
 	void* CurrentContainer = TargetActor;
 	FProperty* Prop = nullptr;
+	// #927: the leaf element of a C-style fixed array, `int32 Foo[3]`. That is
+	// ONE FProperty with ArrayDim == 3, so without an index the write lands on
+	// element 0 and the other elements are unreachable. The read side has the
+	// mirror of this bug; a read that shows three tiers and a write that can
+	// only reach the first is not a usable pair.
+	int32 LeafArrayIndex = 0;
 	for (int32 i = 0; i < PathParts.Num(); ++i)
 	{
-		FProperty* Seg = CurrentStruct->FindPropertyByName(FName(*PathParts[i]));
-		if (!Seg) return MCPError(FString::Printf(TEXT("Property '%s' not found at '%s'"), *PathParts[i], *PropertyName));
+		FString Token = PathParts[i];
+		int32 SegmentIndex = 0;
+		bool bHasSegmentIndex = false;
+		{
+			int32 OpenBracket = INDEX_NONE;
+			int32 CloseBracket = INDEX_NONE;
+			if (Token.FindChar(TEXT('['), OpenBracket) &&
+				Token.FindChar(TEXT(']'), CloseBracket) &&
+				CloseBracket > OpenBracket)
+			{
+				SegmentIndex = FCString::Atoi(*Token.Mid(OpenBracket + 1, CloseBracket - OpenBracket - 1));
+				Token = Token.Left(OpenBracket);
+				bHasSegmentIndex = true;
+			}
+		}
+
+		FProperty* Seg = CurrentStruct->FindPropertyByName(FName(*Token));
+		if (!Seg) return MCPError(FString::Printf(TEXT("Property '%s' not found at '%s'"), *Token, *PropertyName));
+
+		if (bHasSegmentIndex)
+		{
+			if (CastField<FArrayProperty>(Seg))
+			{
+				// A TArray element needs the shared resolver's array helper,
+				// which this walker does not have. Say which action does
+				// rather than writing element 0 and calling it a success.
+				return MCPError(FString::Printf(
+					TEXT("'%s' is a TArray. Indexing a dynamic array is not supported here; use asset(set_property) for dotted TArray paths. An index on this action addresses a C-style fixed array such as `int32 Foo[3]`."),
+					*Token));
+			}
+			if (Seg->ArrayDim <= 1)
+			{
+				return MCPError(FString::Printf(
+					TEXT("'%s' is not a fixed array, so it cannot be indexed [%d]"), *Token, SegmentIndex));
+			}
+			if (SegmentIndex < 0 || SegmentIndex >= Seg->ArrayDim)
+			{
+				return MCPError(FString::Printf(
+					TEXT("Index %d is out of range on '%s', which has ArrayDim %d"),
+					SegmentIndex, *Token, Seg->ArrayDim));
+			}
+		}
+
 		if (i < PathParts.Num() - 1)
 		{
 			if (FStructProperty* SP = CastField<FStructProperty>(Seg))
 			{
-				CurrentContainer = SP->ContainerPtrToValuePtr<void>(CurrentContainer);
+				CurrentContainer = SP->ContainerPtrToValuePtr<void>(CurrentContainer, SegmentIndex);
 				CurrentStruct = SP->Struct;
 			}
 			// #305: descend through Instanced UObject sub-objects too. The path
@@ -2515,7 +2679,8 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorProperty(const TSharedPtr<FJsonOb
 			// rejection forced execute_python on every instanced-subobject write.
 			else if (FObjectProperty* OP = CastField<FObjectProperty>(Seg))
 			{
-				UObject* SubObject = OP->GetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(CurrentContainer));
+				UObject* SubObject = OP->GetObjectPropertyValue(
+					OP->ContainerPtrToValuePtr<void>(CurrentContainer, SegmentIndex));
 				if (!SubObject)
 				{
 					return MCPError(FString::Printf(
@@ -2535,6 +2700,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorProperty(const TSharedPtr<FJsonOb
 		else
 		{
 			Prop = Seg;
+			LeafArrayIndex = SegmentIndex;
 		}
 	}
 
@@ -2546,7 +2712,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorProperty(const TSharedPtr<FJsonOb
 		Prop->PropertyFlags &= ~CPF_DisableEditOnInstance;
 	}
 
-	void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(CurrentContainer);
+	void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(CurrentContainer, LeafArrayIndex);
 
 	FString PrevValue;
 	Prop->ExportText_Direct(PrevValue, ValuePtr, ValuePtr, TargetActor, PPF_None);
@@ -3176,25 +3342,56 @@ TSharedPtr<FJsonValue> FLevelHandlers::SpawnSkeletalMeshActor(const TSharedPtr<F
 	if (!Actor) return MCPError(TEXT("Failed to spawn SkeletalMeshActor"));
 	if (!Label.IsEmpty()) Actor->SetActorLabel(Label);
 
+	// #946: per-slot COMPONENT material overrides, reported rather than
+	// applied silently. These write the component's OverrideMaterials, which
+	// is a different thing from the mesh ASSET's own slots: the asset is
+	// untouched here. For an actor that is already placed, or to apply one
+	// material to every slot, use level(set_component_materials).
+	TArray<TSharedPtr<FJsonValue>> MaterialResults;
+	int32 FailedMaterials = 0;
 	USkeletalMeshComponent* Comp = Actor->GetSkeletalMeshComponent();
 	if (Comp)
 	{
 		Comp->SetSkeletalMeshAsset(Mesh);
 
-		// Optional per-slot material overrides.
 		const TArray<TSharedPtr<FJsonValue>>* Mats = nullptr;
 		if (Params->TryGetArrayField(TEXT("materials"), Mats) && Mats)
 		{
+			const int32 SlotCount = Comp->GetNumMaterials();
 			for (int32 i = 0; i < Mats->Num(); ++i)
 			{
 				FString MatPath;
-				if ((*Mats)[i].IsValid() && (*Mats)[i]->TryGetString(MatPath) && !MatPath.IsEmpty())
+				const bool bHasPath =
+					(*Mats)[i].IsValid() && (*Mats)[i]->TryGetString(MatPath) && !MatPath.IsEmpty();
+				if (!bHasPath) continue;
+
+				TSharedPtr<FJsonObject> MatRow = MakeShared<FJsonObject>();
+				MatRow->SetNumberField(TEXT("slotIndex"), i);
+				MatRow->SetStringField(TEXT("materialPath"), MatPath);
+
+				// A slot index past the end, or a path that does not load,
+				// used to be dropped on the floor. That reads as a successful
+				// assignment that never happened.
+				if (i >= SlotCount)
 				{
-					if (UMaterialInterface* Mat = LoadAssetByPath<UMaterialInterface>(MatPath))
-					{
-						Comp->SetMaterial(i, Mat);
-					}
+					MatRow->SetBoolField(TEXT("ok"), false);
+					MatRow->SetStringField(TEXT("error"), FString::Printf(
+						TEXT("slot %d is past the mesh's %d material slots"), i, SlotCount));
+					++FailedMaterials;
 				}
+				else if (UMaterialInterface* Mat = LoadAssetByPath<UMaterialInterface>(MatPath))
+				{
+					Comp->SetMaterial(i, Mat);
+					MatRow->SetBoolField(TEXT("ok"), true);
+					MatRow->SetStringField(TEXT("source"), TEXT("componentOverride"));
+				}
+				else
+				{
+					MatRow->SetBoolField(TEXT("ok"), false);
+					MatRow->SetStringField(TEXT("error"), TEXT("material not found"));
+					++FailedMaterials;
+				}
+				MaterialResults.Add(MakeShared<FJsonValueObject>(MatRow));
 			}
 		}
 
@@ -3228,9 +3425,18 @@ TSharedPtr<FJsonValue> FLevelHandlers::SpawnSkeletalMeshActor(const TSharedPtr<F
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
+	Result->SetBoolField(TEXT("success"), FailedMaterials == 0);
+	if (FailedMaterials > 0)
+	{
+		Result->SetStringField(TEXT("error"), FString::Printf(
+			TEXT("The actor was spawned but %d material override(s) did not apply; see materials[]."),
+			FailedMaterials));
+	}
 	Result->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
 	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("skeletalMesh"), Mesh->GetPathName());
+	Result->SetNumberField(TEXT("materialSlotCount"), Comp ? Comp->GetNumMaterials() : 0);
+	Result->SetArrayField(TEXT("materials"), MaterialResults);
 	Result->SetObjectField(TEXT("location"), MCPVec3ToJsonObject(Loc));
 	Result->SetObjectField(TEXT("boxExtent"), MCPVec3ToJsonObject(BoxExtent));
 	TSharedPtr<FJsonObject> Rb = MakeShared<FJsonObject>();
@@ -3368,7 +3574,16 @@ TSharedPtr<FJsonValue> FLevelHandlers::DeleteActors(const TSharedPtr<FJsonObject
 {
 	REQUIRE_EDITOR_WORLD(World);
 
+	// #963: the filter names say what they match, and the two that were
+	// previously reachable only through get_outliner's looser nameFilter are
+	// now first class here. labelPrefix stays a CASE-SENSITIVE PREFIX over the
+	// EDITOR LABEL, which is what it always was; labelContains and nameContains
+	// are the substring forms, over the label and the internal name
+	// respectively. Overloading one parameter to mean both is how a filter that
+	// selects fifteen actors in one action selects none in another.
 	const FString LabelPrefix = OptionalString(Params, TEXT("labelPrefix"));
+	const FString LabelContains = OptionalString(Params, TEXT("labelContains"));
+	const FString NameContains = OptionalString(Params, TEXT("nameContains"));
 	const FString ClassName = OptionalString(Params, TEXT("className"));
 	const FString Tag = OptionalString(Params, TEXT("tag"));
 	const bool bDryRun = OptionalBool(Params, TEXT("dryRun"), false);
@@ -3392,9 +3607,13 @@ TSharedPtr<FJsonValue> FLevelHandlers::DeleteActors(const TSharedPtr<FJsonObject
 		}
 	}
 
-	if (LabelPrefix.IsEmpty() && ClassName.IsEmpty() && Tag.IsEmpty() && ClassPathNeedles.Num() == 0)
+	// #924 added the class-path filters and #963 added the label/name ones. Both
+	// are live, so the guard has to accept either family; requiring only one
+	// family's filters would make the other silently unusable.
+	if (LabelPrefix.IsEmpty() && LabelContains.IsEmpty() && NameContains.IsEmpty() &&
+		ClassName.IsEmpty() && Tag.IsEmpty() && ClassPathNeedles.Num() == 0)
 	{
-		return MCPError(TEXT("Provide at least one filter: labelPrefix, className, tag, classPathContains, or classPathContainsAny"));
+		return MCPError(TEXT("Provide at least one filter: labelPrefix (case-sensitive prefix over the editor label), labelContains (case-insensitive substring over the label), nameContains (case-insensitive substring over the internal name), className, tag, classPathContains, or classPathContainsAny"));
 	}
 
 	TArray<AActor*> Matches;
@@ -3403,6 +3622,8 @@ TSharedPtr<FJsonValue> FLevelHandlers::DeleteActors(const TSharedPtr<FJsonObject
 		AActor* A = *It;
 		if (!A) continue;
 		if (!LabelPrefix.IsEmpty() && !A->GetActorLabel().StartsWith(LabelPrefix)) continue;
+		if (!LabelContains.IsEmpty() && !A->GetActorLabel().Contains(LabelContains, ESearchCase::IgnoreCase)) continue;
+		if (!NameContains.IsEmpty() && !A->GetName().Contains(NameContains, ESearchCase::IgnoreCase)) continue;
 		if (!ClassName.IsEmpty())
 		{
 			const FString CName = A->GetClass()->GetName();
@@ -3459,6 +3680,24 @@ TSharedPtr<FJsonValue> FLevelHandlers::DeleteActors(const TSharedPtr<FJsonObject
 	Result->SetNumberField(TEXT("deleted"), Deleted);
 	Result->SetArrayField(TEXT("labels"), Labels);
 	Result->SetArrayField(TEXT("classPaths"), ClassPaths);
+
+	// #963: a destructive action that matched nothing must not answer with a
+	// bare success and a zero. A caller who trusts that concludes there is
+	// nothing to delete and moves on, which is exactly what happened. Two
+	// things can produce a wrong zero here, and the response now names both.
+	if (Matches.IsEmpty())
+	{
+		Result->SetStringField(TEXT("zeroMatchNote"),
+			TEXT("No actor matched. This is a filter result, not a statement that the actors do not exist."));
+		const FString Needle = !LabelPrefix.IsEmpty()
+			? LabelPrefix
+			: (!LabelContains.IsEmpty() ? LabelContains : NameContains);
+		if (const TSharedPtr<FJsonObject> Hint = MCPDescribeZeroActorMatch(World, Needle))
+		{
+			Result->SetObjectField(TEXT("zeroMatchHint"), Hint);
+		}
+		MCPNoteLoadedOnlyEnumeration(World, Result);
+	}
 	return MCPResult(Result);
 }
 

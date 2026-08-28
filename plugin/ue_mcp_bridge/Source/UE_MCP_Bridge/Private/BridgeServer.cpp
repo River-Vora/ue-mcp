@@ -27,6 +27,7 @@
 #include "Handlers/EditorHandlers.h"
 #include "Handlers/AssetHandlers.h"
 #include "Handlers/AssetHandlers_Geometry.h"
+#include "Handlers/AssetHandlers_BulkRead.h"
 #include "Handlers/BlueprintHandlers.h"
 #include "Handlers/ProjectHandlers.h"
 #include "Handlers/LevelHandlers.h"
@@ -133,6 +134,9 @@ FMCPBridgeServer::FMCPBridgeServer(int32 Port, const FString& InPortSource, bool
 	FEditorHandlers::RegisterHandlers(HandlerRegistry);
 	FAssetHandlers::RegisterHandlers(HandlerRegistry);
 	FAssetGeometryHandlers::RegisterHandlers(HandlerRegistry);
+	// #909: bulk_read_asset_properties, in its own translation unit so a
+	// library-wide read lands without reopening AssetHandlers.cpp.
+	FAssetBulkReadHandlers::RegisterHandlers(HandlerRegistry);
 	FBlueprintHandlers::RegisterHandlers(HandlerRegistry);
 	FLevelHandlers::RegisterHandlers(HandlerRegistry);
 	FReflectionHandlers::RegisterHandlers(HandlerRegistry);
