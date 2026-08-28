@@ -171,6 +171,16 @@ namespace
 		{
 			OutPenetration = 0.0;
 		}
+		else if (OutPenetration == TNumericLimits<double>::Max())
+		{
+			// Two zero-extent boxes overlap with every separating axis
+			// degenerate, so no axis ever narrowed the seed. Reporting the seed
+			// would hand the caller 1.79e308 as a penetration depth in
+			// centimetres, which reads as a number rather than as "there was
+			// nothing to measure".
+			OutPenetration = 0.0;
+			OutAxis = FVector::ZeroVector;
+		}
 		return bOverlapping;
 	}
 
@@ -314,7 +324,11 @@ TSharedPtr<FJsonValue> FLevelHandlers::RerunConstruction(const TSharedPtr<FJsonO
 	{
 		if (!IsValid(Actor))
 		{
-			Failed.Add(FString::Printf(TEXT("%s: actor is pending destruction"), *Actor->GetName()));
+			// Do not call GetName() on the pointer the guard just rejected. A
+			// garbage-but-unfreed UObject happens to answer today, which is
+			// exactly why this would survive testing and then not survive a
+			// real collection.
+			Failed.Add(TEXT("an actor in the selection is pending destruction"));
 			continue;
 		}
 		// An actor with no user construction script still gets its generated

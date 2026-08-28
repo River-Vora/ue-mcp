@@ -15,6 +15,7 @@
 #include "UObject/Class.h"
 #include "UObject/EnumProperty.h"
 #include "UObject/Script.h"
+#include "UObject/StrongObjectPtr.h"
 #include "UObject/TextProperty.h"
 #include "UObject/UnrealType.h"
 #include "UObject/UObjectGlobals.h"
@@ -460,14 +461,38 @@ namespace MCPFunctionCall
 		if (!Target || !Func) return;
 
 		TWeakObjectPtr<UObject> WeakTarget(Target);
-		TWeakObjectPtr<UFunction> WeakFunc(Func);
+
+		// The frame is a raw byte buffer, so the garbage collector cannot see
+		// any UObject argument marshalled into it. Between this handler
+		// returning and the ticker firing there is a real window for an
+		// incremental GC, and a collected argument would be handed to
+		// ProcessEvent as a dangling pointer. Hold every object argument
+		// strongly for exactly that window.
+		TArray<TStrongObjectPtr<UObject>> HeldArgs;
+		for (TFieldIterator<FProperty> It(Func); It && It->HasAnyPropertyFlags(CPF_Parm); ++It)
+		{
+			if (It->HasAnyPropertyFlags(CPF_ReturnParm)) continue;
+			if (const FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(*It))
+			{
+				if (UObject* Arg = ObjProp->GetObjectPropertyValue(ObjProp->ContainerPtrToValuePtr<void>(ParamBuf.GetData())))
+				{
+					HeldArgs.Emplace(Arg);
+				}
+			}
+		}
+
+		// The UFunction is held strongly rather than weakly because it is what
+		// DestroyFrame walks to destruct the frame. If it were allowed to go
+		// (a Blueprint recompiled between queue and tick), every FString and
+		// TArray parameter in the buffer would leak instead.
+		TStrongObjectPtr<UFunction> HeldFunc(Func);
 		TSharedRef<TArray<uint8>> Frame = MakeShared<TArray<uint8>>(MoveTemp(ParamBuf));
 
 		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
-			[WeakTarget, WeakFunc, Frame](float) -> bool
+			[WeakTarget, HeldFunc, HeldArgs, Frame](float) -> bool
 			{
+				UFunction* LiveFunc = HeldFunc.Get();
 				UObject* LiveTarget = WeakTarget.Get();
-				UFunction* LiveFunc = WeakFunc.Get();
 				if (LiveTarget && LiveFunc && IsValid(LiveTarget))
 				{
 					// Deliberately NOT under FEditorScriptExecutionGuard: the

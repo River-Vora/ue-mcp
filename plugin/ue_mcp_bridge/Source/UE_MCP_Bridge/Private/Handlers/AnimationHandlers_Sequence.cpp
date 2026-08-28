@@ -431,6 +431,10 @@ TSharedPtr<FJsonValue> FAnimationHandlers::SetBoneKeyframes(const TSharedPtr<FJs
 	// Ensure bone track exists - add it if not present
 	const FName BoneFName(*BoneName);
 	const IAnimationDataModel* DataModel = AnimSeq->GetDataModel();
+	if (!DataModel)
+	{
+		return MCPError(TEXT("Animation sequence has no data model, so its bone tracks cannot be read or written"));
+	}
 	if (!DataModel->IsValidBoneTrackName(BoneFName))
 	{
 		Controller.AddBoneCurve(BoneFName);
@@ -563,6 +567,10 @@ TSharedPtr<FJsonValue> FAnimationHandlers::BakeKeyframesBatch(const TSharedPtr<F
 		// Critical: create the bone track before writing keys, otherwise
 		// SetBoneTrackKeys returns false and the asset stays a T-pose.
 		const IAnimationDataModel* DataModel = AnimSeq->GetDataModel();
+		if (!DataModel)
+		{
+			return MCPError(TEXT("Animation sequence has no data model, so its bone tracks cannot be read or written"));
+		}
 		if (!DataModel->IsValidBoneTrackName(BoneFName))
 		{
 			Controller.AddBoneCurve(BoneFName);

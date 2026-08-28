@@ -10,6 +10,7 @@
 #include "EditorScriptingUtilities/Public/EditorAssetLibrary.h"
 #include "Engine/DataAsset.h"
 #include "Misc/PackageName.h"
+#include "ScopedTransaction.h"
 #include "Misc/Paths.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/UnrealType.h"
@@ -418,9 +419,20 @@ TSharedPtr<FJsonValue> FMassHandlers::EnsureEntityConfig(const TSharedPtr<FJsonO
 		ReleasePreviews(Previews);
 	}
 
-	// Establish the transaction before any instanced trait is appended or
-	// mutated. This is required for editor undo/redo and keeps the mutation
-	// boundary explicit for callers using onConflict=update.
+	// AddTrait appends to the live Traits array and constructs an
+	// RF_Transactional subobject, so a failure partway through the loop used to
+	// leave traits 0..N-1 on the asset and return an error. Modify() alone did
+	// not help: with no FScopedTransaction open there is no transaction to
+	// record into, so undo could not recover it either, despite the comment
+	// that used to sit here claiming otherwise.
+	//
+	// Cancelling the transaction on any failure is what makes this all or
+	// nothing. The preflights above validate against a duplicated instance, so
+	// a property that only fails on the real object still reaches this loop.
+	const bool bShouldActuallyTransact = GEditor != nullptr;
+	FScopedTransaction Transaction(
+		NSLOCTEXT("UEMCP", "EnsureMassEntityConfig", "Author Mass Entity Config Traits"),
+		bShouldActuallyTransact);
 	ExistingAsset->Modify();
 	int32 PropertiesSet = 0;
 	for (int32 Index = 0; Index < Requested.Num(); ++Index)
@@ -429,10 +441,12 @@ TSharedPtr<FJsonValue> FMassHandlers::EnsureEntityConfig(const TSharedPtr<FJsonO
 		if (Index < ExistingClasses.Num()) Trait = GetTraitAtIndex(ExistingAsset, Index);
 		else if (!AddTrait(ExistingAsset, Requested[Index].Class, Trait, ReadError))
 		{
+			Transaction.Cancel();
 			return MCPError(ReadError);
 		}
 		if (TSharedPtr<FJsonValue> Error = ValidateAndApplyProperties(Trait, Requested[Index].Properties ? *Requested[Index].Properties : nullptr, Index, PropertiesSet))
 		{
+			Transaction.Cancel();
 			return Error;
 		}
 	}
