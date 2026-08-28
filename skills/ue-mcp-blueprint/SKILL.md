@@ -122,6 +122,8 @@ Notes that save a round trip:
 
 `blueprint(action="search_call_sites", functionNames=[...])` finds authored call nodes for named functions across a whole directory, including nested and collapsed graphs, in one call. Narrow it with `className` (which also lets the Asset Registry rule most packages out before anything is loaded) and `directory`. Bound the response with `limit`/`offset`, or pass `dumpToFile` to write the full result set to a JSON file the way `read_graph` does. Reach for it instead of enumerating every Blueprint and reading every graph.
 
+Read `stats` before trusting an empty result: `narrowedByRegistry` says whether the dependency filter ran, `blueprintsSkippedByRegistry` says how much it removed unloaded, and `narrowingSkippedReason` says why it did not run. Pass `narrowByRegistry: false` to force a full scan when a result looks too small. Level scripts are not registry assets, so they are only searched when you pass `includeLevelScripts`, which loads a whole map per level.
+
 ## Verify before compile
 
 - `blueprint(action="validate")` runs the compiler diagnostics without saving. Cheaper round-trip when iterating.

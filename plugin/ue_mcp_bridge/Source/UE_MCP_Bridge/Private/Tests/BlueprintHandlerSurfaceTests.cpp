@@ -239,4 +239,124 @@ bool FBlueprintBTTaskEventShapeTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// #945: search_call_sites runs against an unknown-sized project, so its
+// argument validation is what stops a malformed request turning into a
+// full-project package load. Everything asserted here rejects before a single
+// asset is touched. The matching itself needs real Blueprints and belongs to
+// the smoke suite.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FBlueprintSearchCallSitesValidationTest,
+	"UE.MCP.Blueprint.SearchCallSites.RegistrationAndValidation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FBlueprintSearchCallSitesValidationTest::RunTest(const FString& Parameters)
+{
+	FMCPHandlerRegistry Registry;
+	FBlueprintHandlers::RegisterHandlers(Registry);
+
+	TestTrue(TEXT("search_blueprint_call_sites is registered"),
+		Registry.HasHandler(TEXT("search_blueprint_call_sites")));
+	// A sweep that pays for package loads cannot finish inside the default
+	// request timeout, so it has to carry its own.
+	TestTrue(TEXT("search_blueprint_call_sites carries its own timeout"),
+		Registry.GetHandlerTimeout(TEXT("search_blueprint_call_sites")) > 0.0f);
+
+	// functionNames is required. Without it there is nothing to search for, and
+	// defaulting to "everything" would load the whole project.
+	{
+		const TSharedPtr<FJsonObject> Response = BlueprintTestResponseObject(
+			Registry.ExecuteHandler(TEXT("search_blueprint_call_sites"), MakeShared<FJsonObject>()));
+		if (TestTrue(TEXT("missing functionNames returns an object"), Response.IsValid()))
+		{
+			TestFalse(TEXT("missing functionNames is unsuccessful"), Response->GetBoolField(TEXT("success")));
+			TestTrue(TEXT("missing functionNames identifies the field"),
+				Response->GetStringField(TEXT("error")).Contains(TEXT("functionNames")));
+		}
+	}
+
+	// An empty array, and an array of nothing but blanks, are the same mistake.
+	{
+		TSharedPtr<FJsonObject> EmptyNames = MakeShared<FJsonObject>();
+		EmptyNames->SetArrayField(TEXT("functionNames"), TArray<TSharedPtr<FJsonValue>>());
+		const TSharedPtr<FJsonObject> Response = BlueprintTestResponseObject(
+			Registry.ExecuteHandler(TEXT("search_blueprint_call_sites"), EmptyNames));
+		if (TestTrue(TEXT("empty functionNames returns an object"), Response.IsValid()))
+		{
+			TestFalse(TEXT("empty functionNames is unsuccessful"), Response->GetBoolField(TEXT("success")));
+		}
+	}
+	{
+		TSharedPtr<FJsonObject> BlankNames = MakeShared<FJsonObject>();
+		TArray<TSharedPtr<FJsonValue>> Blanks;
+		Blanks.Add(MakeShared<FJsonValueString>(TEXT("   ")));
+		BlankNames->SetArrayField(TEXT("functionNames"), Blanks);
+		const TSharedPtr<FJsonObject> Response = BlueprintTestResponseObject(
+			Registry.ExecuteHandler(TEXT("search_blueprint_call_sites"), BlankNames));
+		if (TestTrue(TEXT("whitespace-only functionNames returns an object"), Response.IsValid()))
+		{
+			TestFalse(TEXT("whitespace-only functionNames is unsuccessful"),
+				Response->GetBoolField(TEXT("success")));
+		}
+	}
+
+	// The batch cap: over it, the caller is told to split rather than being
+	// handed a sweep that will not finish.
+	{
+		TSharedPtr<FJsonObject> TooMany = MakeShared<FJsonObject>();
+		TArray<TSharedPtr<FJsonValue>> Names;
+		for (int32 Index = 0; Index < 51; ++Index)
+		{
+			Names.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("Function_%d"), Index)));
+		}
+		TooMany->SetArrayField(TEXT("functionNames"), Names);
+		const TSharedPtr<FJsonObject> Response = BlueprintTestResponseObject(
+			Registry.ExecuteHandler(TEXT("search_blueprint_call_sites"), TooMany));
+		if (TestTrue(TEXT("oversized functionNames returns an object"), Response.IsValid()))
+		{
+			TestFalse(TEXT("oversized functionNames is unsuccessful"), Response->GetBoolField(TEXT("success")));
+			TestTrue(TEXT("oversized functionNames reports the bound"),
+				Response->GetStringField(TEXT("error")).Contains(TEXT("50")));
+		}
+	}
+
+	// An unresolvable className is a typo, and matching nothing would read as
+	// "no call sites" - the wrong answer to an audit.
+	{
+		TSharedPtr<FJsonObject> BadClass = MakeShared<FJsonObject>();
+		TArray<TSharedPtr<FJsonValue>> Names;
+		Names.Add(MakeShared<FJsonValueString>(TEXT("FinishExecute")));
+		BadClass->SetArrayField(TEXT("functionNames"), Names);
+		BadClass->SetStringField(TEXT("className"), TEXT("ThisClassDoesNotExistAnywhere_UEMCP"));
+		const TSharedPtr<FJsonObject> Response = BlueprintTestResponseObject(
+			Registry.ExecuteHandler(TEXT("search_blueprint_call_sites"), BadClass));
+		if (TestTrue(TEXT("unknown className returns an object"), Response.IsValid()))
+		{
+			TestFalse(TEXT("unknown className is unsuccessful"), Response->GetBoolField(TEXT("success")));
+			TestEqual(TEXT("unknown className is reported as a class miss"),
+				Response->GetStringField(TEXT("reason")), FString(TEXT("class_not_found")));
+		}
+	}
+
+	// A directory that is not mount-rooted would silently match nothing.
+	{
+		TSharedPtr<FJsonObject> BadDirectory = MakeShared<FJsonObject>();
+		TArray<TSharedPtr<FJsonValue>> Names;
+		Names.Add(MakeShared<FJsonValueString>(TEXT("FinishExecute")));
+		BadDirectory->SetArrayField(TEXT("functionNames"), Names);
+		BadDirectory->SetStringField(TEXT("directory"), TEXT("Content/AI"));
+		const TSharedPtr<FJsonObject> Response = BlueprintTestResponseObject(
+			Registry.ExecuteHandler(TEXT("search_blueprint_call_sites"), BadDirectory));
+		if (TestTrue(TEXT("relative directory returns an object"), Response.IsValid()))
+		{
+			TestFalse(TEXT("relative directory is unsuccessful"), Response->GetBoolField(TEXT("success")));
+			TestTrue(TEXT("relative directory says what a directory looks like"),
+				Response->GetStringField(TEXT("error")).Contains(TEXT("/Game")));
+		}
+	}
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

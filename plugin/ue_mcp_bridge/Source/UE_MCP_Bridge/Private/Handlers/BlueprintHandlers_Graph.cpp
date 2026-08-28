@@ -89,46 +89,6 @@ namespace
 			PinObj->SetStringField(TEXT("defaultObject"), Pin->DefaultObject->GetPathName());
 		}
 	}
-
-	FString MakeDefaultGraphDumpPath(const FString& AssetPath, const FString& GraphName)
-	{
-		const FString AssetName = FPackageName::GetLongPackageAssetName(AssetPath);
-		const FString PathHash = FString::Printf(TEXT("%08x"), GetTypeHash(AssetPath + TEXT(":") + GraphName));
-		const FString BaseName = FPaths::MakeValidFileName(AssetName + TEXT("_") + GraphName + TEXT("_") + PathHash);
-		return FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UE_MCP"), TEXT("GraphDumps"), BaseName + TEXT(".json"));
-	}
-
-	bool WriteJsonObjectToFile(const TSharedPtr<FJsonObject>& JsonObject, const FString& RequestedPath, const FString& AssetPath, const FString& GraphName, FString& OutResolvedPath, FString& OutError)
-	{
-		OutResolvedPath = RequestedPath.IsEmpty() ? MakeDefaultGraphDumpPath(AssetPath, GraphName) : RequestedPath;
-		if (FPaths::IsRelative(OutResolvedPath))
-		{
-			OutResolvedPath = FPaths::Combine(FPaths::ProjectSavedDir(), OutResolvedPath);
-		}
-
-		const FString Directory = FPaths::GetPath(OutResolvedPath);
-		if (!Directory.IsEmpty() && !IFileManager::Get().MakeDirectory(*Directory, true))
-		{
-			OutError = FString::Printf(TEXT("Failed to create dump directory: %s"), *Directory);
-			return false;
-		}
-
-		FString JsonText;
-		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&JsonText);
-		if (!FJsonSerializer::Serialize(JsonObject.ToSharedRef(), Writer))
-		{
-			OutError = TEXT("Failed to serialize graph JSON");
-			return false;
-		}
-
-		if (!FFileHelper::SaveStringToFile(JsonText, *OutResolvedPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-		{
-			OutError = FString::Printf(TEXT("Failed to write graph dump: %s"), *OutResolvedPath);
-			return false;
-		}
-
-		return true;
-	}
 }
 
 

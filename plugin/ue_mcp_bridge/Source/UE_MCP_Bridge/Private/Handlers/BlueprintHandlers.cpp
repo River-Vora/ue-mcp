@@ -74,6 +74,10 @@
 void FBlueprintHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 {
 	constexpr float ReadBlueprintGraphTimeoutSeconds = 180.0f;
+	// #945: a first sweep on a cold project pays for every package load the
+	// registry could not rule out, which the default request timeout does not
+	// come close to covering.
+	constexpr float SearchCallSitesTimeoutSeconds = 600.0f;
 
 	Registry.RegisterHandler(TEXT("create_blueprint"), &CreateBlueprint);
 	Registry.RegisterHandler(TEXT("read_blueprint"), &ReadBlueprint);
@@ -153,6 +157,9 @@ void FBlueprintHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("connect_pins_batch"), &ConnectPinsBatch);
 	Registry.RegisterHandler(TEXT("set_node_position"), &SetNodePosition);
 	Registry.RegisterHandler(TEXT("auto_layout_graph"), &AutoLayoutGraph);
+
+	// #945: project-wide call-site audit (BlueprintHandlers_Search.cpp).
+	Registry.RegisterHandlerWithTimeout(TEXT("search_blueprint_call_sites"), &SearchCallSites, SearchCallSitesTimeoutSeconds);
 }
 
 // ---------------------------------------------------------------------------
@@ -502,9 +509,9 @@ namespace
 		const FString Name = Graph->GetName();
 		const int32 DuplicateIndex = SeenCounts.FindOrAdd(Name)++;
 		const int32 DuplicateCount = NameCounts.FindRef(Name);
-		const FString Selector = DuplicateCount > 1
-			? FString::Printf(TEXT("%s[%d]"), *Name, DuplicateIndex)
-			: Name;
+		// #945: one selector rule, shared with search_call_sites so the two
+		// cannot disagree about how to address the same graph.
+		const FString Selector = MakeGraphSelector(Name, DuplicateIndex, DuplicateCount);
 
 		TSharedPtr<FJsonObject> GraphObj = MakeShared<FJsonObject>();
 		GraphObj->SetStringField(TEXT("name"), Name);
@@ -515,17 +522,6 @@ namespace
 		GraphObj->SetNumberField(TEXT("duplicateIndex"), DuplicateIndex);
 		GraphObj->SetNumberField(TEXT("duplicateCount"), DuplicateCount);
 		return GraphObj;
-	}
-
-	void CountGraphNames(const TArray<UEdGraph*>& Graphs, TMap<FString, int32>& OutNameCounts)
-	{
-		for (UEdGraph* Graph : Graphs)
-		{
-			if (Graph)
-			{
-				++OutNameCounts.FindOrAdd(Graph->GetName());
-			}
-		}
 	}
 }
 

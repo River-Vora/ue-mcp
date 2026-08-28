@@ -101,6 +101,11 @@ private:
 	static TSharedPtr<FJsonValue> ConnectPinsBatch(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetNodePosition(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AutoLayoutGraph(const TSharedPtr<FJsonObject>& Params);
+	// #945: project-wide search for authored function call sites, narrowed by
+	// the Asset Registry before any package is loaded. Defined in
+	// BlueprintHandlers_Search.cpp.
+	static TSharedPtr<FJsonValue> SearchCallSites(const TSharedPtr<FJsonObject>& Params);
+
 	// #419: SetCapsuleSize on CapsuleComponent BP templates (UFUNCTION setter
 	// path; raw property writes leave the visualizer stale)
 	static TSharedPtr<FJsonValue> SetCapsuleSize(const TSharedPtr<FJsonObject>& Params);

@@ -11,6 +11,7 @@ public class UE_MCP_Bridge : ModuleRules
 	// Private/BridgeStateFiles.cpp, Private/BridgeParamEcho.cpp and
 	// Private/Tests/BridgeProtocolTests.cpp: same reason.
 	// Private/Tests/BlueprintHandlerSurfaceTests.cpp: same reason.
+	// Private/Handlers/BlueprintHandlers_Search.cpp: same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
