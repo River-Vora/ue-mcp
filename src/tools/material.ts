@@ -8,7 +8,7 @@ export const materialTool: ToolDef = categoryTool(
   {
     read:              bp("Read material structure. Params: assetPath", "read_material", (p) => ({ assetPath: p.assetPath })),
     list_parameters:   bp("List overridable parameters. Params: assetPath", "list_material_parameters", (p) => ({ assetPath: p.assetPath })),
-    set_parameter:     bp("Set parameter on MaterialInstance. Params: assetPath, parameterName, parameterType, value", "set_material_parameter"),
+    set_parameter:     bp("Set parameter on MaterialInstance. Params: assetPath, parameterName, parameterType? (scalar|vector|texture, auto-detected when omitted), value, association?. A vector/colour value may be passed as value OR color, shaped {r,g,b,a}, [r,g,b,a] or '(R=..,G=..,B=..,A=..)'. Saves the instance and returns readBack + saved so a set/verify round trip needs no second call (#952)", "set_material_parameter"),
     read_instance:     bp("Read a MaterialInstanceConstant parent and override summary. Params: assetPath", "read_material_instance", (p) => ({ assetPath: p.assetPath ?? p.materialPath })),
     set_instance_parent: bp("Set a MaterialInstanceConstant parent. Params: assetPath, newParentPath (or parentPath)", "set_material_instance_parent", (p) => ({ assetPath: p.assetPath ?? p.materialPath, newParentPath: p.newParentPath ?? p.parentPath })),
     batch_set_instances: bp("Batch reparent + reassign parameters across many Material Instances in one call. Params: instances[] = [{assetPath, parentPath?, parameters?:[{name, type (scalar|vector|texture), value}]}]. value: number (scalar), {r,g,b,a} (vector), or texture path (texture). Returns per-instance results (#594)", "batch_set_material_instances", (p) => ({ instances: p.instances })),
