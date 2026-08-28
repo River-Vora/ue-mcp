@@ -177,6 +177,12 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// scan with a projection can take a while on a 4,000 actor level, so it
 	// gets its own timeout rather than the 30 second default.
 	Registry.RegisterHandlerWithTimeout(TEXT("query_components"), &QueryComponents, 300.0f);
+	// #984/#941/#907/#987: level-wide writes driven by an editor-side selector.
+	// Each can touch thousands of actors, so each gets its own timeout.
+	Registry.RegisterHandlerWithTimeout(TEXT("batch_set_actor_properties"), &BatchSetActorProperties, 300.0f);
+	Registry.RegisterHandlerWithTimeout(TEXT("bulk_set_component_property"), &BulkSetComponentProperty, 300.0f);
+	Registry.RegisterHandlerWithTimeout(TEXT("remove_components_by_class"), &RemoveComponentsByClass, 300.0f);
+	Registry.RegisterHandlerWithTimeout(TEXT("spawn_actors_batch"), &SpawnActorsBatch, 300.0f);
 }
 
 TSharedPtr<FJsonValue> FLevelHandlers::GetOutliner(const TSharedPtr<FJsonObject>& Params)

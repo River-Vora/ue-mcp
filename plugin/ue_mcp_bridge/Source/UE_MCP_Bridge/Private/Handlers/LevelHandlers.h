@@ -132,4 +132,11 @@ private:
 	// candidates out to be filtered by the client is what made these questions
 	// megabyte payloads and Python loops.
 	static TSharedPtr<FJsonValue> QueryComponents(const TSharedPtr<FJsonObject>& Params);
+	// #984/#941/#907/#987: the write side of the same complaint. A selector
+	// that runs in the editor, so a level-wide edit is one call rather than a
+	// generated label list and a loop.
+	static TSharedPtr<FJsonValue> BatchSetActorProperties(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> BulkSetComponentProperty(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> RemoveComponentsByClass(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SpawnActorsBatch(const TSharedPtr<FJsonObject>& Params);
 };
