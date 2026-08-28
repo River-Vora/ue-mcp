@@ -150,7 +150,8 @@ bool FDataTableSingleFieldWritePreservesRowTest::RunTest(const FString& Paramete
 	const TSharedPtr<FJsonValue> Response = Registry.ExecuteHandler(
 		TEXT("set_datatable_cell"),
 		MakeCellWriteParams(Table, TEXT("RowA"), DataTableRowWriteScalarField, MakeShared<FJsonValueNumber>(7)));
-	if (!TestTrue(FString::Printf(TEXT("cell write succeeded (%s)"), *Error), ResponseSucceeded(Response, Error)))
+	const bool bWritten = ResponseSucceeded(Response, Error);
+	if (!TestTrue(FString::Printf(TEXT("cell write succeeded (%s)"), *Error), bWritten))
 	{
 		return false;
 	}
