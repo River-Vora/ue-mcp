@@ -56,6 +56,8 @@ public class UE_MCP_Bridge : ModuleRules
 	// Private/Tests/AssetSubobjectTests.cpp: same reason.
 	// Private/Tests/LevelTraceWorldScopeTests.cpp (#933): same reason.
 	// Private/Tests/LandscapeSampleTests.cpp (#939): same reason.
+	// Private/Handlers/LevelHandlers_PostProcess.cpp and
+	// Private/Tests/LevelPostProcessOverrideTests.cpp (#950): same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;

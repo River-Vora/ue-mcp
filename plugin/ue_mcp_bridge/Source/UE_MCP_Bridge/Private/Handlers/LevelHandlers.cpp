@@ -162,6 +162,11 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("place_skeletal_actor"), &SpawnSkeletalMeshActor);
 	// #666: add a material blendable to a PostProcessVolume.
 	Registry.RegisterHandler(TEXT("add_post_process_blendable"), &AddPostProcessBlendable);
+	// #950: LevelHandlers_PostProcess.cpp. The value half and the bOverride_ half
+	// of FPostProcessSettings, written together.
+	Registry.RegisterHandler(TEXT("set_post_process_settings"), &SetPostProcessSettings);
+	Registry.RegisterHandler(TEXT("get_post_process_settings"), &GetPostProcessSettings);
+	Registry.RegisterHandler(TEXT("set_fixed_exposure"), &SetFixedExposure);
 	// #637: export a selected actor's mesh to FBX + metadata sidecar.
 	Registry.RegisterHandler(TEXT("export_actor_fbx"), &ExportActorFbx);
 	Registry.RegisterHandler(TEXT("snap_actor_to_floor"), &SnapActorToFloor);
