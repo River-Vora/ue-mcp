@@ -2,7 +2,7 @@
 
 This page lists ue-mcp's own category tools and actions. For the official Unreal 5.8 tools that ue-mcp wraps (surfaced inside these same categories), see [Native Tools](native-tools.md).
 
-UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->783+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
+UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->785+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
 
 !!! tip "First call in any session"
     Start with `project(action="get_status")` to check the connection, then `level(action="get_outliner")` or `asset(action="list")` to explore.
@@ -860,6 +860,8 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `get_attribute` | Read gameplay attribute base + current values on a live actor's ASC. Omit attribute to list all. Params: `actorLabel, attribute?, world?` |
 | `init_asc` | Initialize a live actor's ASC (InitAbilityActorInfo) and optionally instantiate an AttributeSet so attributes are live - the runtime setup step for testing a bridge-authored GAS actor. Params: `actorLabel, attributeSet? (content path or class name), world?` |
 | `get_asc_state` | Introspect a live actor's ASC: granted ability specs (class, level, inputID, active, dynamicTags) + owned gameplay tags. Params: `actorLabel, world? (auto\|pie\|editor) (#587)` |
+| `get_live_attribute_value` | Read the live value of one FGameplayAttributeData on the attribute set instance actually REGISTERED on an actor's AbilitySystemComponent - equivalent to ASC->GetSet<T>(), not the actor's own subobject pointer. Works in the editor world, where no set is registered yet, by first registering the actor's own sets the way BeginPlay would (set registerOwnerSets=false for a strict read). Returns currentValue and baseValue off the instance plus the aggregator's view of both, and the instance's object path so you can prove which object was read. Params: `actorLabel (label, name or path), attributeSet (content path or class name), attribute (property name, or Set.Property), registerOwnerSets?, world? (#956)` |
+| `set_live_attribute_value` | Write the live value of one FGameplayAttributeData on the REGISTERED attribute set instance on an actor's AbilitySystemComponent. valueType="current" (default) writes the attribute data in place, which is what staging a mid-combat state needs; valueType="base" writes through the ASC so the aggregator recomputes the current value, which is what a durable change needs. The set's PreAttributeChange may clamp, so the result reports what was actually stored alongside the previous values and the instance's object path. Params: `actorLabel (label, name or path), attributeSet, attribute, value, valueType?, registerOwnerSets?, world? (#956)` |
 
 ---
 
@@ -902,7 +904,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 
 | Action | Description |
 |--------|-------------|
-| `submit` | Submit feedback about a tool gap (missing action, wrong behavior, crash, or a case you had to work around). Provide a specific title and a summary; pythonWorkaround and idealTool are optional enrichment, not prerequisites. Checks the plugin registry first and files against the owning plugin's repo when one matches, then blocks on an MCP elicitation prompt that asks the USER (not the agent) to approve or decline the exact payload - and to override the tracker - before anything is posted to GitHub |
+| `submit` | Submit feedback about a tool gap (missing action, wrong behavior, crash, or a case you had to work around). Provide a specific title and a summary; pythonWorkaround and idealTool are optional enrichment, not prerequisites. Checks the plugin registry first and files against the owning plugin's repo when one matches, then blocks on an MCP elicitation prompt that asks the USER (not the agent) to approve or decline the exact payload - and to override the tracker - before anything is posted to GitHub. If the client cannot show that form (it never advertised elicitation, it throws, or it auto-answers in milliseconds without rendering anything), nothing is lost: the report is written to disk and the result carries a prefilled GitHub issue URL for the user to click |
 | `route` | Dry run the tracker routing for a report without posting anything. Returns the repo the issue would be filed against, the matched plugin (if any), and why. Params: `title, summary, idealTool?, repo?` |
 
 ---
