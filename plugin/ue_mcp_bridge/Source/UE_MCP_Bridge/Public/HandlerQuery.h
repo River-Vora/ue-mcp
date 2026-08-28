@@ -172,20 +172,23 @@ namespace MCPQuery
 			{
 				return nullptr;
 			}
-			const TSharedPtr<FJsonValue>* Found = Current->Values.Find(Segments[Index]);
-			if (!Found || !Found->IsValid())
+			// FJsonObject::Values is not keyed by FString on UE 5.8, so Find(FString)
+			// does not resolve. TryGetField takes an FStringView and is the
+			// supported lookup regardless of the map's key type.
+			const TSharedPtr<FJsonValue> Found = Current->TryGetField(Segments[Index]);
+			if (!Found.IsValid())
 			{
 				return nullptr;
 			}
 			if (Index == Segments.Num() - 1)
 			{
-				return *Found;
+				return Found;
 			}
-			if ((*Found)->Type != EJson::Object)
+			if (Found->Type != EJson::Object)
 			{
 				return nullptr;
 			}
-			Current = (*Found)->AsObject();
+			Current = Found->AsObject();
 		}
 		return nullptr;
 	}
