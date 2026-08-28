@@ -708,10 +708,13 @@ namespace MCPJsonProperty
 	/** The comparable form of an asset path.
 	 *
 	 *  Two normalisations, and only the two the resolver is allowed to apply:
-	 *  the Blueprint generated-class "_C" suffix on the object name, and the
-	 *  "Pkg.Obj" long form of "Pkg" that the content browser writes as "Pkg".
-	 *  The suffix is stripped from the object name only, never from a package
-	 *  name, so an asset genuinely called "Foo_C" still compares equal to
+	 *  the "Pkg.Obj" long form of "Pkg" that the content browser writes as
+	 *  "Pkg", and the Blueprint generated class "Pkg.Obj_C" of that same
+	 *  asset. Both are recognised by the object name repeating the package
+	 *  leaf, which is what makes them the same asset; a "_C" that does not
+	 *  produce that repetition is part of the name and is left alone, so
+	 *  /Script/Engine.Character and /Script/Engine.Character_C stay different
+	 *  paths, and an asset genuinely called Foo_C still compares equal to
 	 *  itself. A subobject path is compared whole. */
 	inline FString NormalizeAssetPathForCompare(const FString& InPath)
 	{
@@ -722,15 +725,20 @@ namespace MCPJsonProperty
 		if (!Path.FindLastChar(TEXT('.'), DotPos)) return Path;
 
 		const FString Package = Path.Left(DotPos);
-		FString ObjectName = Path.Mid(DotPos + 1);
-		if (ObjectName.EndsWith(TEXT("_C"))) ObjectName.LeftChopInline(2);
+		const FString ObjectName = Path.Mid(DotPos + 1);
 
 		int32 SlashPos = INDEX_NONE;
 		const FString LeafName = Package.FindLastChar(TEXT('/'), SlashPos)
 			? Package.Mid(SlashPos + 1)
 			: Package;
+
 		if (LeafName.Equals(ObjectName, ESearchCase::IgnoreCase)) return Package;
-		return Package + TEXT(".") + ObjectName;
+		if (ObjectName.EndsWith(TEXT("_C")) &&
+			LeafName.Equals(ObjectName.LeftChop(2), ESearchCase::IgnoreCase))
+		{
+			return Package;
+		}
+		return Path;
 	}
 
 	/** Read the stored value back and answer whether it is what was asked for.
