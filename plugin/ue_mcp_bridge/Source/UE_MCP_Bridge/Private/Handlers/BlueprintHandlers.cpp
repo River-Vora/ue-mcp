@@ -7,6 +7,10 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "BlueprintEditorLibrary.h"
 #include "Engine/Blueprint.h"
+// #942: World -> level script Blueprint resolution.
+#include "Engine/World.h"
+#include "Engine/Level.h"
+#include "Engine/LevelScriptBlueprint.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "K2Node.h"
@@ -166,7 +170,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ReadBlueprintGraphSummary(const TShar
 	const bool bFiltering = !TitleFilter.IsEmpty() || !ClassFilter.IsEmpty();
 
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
-	if (!Blueprint) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	if (!Blueprint) return BlueprintNotFoundError(AssetPath);
 
 	UEdGraph* Graph = FindGraph(Blueprint, GraphName);
 	if (!Graph) return MCPError(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
@@ -214,6 +218,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ReadBlueprintGraphSummary(const TShar
 
 	TSharedPtr<FJsonObject> Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
+	AnnotateResolvedBlueprint(Result, Blueprint);
 	Result->SetStringField(TEXT("graphName"), GraphName);
 	// #298: identify graph type so callers can tell ubergraph / construction
 	// script / function / macro apart without having to grep node titles.
@@ -254,7 +259,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::GetBlueprintExecutionFlow(const TShar
 	FString EntryPoint = OptionalString(Params, TEXT("entryPoint"), TEXT(""));
 
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
-	if (!Blueprint) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	if (!Blueprint) return BlueprintNotFoundError(AssetPath);
 
 	UEdGraph* Graph = FindGraph(Blueprint, GraphName);
 	if (!Graph) return MCPError(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
@@ -336,6 +341,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::GetBlueprintExecutionFlow(const TShar
 
 	TSharedPtr<FJsonObject> Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
+	AnnotateResolvedBlueprint(Result, Blueprint);
 	Result->SetStringField(TEXT("graphName"), GraphName);
 	Result->SetStringField(TEXT("entryPoint"), Entry->GetNodeTitle(ENodeTitleType::ListView).ToString());
 	Result->SetStringField(TEXT("entryId"), Entry->NodeGuid.ToString(EGuidFormats::Short));
@@ -351,7 +357,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::GetBlueprintDependencies(const TShare
 	const bool bReverse = OptionalBool(Params, TEXT("reverse"), false);
 
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
-	if (!Blueprint) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	if (!Blueprint) return BlueprintNotFoundError(AssetPath);
 
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 	IAssetRegistry& Registry = AssetRegistryModule.Get();
@@ -433,9 +439,52 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::GetBlueprintDependencies(const TShare
 	return MCPResult(Result);
 }
 
+namespace
+{
+	// #942: resolve a World/umap path to the level script Blueprint that lives
+	// inside it. The level script is a subobject of the persistent level, never
+	// an asset of its own, so loading a UBlueprint from "/Game/Maps/SomeLevel"
+	// can never find it however the path is spelled.
+	//
+	// bDontCreate is deliberate. A map that has never had a Level Blueprint
+	// opened has no level script object, and a READ must not author one as a
+	// side effect: it would dirty the map package and write a new subobject
+	// into somebody's level for asking a question about it.
+	ULevelScriptBlueprint* ResolveLevelScriptBlueprint(const FString& AssetPath)
+	{
+		UWorld* World = LoadAssetByPath<UWorld>(AssetPath);
+		if (!World || !World->PersistentLevel) return nullptr;
+		return World->PersistentLevel->GetLevelScriptBlueprint(/*bDontCreate=*/true);
+	}
+}
+
 UBlueprint* FBlueprintHandlers::LoadBlueprint(const FString& AssetPath)
 {
-	return LoadAssetByPath<UBlueprint>(AssetPath);
+	if (UBlueprint* Direct = LoadAssetByPath<UBlueprint>(AssetPath))
+	{
+		return Direct;
+	}
+	// #942: one resolution point, so every action that reaches a Blueprint
+	// through this function accepts a umap path on exactly the same terms.
+	return ResolveLevelScriptBlueprint(AssetPath);
+}
+
+TSharedPtr<FJsonValue> BlueprintNotFoundError(const FString& AssetPath)
+{
+	if (UWorld* World = LoadAssetByPath<UWorld>(AssetPath))
+	{
+		return MCPError(FString::Printf(
+			TEXT("'%s' is a World, and its level script Blueprint does not exist yet, so there is nothing to read. Open the map's Level Blueprint in the editor once (that creates it), then retry this call with the same path. When it exists it resolves to %s:PersistentLevel.%s"),
+			*AssetPath, *World->GetPathName(), *World->GetName()));
+	}
+	return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+}
+
+void AnnotateResolvedBlueprint(const TSharedPtr<FJsonObject>& Result, UBlueprint* Blueprint)
+{
+	if (!Result.IsValid() || !Blueprint) return;
+	Result->SetStringField(TEXT("blueprintPath"), Blueprint->GetPathName());
+	Result->SetBoolField(TEXT("isLevelScript"), Blueprint->IsA<ULevelScriptBlueprint>());
 }
 
 // ---------------------------------------------------------------------------
@@ -486,7 +535,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ListGraphs(const TSharedPtr<FJsonObje
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	TArray<UEdGraph*> AllGraphs;
@@ -505,6 +554,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ListGraphs(const TSharedPtr<FJsonObje
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
+	AnnotateResolvedBlueprint(Result, Blueprint);
 	Result->SetArrayField(TEXT("graphs"), GraphsArray);
 
 	return MCPResult(Result);
@@ -527,7 +577,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ResolveGraph(const TSharedPtr<FJsonOb
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	TArray<UEdGraph*> AllGraphs;
@@ -588,6 +638,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ResolveGraph(const TSharedPtr<FJsonOb
 
 	TSharedPtr<FJsonObject> Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
+	AnnotateResolvedBlueprint(Result, Blueprint);
 	Result->SetStringField(TEXT("requestedGraphName"), RequestedName);
 	Result->SetNumberField(TEXT("matchCount"), MatchArray.Num());
 	Result->SetBoolField(TEXT("ambiguous"), MatchArray.Num() > 1);
@@ -1122,7 +1173,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ReadBlueprint(const TSharedPtr<FJsonO
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	// #353/#370: per-component property dump on demand. Off by default so the
@@ -1153,6 +1204,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ReadBlueprint(const TSharedPtr<FJsonO
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
+	AnnotateResolvedBlueprint(Result, Blueprint);
 	Result->SetStringField(TEXT("className"), Blueprint->GetName());
 	if (Blueprint->ParentClass)
 	{
@@ -1331,7 +1383,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AddVariable(const TSharedPtr<FJsonObj
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	// Idempotency: if the variable already exists on the blueprint, short-circuit.
@@ -1399,7 +1451,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AddComponent(const TSharedPtr<FJsonOb
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	// Idempotency: existing SCS component with same name short-circuits.
@@ -1562,7 +1614,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::CompileBlueprint(const TSharedPtr<FJs
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	// #703: capture the compiler log and report real status instead of always
@@ -1951,7 +2003,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ListBlueprintVariables(const TSharedP
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	TArray<TSharedPtr<FJsonValue>> Variables;
@@ -2034,7 +2086,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::RemoveComponent(const TSharedPtr<FJso
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
@@ -2129,7 +2181,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::DeleteVariable(const TSharedPtr<FJson
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	bool bFound = false;
@@ -2210,7 +2262,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AddLocalVariable(const TSharedPtr<FJs
 	FString TypeStr = OptionalString(Params, TEXT("varType"), TEXT("bool"));
 
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
-	if (!Blueprint) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	if (!Blueprint) return BlueprintNotFoundError(AssetPath);
 
 	// Find the function graph and its FunctionEntry node.
 	UEdGraph* FuncGraph = nullptr;
@@ -2276,7 +2328,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ListLocalVariables(const TSharedPtr<F
 	if (auto Err = RequireString(Params, TEXT("functionName"), FunctionName)) return Err;
 
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
-	if (!Blueprint) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	if (!Blueprint) return BlueprintNotFoundError(AssetPath);
 
 	UEdGraph* FuncGraph = nullptr;
 	for (UEdGraph* G : Blueprint->FunctionGraphs)
@@ -2317,7 +2369,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ValidateBlueprint(const TSharedPtr<FJ
 	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
 
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
-	if (!Blueprint) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	if (!Blueprint) return BlueprintNotFoundError(AssetPath);
 
 	// Run compile without saving; collect diagnostics from the compiler result log.
 	FCompilerResultsLog Log;
@@ -2390,7 +2442,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ReparentBlueprint(const TSharedPtr<FJ
 	if (auto Err = RequireString(Params, TEXT("parentClass"), ParentClassName)) return Err;
 
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
-	if (!Blueprint) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	if (!Blueprint) return BlueprintNotFoundError(AssetPath);
 
 	// Resolve parent class: full path > short name > engine-module implicit.
 	UClass* NewParent = nullptr;
@@ -2459,7 +2511,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::FlushInheritableComponentHandler(cons
 	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
 
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
-	if (!Blueprint) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	if (!Blueprint) return BlueprintNotFoundError(AssetPath);
 
 	UInheritableComponentHandler* ICH = Blueprint->GetInheritableComponentHandler(/*bCreateIfNecessary=*/false);
 	if (!ICH)
@@ -2513,7 +2565,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::RunConstructionScript(const TSharedPt
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	UClass* SpawnClass = Blueprint->GeneratedClass;

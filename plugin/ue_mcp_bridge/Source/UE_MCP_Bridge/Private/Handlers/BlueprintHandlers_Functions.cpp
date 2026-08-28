@@ -94,7 +94,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::CreateFunction(const TSharedPtr<FJson
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	// Idempotency: existing function graph short-circuits.
@@ -223,7 +223,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ListBlueprintFunctions(const TSharedP
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	// Skeleton class super is the reliable parent during an in-editor edit; fall
@@ -556,7 +556,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::RenameFunction(const TSharedPtr<FJson
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	// Find the function graph
@@ -608,7 +608,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::DeleteFunction(const TSharedPtr<FJson
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	UEdGraph* FoundGraph = nullptr;
@@ -726,7 +726,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::OverrideFunction(const TSharedPtr<FJs
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	const FName FuncName(*FunctionName);
@@ -896,7 +896,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ListOverridableFunctions(const TShare
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	FBlueprintEditorUtils::ConformImplementedInterfaces(Blueprint);
