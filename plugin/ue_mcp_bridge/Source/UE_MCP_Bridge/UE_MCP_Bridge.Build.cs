@@ -23,6 +23,8 @@ public class UE_MCP_Bridge : ModuleRules
 	// Private/Tests/DataTableRowWriteTests.cpp: same reason.
 	// Private/Handlers/EditorHandlers_RuntimeVisibility.cpp and
 	// Private/Tests/RuntimeVisibilityTests.cpp: same reason.
+	// Private/Handlers/MaterialHandlers_Build.cpp and
+	// Private/Tests/MaterialBuildTests.cpp: same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
