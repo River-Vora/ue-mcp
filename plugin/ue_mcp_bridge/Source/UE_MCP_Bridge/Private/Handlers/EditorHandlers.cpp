@@ -1433,8 +1433,18 @@ TSharedPtr<FJsonValue> FEditorHandlers::GetBuildStatus(const TSharedPtr<FJsonObj
 }
 TSharedPtr<FJsonValue> FEditorHandlers::CaptureScreenshot(const TSharedPtr<FJsonObject>& Params)
 {
-	FString Filename;
-	if (auto Err = RequireString(Params, TEXT("filename"), Filename)) return Err;
+	// #966: capture_scene_png names this parameter `outputPath` and this action
+	// named it `filename`, for the same thing, so passing one to the other
+	// failed on a call that was otherwise correct. Both are accepted by both.
+	FString Filename = OptionalString(Params, TEXT("filename"));
+	if (Filename.IsEmpty())
+	{
+		Filename = OptionalString(Params, TEXT("outputPath"));
+	}
+	if (Filename.IsEmpty())
+	{
+		return MCPError(TEXT("Missing 'filename' (also accepted as 'outputPath'): where to write the image"));
+	}
 
 	// Ensure the filename has a proper extension
 	if (!Filename.EndsWith(TEXT(".png")) && !Filename.EndsWith(TEXT(".jpg")) && !Filename.EndsWith(TEXT(".bmp")))
@@ -2450,8 +2460,18 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScenePng(const TSharedPtr<FJsonOb
 	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
-	FString OutputPath;
-	if (auto Err = RequireString(Params, TEXT("outputPath"), OutputPath)) return Err;
+	// #966: capture_screenshot names this parameter `filename` and this action
+	// named it `outputPath`, for the same thing, so passing one to the other
+	// failed on a call that was otherwise correct. Both are accepted by both.
+	FString OutputPath = OptionalString(Params, TEXT("outputPath"));
+	if (OutputPath.IsEmpty())
+	{
+		OutputPath = OptionalString(Params, TEXT("filename"));
+	}
+	if (OutputPath.IsEmpty())
+	{
+		return MCPError(TEXT("Missing 'outputPath' (also accepted as 'filename'): where to write the PNG"));
+	}
 
 	// Resolution
 	int32 Width = OptionalInt(Params, TEXT("width"), 1280);
@@ -2483,27 +2503,69 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScenePng(const TSharedPtr<FJsonOb
 		Rotation = (Origin - Location).Rotation();
 	}
 
-	// Find or spawn the reusable capture actor.
+	// #966: the capture actor used to be spawned once and LEFT IN THE LEVEL.
+	// It is a level actor, so it was saved into the map and committed to source
+	// control as though somebody had authored it, and list_dirty_packages
+	// reported nothing while it sat there, so the usual "did I change
+	// anything" check missed it entirely. A capture must leave the level
+	// exactly as it found it.
+	//
+	// Two halves. First, sweep any debris earlier builds left behind, so a
+	// project that already has one is cleaned by the next capture rather than
+	// by hand.
 	static const FString CaptureLabel = TEXT("__ClaudeSceneCapture");
-	ASceneCapture2D* CaptureActor = nullptr;
-	for (TActorIterator<ASceneCapture2D> It(World); It; ++It)
+	int32 RemovedStrayCaptures = 0;
 	{
-		if (It->GetActorLabel() == CaptureLabel)
+		TArray<ASceneCapture2D*> Strays;
+		for (TActorIterator<ASceneCapture2D> It(World); It; ++It)
 		{
-			CaptureActor = *It;
-			break;
+			if (It->GetActorLabel() == CaptureLabel)
+			{
+				Strays.Add(*It);
+			}
+		}
+		for (ASceneCapture2D* Stray : Strays)
+		{
+			// These ones ARE in the map, so their removal is a real edit and
+			// goes through Modify(): the level has to become dirty, or the
+			// debris comes straight back on the next load.
+			if (IsValid(Stray) && World->DestroyActor(Stray))
+			{
+				++RemovedStrayCaptures;
+			}
 		}
 	}
-	if (!CaptureActor)
+
+	// Second, this capture's own actor: transient, outside the scene outliner,
+	// in no actor package of its own, and destroyed on every exit from here.
+	// The transient flag alone is not enough, because the debris that prompted
+	// this was visible in the outliner and in the map's actor list either way.
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.ObjectFlags |= RF_Transient;
+#if WITH_EDITOR
+	SpawnParams.bTemporaryEditorActor = true;
+	SpawnParams.bHideFromSceneOutliner = true;
+	SpawnParams.bCreateActorPackage = false;
+#endif
+	ASceneCapture2D* CaptureActor = World->SpawnActor<ASceneCapture2D>(ASceneCapture2D::StaticClass(), Location, Rotation, SpawnParams);
+	if (!CaptureActor) return MCPError(TEXT("Failed to spawn SceneCapture2D actor"));
+	CaptureActor->SetActorHiddenInGame(true);
+
+	ON_SCOPE_EXIT
 	{
-		FActorSpawnParameters SpawnParams;
-		SpawnParams.ObjectFlags |= RF_Transient;
-		CaptureActor = World->SpawnActor<ASceneCapture2D>(ASceneCapture2D::StaticClass(), Location, Rotation, SpawnParams);
-		if (!CaptureActor) return MCPError(TEXT("Failed to spawn SceneCapture2D actor"));
-		CaptureActor->SetActorLabel(CaptureLabel);
-		CaptureActor->SetActorHiddenInGame(true);
-	}
-	CaptureActor->SetActorLocationAndRotation(Location, Rotation);
+		if (IsValid(CaptureActor))
+		{
+			// Drop the render target first: the component holds the only
+			// reference keeping it alive past this call.
+			if (USceneCaptureComponent2D* Dying = CaptureActor->GetCaptureComponent2D())
+			{
+				Dying->TextureTarget = nullptr;
+			}
+			// bShouldModifyLevel=false: this actor was never part of the map,
+			// so removing it is not an edit and must not dirty the package.
+			World->DestroyActor(CaptureActor, /*bNetForce*/ false, /*bShouldModifyLevel*/ false);
+		}
+	};
 
 	USceneCaptureComponent2D* Comp = CaptureActor->GetCaptureComponent2D();
 	if (!Comp) return MCPError(TEXT("SceneCapture2D has no capture component"));
@@ -2557,7 +2619,13 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScenePng(const TSharedPtr<FJsonOb
 	Result->SetNumberField(TEXT("width"), Width);
 	Result->SetNumberField(TEXT("height"), Height);
 	Result->SetNumberField(TEXT("sizeBytes"), (double)Size);
-	Result->SetStringField(TEXT("actorLabel"), CaptureLabel);
+	// The capture actor is gone by the time this reaches the caller, so say so
+	// rather than naming an actor they could go and look for.
+	Result->SetBoolField(TEXT("captureActorRemoved"), true);
+	if (RemovedStrayCaptures > 0)
+	{
+		Result->SetNumberField(TEXT("strayCaptureActorsRemoved"), RemovedStrayCaptures);
+	}
 	return MCPResult(Result);
 }
 
