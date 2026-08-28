@@ -104,6 +104,10 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("get_component_tree"), &GetComponentTree);
 	Registry.RegisterHandler(TEXT("get_relative_transform"), &GetRelativeTransform);
 	Registry.RegisterHandler(TEXT("get_current_level"), &GetCurrentLevel);
+	// #964: LevelHandlers_Save.cpp. Saves through the same package path
+	// editor(save_dirty) uses, so the two cannot disagree about one package,
+	// and reports the package, the file and the engine's own reason on failure.
+	Registry.RegisterHandler(TEXT("save_level"), &SaveLevel);
 	Registry.RegisterHandler(TEXT("list_levels"), &ListLevels);
 	Registry.RegisterHandler(TEXT("get_selected_actors"), &GetSelectedActors);
 	Registry.RegisterHandler(TEXT("list_volumes"), &ListVolumes);

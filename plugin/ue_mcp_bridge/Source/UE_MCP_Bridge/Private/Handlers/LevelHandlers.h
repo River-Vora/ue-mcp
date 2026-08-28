@@ -31,6 +31,10 @@ private:
 	// expressed in reference's local space).
 	static TSharedPtr<FJsonValue> GetRelativeTransform(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetCurrentLevel(const TSharedPtr<FJsonObject>& Params);
+	// #964: save the level currently being edited, through the same package
+	// path editor(save_dirty) uses, and report what happened to each package
+	// rather than one bare boolean. LevelHandlers_Save.cpp.
+	static TSharedPtr<FJsonValue> SaveLevel(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ListLevels(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetSelectedActors(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ListVolumes(const TSharedPtr<FJsonObject>& Params);
