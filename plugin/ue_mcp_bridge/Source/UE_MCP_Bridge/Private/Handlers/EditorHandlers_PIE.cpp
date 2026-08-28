@@ -1315,18 +1315,23 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeStaticFunction(const TSharedPtr<FJ
 	FString FunctionName;
 	if (auto Err = RequireString(Params, TEXT("functionName"), FunctionName)) return Err;
 
+	// #971: route through the shared resolver, so world=editor|pie|game|auto
+	// and pieInstance select here exactly as they do for invoke_function. The
+	// old code special-cased the literal string "pie" and sent everything else
+	// to the editor world, which has no GameInstance: a server-authoritative
+	// entry point implemented as a static that looks a UGameInstanceSubsystem up
+	// off its world context could not be exercised in PIE at all.
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor")).ToLower();
-	UWorld* World = nullptr;
-	if (WorldScope == TEXT("pie"))
+	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
+	if (!World)
 	{
-		World = ResolveWorldFromParams(Params, TEXT("pie"));
-		if (!World) return MCPError(TEXT("PIE not running - cannot invoke against PIE world"));
+		return MCPError(WorldScope == TEXT("pie") || WorldScope == TEXT("game")
+			? TEXT("PIE not running (or no such pieInstance) - cannot invoke against a PIE world. See editor(list_pie_instances).")
+			: TEXT("No editor world available"));
 	}
-	else
-	{
-		World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
-		if (!World) return MCPError(TEXT("No editor world available"));
-	}
+	// Describe the world that was actually resolved, not the requested scope:
+	// world="auto" resolves to PIE when a session is running.
+	const FString WorldLabel = World->IsPlayInEditor() ? TEXT("PIE") : TEXT("editor");
 
 	// Resolve the function-library class: a /Script/Module.Class path, or a bare
 	// class name (with or without the leading U).
@@ -1406,7 +1411,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeStaticFunction(const TSharedPtr<FJ
 			if (!RefActor)
 			{
 				Cleanup();
-				return MCPError(FString::Printf(TEXT("actorArgs[%s]: actor '%s' not found in %s world"), *P->GetName(), *ActorArgLabel, WorldScope == TEXT("pie") ? TEXT("PIE") : TEXT("editor")));
+				return MCPError(FString::Printf(TEXT("actorArgs[%s]: actor '%s' not found in %s world"), *P->GetName(), *ActorArgLabel, *WorldLabel));
 			}
 			if (!RefActor->IsA(OP->PropertyClass))
 			{
@@ -1432,8 +1437,22 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeStaticFunction(const TSharedPtr<FJ
 
 	// World-context injection: static library functions commonly take a UObject*
 	// WorldContextObject. Fill any unset object param matching worldContextParam
-	// (or named WorldContextObject) with the resolved world.
+	// (or the name the function's own WorldContext metadata gives, or a name
+	// containing WorldContext) with the world resolved above.
+	//
+	// #971: worldContextParam only ever chose WHICH parameter to fill. What goes
+	// into it is the selected world, so the parameter that decides PIE versus
+	// editor is `world`, and the metadata lookup means a library that names its
+	// context parameter something else is still recognised.
 	const FString WcParam = OptionalString(Params, TEXT("worldContextParam"), TEXT(""));
+	FString MetaWcParam;
+#if WITH_METADATA
+	if (const FString* Declared = Func->FindMetaData(TEXT("WorldContext")))
+	{
+		MetaWcParam = *Declared;
+	}
+#endif
+	FString FilledWcParam;
 	for (TFieldIterator<FProperty> It(Func); It && (It->PropertyFlags & CPF_Parm); ++It)
 	{
 		FProperty* P = *It;
@@ -1441,13 +1460,17 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeStaticFunction(const TSharedPtr<FJ
 		FObjectProperty* OP = CastField<FObjectProperty>(P);
 		if (!OP) continue;
 		const FString PName = P->GetName();
-		const bool bIsWc = (!WcParam.IsEmpty() && PName == WcParam) || PName.Contains(TEXT("WorldContext"));
+		const bool bIsWc =
+			(!WcParam.IsEmpty() && PName == WcParam) ||
+			(!MetaWcParam.IsEmpty() && PName == MetaWcParam) ||
+			PName.Contains(TEXT("WorldContext"));
 		if (!bIsWc) continue;
 		void* Addr = P->ContainerPtrToValuePtr<void>(ParamBuf.GetData());
 		if (OP->GetObjectPropertyValue(Addr) != nullptr) continue;
 		if (World->IsA(OP->PropertyClass) || OP->PropertyClass == UObject::StaticClass())
 		{
 			OP->SetObjectPropertyValue(Addr, World);
+			FilledWcParam = PName;
 		}
 	}
 
@@ -1457,6 +1480,16 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeStaticFunction(const TSharedPtr<FJ
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("className"), LibClass->GetName());
 	Result->SetStringField(TEXT("functionName"), FunctionName);
+	// #971: say which world the call actually ran against and which parameter
+	// carried it. "subsystem unavailable" from a static that looks a
+	// GameInstance subsystem up off its context is unreadable without this.
+	Result->SetStringField(TEXT("world"), WorldLabel);
+	Result->SetStringField(TEXT("worldPath"), World->GetPathName());
+	Result->SetStringField(TEXT("netMode"), DescribePIENetMode(World));
+	if (!FilledWcParam.IsEmpty())
+	{
+		Result->SetStringField(TEXT("worldContextParam"), FilledWcParam);
+	}
 
 	// #885: containers come back as real JSON, scalars and structs keep their
 	// export-text spelling. See MCPFunctionCall::OutputToJson.
