@@ -9,6 +9,7 @@
 #include "HandlerUtils.h"
 
 #include "UObject/GCObjectScopeGuard.h"
+#include "HandlerFunctionCall.h"
 #include "HandlerJsonProperty.h"
 #include "JsonSerializer.h"
 #include "Containers/Ticker.h"
@@ -1193,36 +1194,14 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 	if (!ComponentName.IsEmpty()) Result->SetStringField(TEXT("component"), ComponentName);
 	Result->SetStringField(TEXT("functionName"), FunctionName);
 
+	// #885: containers come back as real JSON. Export text renders a
+	// TArray<FString> return as an empty string, which made every
+	// array-returning accessor unreadable through the bridge.
 	TSharedPtr<FJsonObject> OutVals = MakeShared<FJsonObject>();
-	for (TFieldIterator<FProperty> It(Func); It && (It->PropertyFlags & CPF_Parm); ++It)
-	{
-		FProperty* P = *It;
-		if (P->PropertyFlags & (CPF_ReturnParm | CPF_OutParm))
-		{
-			// ParamBuf is raw bytes and invisible to GC, so an object out-param
-			// the call destroyed would be dereferenced by ExportTextItem_Direct.
-			// The scope guard above covers the target, not the results.
-			if (FObjectPropertyBase* OP = CastField<FObjectPropertyBase>(P))
-			{
-				UObject* Out = OP->GetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(ParamBuf.GetData()));
-				if (!Out) { OutVals->SetStringField(P->GetName(), TEXT("None")); continue; }
-				if (!IsValid(Out))
-				{
-					OutVals->SetStringField(P->GetName(), TEXT("(collected during the call)"));
-					continue;
-				}
-			}
-			FString S;
-			P->ExportTextItem_Direct(S, P->ContainerPtrToValuePtr<void>(ParamBuf.GetData()), nullptr, CallTarget, PPF_None);
-			OutVals->SetStringField(P->GetName(), S);
-		}
-	}
+	MCPFunctionCall::WriteOutputs(OutVals, Func, ParamBuf.GetData(), CallTarget);
 	Result->SetObjectField(TEXT("returnValues"), OutVals);
 
-	for (TFieldIterator<FProperty> It(Func); It && (It->PropertyFlags & CPF_Parm); ++It)
-	{
-		It->DestroyValue_InContainer(ParamBuf.GetData());
-	}
+	MCPFunctionCall::DestroyFrame(Func, ParamBuf.GetData());
 	return MCPResult(Result);
 }
 
@@ -1388,30 +1367,10 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeStaticFunction(const TSharedPtr<FJ
 	Result->SetStringField(TEXT("className"), LibClass->GetName());
 	Result->SetStringField(TEXT("functionName"), FunctionName);
 
+	// #885: containers come back as real JSON, scalars and structs keep their
+	// export-text spelling. See MCPFunctionCall::OutputToJson.
 	TSharedPtr<FJsonObject> OutVals = MakeShared<FJsonObject>();
-	for (TFieldIterator<FProperty> It(Func); It && (It->PropertyFlags & CPF_Parm); ++It)
-	{
-		FProperty* P = *It;
-		if (P->PropertyFlags & (CPF_ReturnParm | CPF_OutParm))
-		{
-			// ParamBuf is raw bytes and invisible to GC, so an object out-param
-			// the call destroyed would be dereferenced by ExportTextItem_Direct.
-			// The scope guard above covers the CDO, not the results.
-			if (FObjectPropertyBase* OP = CastField<FObjectPropertyBase>(P))
-			{
-				UObject* Out = OP->GetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(ParamBuf.GetData()));
-				if (!Out) { OutVals->SetStringField(P->GetName(), TEXT("None")); continue; }
-				if (!IsValid(Out))
-				{
-					OutVals->SetStringField(P->GetName(), TEXT("(collected during the call)"));
-					continue;
-				}
-			}
-			FString S;
-			P->ExportTextItem_Direct(S, P->ContainerPtrToValuePtr<void>(ParamBuf.GetData()), nullptr, CDO, PPF_None);
-			OutVals->SetStringField(P->GetName(), S);
-		}
-	}
+	MCPFunctionCall::WriteOutputs(OutVals, Func, ParamBuf.GetData(), CDO);
 	Result->SetObjectField(TEXT("returnValues"), OutVals);
 
 	Cleanup();

@@ -13,6 +13,7 @@
 
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+#include "HandlerFunctionCall.h"
 #include "HandlerJsonProperty.h"
 #include "HandlerPropertyText.h"
 #include "JsonSerializer.h"
@@ -291,39 +292,13 @@ namespace
 		// collection has already happened - so out-param objects are validated
 		// with IsValid() at export time instead.
 
+		// #885: containers come back as real JSON, scalars and structs keep
+		// their export-text spelling, and an object out-param the call
+		// destroyed is reported as such rather than dereferenced. All three
+		// live in MCPFunctionCall so the wire format cannot diverge between
+		// the call actions.
 		TSharedPtr<FJsonObject> OutVals = MakeShared<FJsonObject>();
-		for (TFieldIterator<FProperty> It(Func); It && (It->PropertyFlags & CPF_Parm); ++It)
-		{
-			FProperty* P = *It;
-			if (P->PropertyFlags & (CPF_ReturnParm | CPF_OutParm))
-			{
-				// An object out-param may have been collected during the call:
-				// ParamBuf is raw bytes and invisible to GC, so exporting it
-				// would dereference freed memory. Check first, then export
-				// through the same path as every other property so the wire
-				// format does not diverge between call actions.
-				if (FObjectPropertyBase* OP = CastField<FObjectPropertyBase>(P))
-				{
-					UObject* Out = OP->GetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(ParamBuf.GetData()));
-					if (!Out)
-					{
-						OutVals->SetStringField(P->GetName(), TEXT("None"));
-						continue;
-					}
-					if (!IsValid(Out))
-					{
-						// Distinct from "None": the call returned an object and
-						// then something destroyed it. Reporting an empty string
-						// for both would read as a null return.
-						OutVals->SetStringField(P->GetName(), TEXT("(collected during the call)"));
-						continue;
-					}
-				}
-				FString S;
-				P->ExportTextItem_Direct(S, P->ContainerPtrToValuePtr<void>(ParamBuf.GetData()), nullptr, CallTarget, PPF_None);
-				OutVals->SetStringField(P->GetName(), S);
-			}
-		}
+		MCPFunctionCall::WriteOutputs(OutVals, Func, ParamBuf.GetData(), CallTarget);
 		Cleanup();
 
 		Result->SetStringField(TEXT("functionName"), FunctionName);
