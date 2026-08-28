@@ -1710,6 +1710,89 @@ namespace
 		return true;
 	}
 
+	// #976: UEditorAssetLibrary::DeleteAsset is the FORCE-delete entry point.
+	// Its own header says so: "It doesn't check if the asset has references in
+	// other Levels or by Actors." Both delete handlers called it whatever the
+	// caller passed for `force`, so a referenced asset was destroyed and its
+	// referencers were rewritten to point at nothing, with `force=false`
+	// reading as a safety flag that did not exist.
+	//
+	// The Asset Registry holds the same reference graph the Content Browser's
+	// reference viewer draws, so asking it first is what turns a force delete
+	// back into a checked one. Self-references are dropped: a package always
+	// lists itself.
+	TArray<FString> CollectPackageReferencers(const FString& AssetPath)
+	{
+		TArray<FString> Out;
+
+		const FMCPAssetPathForms Forms = MCPAssetPathForms(AssetPath);
+		if (Forms.PackagePath.IsEmpty()) return Out;
+
+		FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+		const FName PackageFName(*Forms.PackagePath);
+		TArray<FName> Refs;
+		ARM.Get().GetReferencers(PackageFName, Refs);
+		for (const FName& R : Refs)
+		{
+			if (R != PackageFName)
+			{
+				Out.AddUnique(R.ToString());
+			}
+		}
+		Out.Sort([](const FString& A, const FString& B) { return A < B; });
+		return Out;
+	}
+
+	/** The refusal a checked delete hands back. Names the packages that would
+	 *  have been rewritten, so the caller can decide rather than discover. */
+	void ApplyReferencerRefusalToJson(
+		const TSharedPtr<FJsonObject>& Out,
+		const FString& AssetPath,
+		const TArray<FString>& Referencers)
+	{
+		// Long lists are the interesting case and truncating them would hide
+		// exactly the referencer a caller is looking for, so the count is
+		// reported alongside a bounded sample rather than a silent slice.
+		constexpr int32 MaxNamed = 25;
+		const int32 Named = FMath::Min(Referencers.Num(), MaxNamed);
+
+		TArray<FString> Sample;
+		Sample.Append(Referencers.GetData(), Named);
+
+		Out->SetStringField(TEXT("error"), FString::Printf(
+			TEXT("'%s' is referenced by %d package(s) and force=false, so it was not deleted. ")
+			TEXT("Deleting it would rewrite those referencers to point at nothing. ")
+			TEXT("Repoint or delete the referencers first, or pass force=true to delete anyway. Referencers: %s%s"),
+			*AssetPath,
+			Referencers.Num(),
+			*FString::Join(Sample, TEXT(", ")),
+			Referencers.Num() > Named ? TEXT(", ...") : TEXT("")));
+		Out->SetStringField(TEXT("path"), AssetPath);
+		Out->SetBoolField(TEXT("deleted"), false);
+		Out->SetStringField(TEXT("reason"), TEXT("has_referencers"));
+		Out->SetNumberField(TEXT("referencerCount"), Referencers.Num());
+
+		TArray<TSharedPtr<FJsonValue>> RefsJson;
+		for (const FString& R : Referencers)
+		{
+			RefsJson.Add(MakeShared<FJsonValueString>(R));
+		}
+		Out->SetArrayField(TEXT("referencers"), RefsJson);
+	}
+
+	/** Run the checked-delete gate for one path. Returns true and fills Out
+	 *  with the refusal when the asset has referencers; false when the delete
+	 *  may proceed. Both delete handlers go through this so the single and
+	 *  batch forms cannot drift into enforcing different rules. */
+	bool CheckedDeleteRefusal(const FString& AssetPath, const TSharedPtr<FJsonObject>& Out)
+	{
+		const TArray<FString> Referencers = CollectPackageReferencers(AssetPath);
+		if (Referencers.IsEmpty()) return false;
+		Out->SetStringField(TEXT("status"), TEXT("refused"));
+		ApplyReferencerRefusalToJson(Out, AssetPath, Referencers);
+		return true;
+	}
+
 	FDeleteDiagnostics DiagnoseDeleteFailure(const FString& AssetPath)
 	{
 		FDeleteDiagnostics Diag;
@@ -1825,6 +1908,18 @@ TSharedPtr<FJsonValue> FAssetHandlers::DeleteAsset(const TSharedPtr<FJsonObject>
 		return MCPResult(Result);
 	}
 
+	// #976: the delete below is a force delete, so the reference check has to
+	// happen here rather than being left to an API that does not do one.
+	if (!bForce)
+	{
+		TSharedPtr<FJsonObject> Refused = MakeShared<FJsonObject>();
+		Refused->SetBoolField(TEXT("success"), false);
+		if (CheckedDeleteRefusal(AssetPath, Refused))
+		{
+			return MCPResult(Refused);
+		}
+	}
+
 	bool bClosedEditor = false;
 	if (bForce)
 	{
@@ -1836,6 +1931,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::DeleteAsset(const TSharedPtr<FJsonObject>
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
 	Result->SetBoolField(TEXT("deleted"), bSuccess);
+	Result->SetBoolField(TEXT("forced"), bForce);
 	if (bClosedEditor)
 	{
 		Result->SetBoolField(TEXT("closedOpenEditor"), true);
@@ -1864,6 +1960,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::DeleteAssetBatch(const TSharedPtr<FJsonOb
 	int32 Deleted = 0;
 	int32 Absent = 0;
 	int32 Failed = 0;
+	int32 Refused = 0;
 	int32 ClosedEditors = 0;
 
 	int32 Protected = 0;
@@ -1888,6 +1985,15 @@ TSharedPtr<FJsonValue> FAssetHandlers::DeleteAssetBatch(const TSharedPtr<FJsonOb
 		{
 			Entry->SetStringField(TEXT("status"), TEXT("absent"));
 			Absent++;
+		}
+		else if (!bForce && CheckedDeleteRefusal(Path, Entry))
+		{
+			// #976: same rule as the single delete. Per-asset, because one
+			// referenced entry in a batch is not a reason to refuse the rest,
+			// and a bare "failed" count never said which entry was skipped or
+			// why. Status is its own value so a caller can tell a refusal
+			// apart from a delete the editor attempted and could not finish.
+			Refused++;
 		}
 		else
 		{
@@ -1918,6 +2024,8 @@ TSharedPtr<FJsonValue> FAssetHandlers::DeleteAssetBatch(const TSharedPtr<FJsonOb
 	Result->SetNumberField(TEXT("deleted"), Deleted);
 	Result->SetNumberField(TEXT("absent"), Absent);
 	Result->SetNumberField(TEXT("failed"), Failed);
+	Result->SetNumberField(TEXT("refused"), Refused);
+	Result->SetBoolField(TEXT("forced"), bForce);
 	if (Protected > 0) Result->SetNumberField(TEXT("protected"), Protected);
 	Result->SetNumberField(TEXT("total"), PerPath.Num());
 	if (ClosedEditors > 0) Result->SetNumberField(TEXT("closedEditors"), ClosedEditors);
