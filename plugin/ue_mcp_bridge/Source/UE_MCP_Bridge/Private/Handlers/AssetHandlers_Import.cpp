@@ -8,6 +8,7 @@
 #include "HandlerUtils.h"
 #include "HandlerAssetCreate.h"
 #include "HandlerJsonProperty.h"
+#include "JsonSerializer.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
 #include "AssetImportTask.h"
@@ -1832,18 +1833,27 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetDataTableRow(const TSharedPtr<FJsonObj
 	// the caller and the copy this handler restores if a field write fails
 	// part way through.
 	//
-	// Defaults must be null in the export. Exporting a value against itself
-	// makes every field compare equal to its own "default" and the snapshot
-	// comes out as "()", which is a record that would blank the row rather
-	// than restore it.
-	FString PrevExport;
+	// The rollback record carries the prior values of exactly the fields
+	// about to change, as a row payload for set_datatable_row, which is a
+	// method that exists and now merges in place. It used to name
+	// set_datatable_row_raw, which is registered nowhere, so a flow running
+	// with rollback_on_failure could not restore a row at all; and it carried
+	// whole-struct export text produced with the value as its own defaults,
+	// which exports every field as unchanged and yields "()".
+	TSharedPtr<FJsonObject> PrevFields = MakeShared<FJsonObject>();
 	uint8* Backup = nullptr;
 	if (bExisted)
 	{
 		Backup = (uint8*)FMemory::Malloc(StructSize, MinAlign);
 		RowStruct->InitializeStruct(Backup);
 		RowStruct->CopyScriptStruct(Backup, *ExistingRow);
-		RowStruct->ExportText(PrevExport, Backup, nullptr, nullptr, PPF_None, nullptr);
+		for (const TPair<FProperty*, TSharedPtr<FJsonValue>>& Write : Writes)
+		{
+			const void* FieldAddr = Write.Key->ContainerPtrToValuePtr<void>(Backup);
+			PrevFields->SetField(
+				Write.Key->GetAuthoredName(),
+				FMCPJsonSerializer::SerializeValue(FieldAddr, Write.Key));
+		}
 	}
 
 	// #929: an existing row is edited in the memory the table already owns.
@@ -1971,8 +1981,8 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetDataTableRow(const TSharedPtr<FJsonObj
 		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 		Payload->SetStringField(TEXT("assetPath"), AssetPath);
 		Payload->SetStringField(TEXT("rowName"), RowName);
-		Payload->SetStringField(TEXT("rowExport"), PrevExport);
-		MCPSetRollback(Result, TEXT("set_datatable_row_raw"), Payload);
+		Payload->SetObjectField(TEXT("row"), PrevFields);
+		MCPSetRollback(Result, TEXT("set_datatable_row"), Payload);
 	}
 	else
 	{
