@@ -5,6 +5,8 @@
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "UObject/UnrealType.h"
 #include "UObject/PropertyPortFlags.h"
 #include "UObject/SoftObjectPtr.h"
@@ -629,6 +631,189 @@ namespace MCPJsonProperty
 			Prop->CopyCompleteValue(ValueAddr, Backup.GetObjAddress());
 		}
 		return bOk;
+	}
+
+	// ── Readback verification ────────────────────────────────────────────────
+	//
+	// #935: a write that did not take must not come back as a success. The
+	// setter returns true the moment an assignment executes, and nothing used
+	// to look at what was actually stored afterwards, so a reference that
+	// resolved to the wrong thing, a container that quietly emptied, or a
+	// value that never reached the row the caller named all reported
+	// success: true with the broken asset saved to disk.
+
+	/** A compact, readable rendering of a JSON value for an error message. */
+	inline FString DescribeJsonValue(const TSharedPtr<FJsonValue>& Value)
+	{
+		if (!Value.IsValid()) return TEXT("(none)");
+		switch (Value->Type)
+		{
+		case EJson::Null:    return TEXT("null");
+		case EJson::Boolean: return Value->AsBool() ? TEXT("true") : TEXT("false");
+		case EJson::Number:  return FString::SanitizeFloat(Value->AsNumber());
+		case EJson::String:  return Value->AsString();
+		default:
+			break;
+		}
+		FString Out;
+		using FCondensedWriter = TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>;
+		const TSharedRef<FCondensedWriter> Writer =
+			TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Out);
+		if (Value->Type == EJson::Object)
+		{
+			FJsonSerializer::Serialize(Value->AsObject().ToSharedRef(), Writer);
+		}
+		else
+		{
+			FJsonSerializer::Serialize(Value->AsArray(), Writer);
+		}
+		return Out;
+	}
+
+	/** True when the property can hold an FText anywhere inside it.
+	 *
+	 *  FText identity is per instance: two imports of the same source string
+	 *  are not Identical to each other, so a value carrying text cannot be
+	 *  compared by identity without reporting a mismatch that is not one.
+	 *  Depth exhaustion answers "yes" so the conservative path is the one that
+	 *  skips the comparison rather than the one that fails a good write. */
+	inline bool PropertyCanHoldText(const FProperty* Prop, int32 Depth = 0)
+	{
+		if (!Prop) return false;
+		if (Depth > 12) return true;
+		if (Prop->IsA<FTextProperty>()) return true;
+		if (const FArrayProperty* ArrProp = CastField<FArrayProperty>(Prop))
+		{
+			return PropertyCanHoldText(ArrProp->Inner, Depth + 1);
+		}
+		if (const FSetProperty* SetProp = CastField<FSetProperty>(Prop))
+		{
+			return PropertyCanHoldText(SetProp->ElementProp, Depth + 1);
+		}
+		if (const FMapProperty* MapProp = CastField<FMapProperty>(Prop))
+		{
+			return PropertyCanHoldText(MapProp->KeyProp, Depth + 1)
+				|| PropertyCanHoldText(MapProp->ValueProp, Depth + 1);
+		}
+		if (const FStructProperty* StructProp = CastField<FStructProperty>(Prop))
+		{
+			for (TFieldIterator<FProperty> It(StructProp->Struct); It; ++It)
+			{
+				if (PropertyCanHoldText(*It, Depth + 1)) return true;
+			}
+		}
+		return false;
+	}
+
+	/** The comparable form of an asset path.
+	 *
+	 *  Two normalisations, and only the two the resolver is allowed to apply:
+	 *  the Blueprint generated-class "_C" suffix on the object name, and the
+	 *  "Pkg.Obj" long form of "Pkg" that the content browser writes as "Pkg".
+	 *  The suffix is stripped from the object name only, never from a package
+	 *  name, so an asset genuinely called "Foo_C" still compares equal to
+	 *  itself. A subobject path is compared whole. */
+	inline FString NormalizeAssetPathForCompare(const FString& InPath)
+	{
+		FString Path = InPath.TrimStartAndEnd();
+		if (Path.IsEmpty() || Path.Contains(TEXT(":"))) return Path;
+
+		int32 DotPos = INDEX_NONE;
+		if (!Path.FindLastChar(TEXT('.'), DotPos)) return Path;
+
+		const FString Package = Path.Left(DotPos);
+		FString ObjectName = Path.Mid(DotPos + 1);
+		if (ObjectName.EndsWith(TEXT("_C"))) ObjectName.LeftChopInline(2);
+
+		int32 SlashPos = INDEX_NONE;
+		const FString LeafName = Package.FindLastChar(TEXT('/'), SlashPos)
+			? Package.Mid(SlashPos + 1)
+			: Package;
+		if (LeafName.Equals(ObjectName, ESearchCase::IgnoreCase)) return Package;
+		return Package + TEXT(".") + ObjectName;
+	}
+
+	/** Read the stored value back and answer whether it is what was asked for.
+	 *
+	 *  Three checks, because they fail on different things.
+	 *
+	 *  A soft reference is never resolved at write time, so its stored text is
+	 *  whatever the setter chose to write. Comparing that text against the
+	 *  requested path is the only thing that catches a path the setter
+	 *  rewrote, which is exactly how a native /Script/ class reference used to
+	 *  end up with a "_C" suffix appended (#928).
+	 *
+	 *  A hard reference that was asked for by path must not have come out
+	 *  null. Comparing its path is not useful, because a redirector legally
+	 *  answers a different path than the one requested.
+	 *
+	 *  Everything else is compared by identity against an independent buffer
+	 *  the same request was applied to. That is what catches a value that
+	 *  never reached the destination: a container that stored fewer entries
+	 *  than it was handed, a row copy that dropped the field, a reference
+	 *  cleared by a later step.
+	 *
+	 *  On a mismatch OutDetail carries the requested and the stored value. */
+	inline bool VerifyJsonOnProperty(
+		FProperty* Prop,
+		const void* ValueAddr,
+		const TSharedPtr<FJsonValue>& Requested,
+		FString& OutDetail)
+	{
+		if (!Prop || !ValueAddr || !Requested.IsValid()) return true;
+
+		FString StoredText;
+		Prop->ExportTextItem_Direct(StoredText, ValueAddr, nullptr, nullptr, PPF_None);
+
+		FString RequestedPath;
+		const bool bRequestedPath = Requested->TryGetString(RequestedPath) && !RequestedPath.IsEmpty();
+		const ERefKind Kind = ClassifyReference(Prop);
+
+		if (bRequestedPath && (Kind == ERefKind::SoftClass || Kind == ERefKind::SoftObject))
+		{
+			const FString Stored = CastFieldChecked<FSoftObjectProperty>(Prop)->GetPropertyValue(ValueAddr).ToString();
+			if (!NormalizeAssetPathForCompare(Stored).Equals(
+					NormalizeAssetPathForCompare(RequestedPath), ESearchCase::IgnoreCase))
+			{
+				OutDetail = FString::Printf(TEXT("requested '%s', stored '%s'"), *RequestedPath, *Stored);
+				return false;
+			}
+			return true;
+		}
+
+		if (bRequestedPath && (Kind == ERefKind::Class || Kind == ERefKind::Object))
+		{
+			if (CastFieldChecked<FObjectProperty>(Prop)->GetObjectPropertyValue(ValueAddr) == nullptr)
+			{
+				OutDetail = FString::Printf(TEXT("requested '%s', stored nothing"), *RequestedPath);
+				return false;
+			}
+			return true;
+		}
+
+		if (PropertyCanHoldText(Prop)) return true;
+
+		FDefaultConstructedPropertyElement Reference(Prop);
+		FString Ignored;
+		if (!SetJsonOnProperty(Prop, Reference.GetObjAddress(), Requested, Ignored))
+		{
+			// The same request applied cleanly a moment ago; if it does not
+			// apply now the stored value cannot be trusted either.
+			OutDetail = FString::Printf(
+				TEXT("requested %s, stored '%s' (the request no longer applies: %s)"),
+				*DescribeJsonValue(Requested), *StoredText, *Ignored);
+			return false;
+		}
+		if (!Prop->Identical(ValueAddr, Reference.GetObjAddress(), PPF_None))
+		{
+			FString ReferenceText;
+			Prop->ExportTextItem_Direct(ReferenceText, Reference.GetObjAddress(), nullptr, nullptr, PPF_None);
+			OutDetail = FString::Printf(
+				TEXT("requested %s (which resolves to '%s'), stored '%s'"),
+				*DescribeJsonValue(Requested), *ReferenceText, *StoredText);
+			return false;
+		}
+		return true;
 	}
 
 	// Resolve a dotted property path that may index arrays ("Traits[2]") and

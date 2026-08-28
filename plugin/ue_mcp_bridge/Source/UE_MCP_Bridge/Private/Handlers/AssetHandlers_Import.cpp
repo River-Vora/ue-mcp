@@ -1895,6 +1895,57 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetDataTableRow(const TSharedPtr<FJsonObj
 		return MCPError(SetErr);
 	}
 
+	if (!bExisted)
+	{
+		// AddRow copies the buffer and owns the copy from here on.
+		DataTable->AddRow(RowKey, *reinterpret_cast<FTableRowBase*>(RowData));
+		RowStruct->DestroyStruct(RowData);
+		FMemory::Free(RowData);
+		RowData = nullptr;
+	}
+
+	// #935: read the row back out of the table and check that every field the
+	// caller named holds what was asked for, before anything is saved. This
+	// reads the table's own memory, not the buffer that was written, so a
+	// value lost in the copy into the table is caught here too.
+	uint8* const* StoredRow = DataTable->GetRowMap().Find(RowKey);
+	if (!StoredRow || !*StoredRow)
+	{
+		if (bExisted)
+		{
+			RowStruct->DestroyStruct(Backup);
+			FMemory::Free(Backup);
+		}
+		return MCPError(FString::Printf(
+			TEXT("Row '%s' is missing from '%s' after the write. Nothing was saved."),
+			*RowName, *AssetPath));
+	}
+	for (const TPair<FProperty*, TSharedPtr<FJsonValue>>& Write : Writes)
+	{
+		const void* FieldAddr = Write.Key->ContainerPtrToValuePtr<void>(*StoredRow);
+		FString Detail;
+		if (MCPJsonProperty::VerifyJsonOnProperty(Write.Key, FieldAddr, Write.Value, Detail))
+		{
+			continue;
+		}
+
+		// Undo the whole call. A verified-bad write is not a partial success.
+		if (bExisted)
+		{
+			RowStruct->CopyScriptStruct(*StoredRow, Backup);
+			RowStruct->DestroyStruct(Backup);
+			FMemory::Free(Backup);
+			DataTable->HandleDataTableChanged(RowKey);
+		}
+		else
+		{
+			DataTable->RemoveRow(RowKey);
+		}
+		return MCPError(FString::Printf(
+			TEXT("Field '%s' on row '%s' did not store the requested value: %s. The row was left unchanged."),
+			*Write.Key->GetAuthoredName(), *RowName, *Detail));
+	}
+
 	if (bExisted)
 	{
 		RowStruct->DestroyStruct(Backup);
@@ -1903,14 +1954,6 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetDataTableRow(const TSharedPtr<FJsonObj
 		// The table's own row memory was edited, so name the row that changed
 		// and only its hook runs.
 		DataTable->HandleDataTableChanged(RowKey);
-	}
-	else
-	{
-		// AddRow copies the buffer and owns the copy from here on.
-		DataTable->AddRow(RowKey, *reinterpret_cast<FTableRowBase*>(RowData));
-		RowStruct->DestroyStruct(RowData);
-		FMemory::Free(RowData);
-		RowData = nullptr;
 	}
 
 	DataTable->MarkPackageDirty();
