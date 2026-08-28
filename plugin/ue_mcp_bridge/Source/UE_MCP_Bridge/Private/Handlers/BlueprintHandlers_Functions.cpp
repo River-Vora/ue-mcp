@@ -4,6 +4,7 @@
 // stays in BlueprintHandlers.cpp::RegisterHandlers.
 
 #include "BlueprintHandlers.h"
+#include "BlueprintHandlers_Internal.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 #include "Kismet2/BlueprintEditorUtils.h"
