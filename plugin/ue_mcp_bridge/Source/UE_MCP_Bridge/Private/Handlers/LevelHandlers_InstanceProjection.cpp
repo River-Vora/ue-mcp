@@ -612,7 +612,13 @@ TSharedPtr<FJsonValue> UEMCPInstanceProjection::SnapInstancesToSurfaceInWorld(
 			++AppliedRunCount;
 		}
 		ISMC->MarkRenderStateDirty();
-		if (Package && !Package->HasAnyPackageFlags(PKG_Transient)) ISMC->MarkPackageDirty();
+		// PKG_Transient no longer exists in UE 5.8's EPackageFlags. Transience is
+		// an object flag, and the engine's own transient package is a distinct
+		// object, so test both rather than a package flag that was removed.
+		if (Package && Package != GetTransientPackage() && !Package->HasAnyFlags(RF_Transient))
+		{
+			ISMC->MarkPackageDirty();
+		}
 		bMutationPerformed = true;
 	}
 

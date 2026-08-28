@@ -30,7 +30,9 @@ public:
 			TestName,
 			*FGuid::NewGuid().ToString(EGuidFormats::Digits));
 		Package = CreatePackage(*PackageName);
-		Package->SetPackageFlags(PKG_Transient);
+		// PKG_Transient was removed from EPackageFlags in UE 5.8. RF_Transient on
+		// the package object is the supported way to say "never save this".
+		Package->SetFlags(RF_Transient);
 		Package->SetDirtyFlag(false);
 	}
 
