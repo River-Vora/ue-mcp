@@ -1050,6 +1050,46 @@ T* LoadAssetByPath(const FString& AssetPath)
 
 // ── Package save ─────────────────────────────────────────────────────────────
 
+/** True when the package is a map package, i.e. one whose on-disk form is a
+ *  ".umap" rather than a ".uasset".
+ *
+ *  #949: writing a world package with the asset extension does not fail. It
+ *  creates a second file that claims the same long package name, so the level
+ *  then exists twice on disk and the two copies diverge silently as different
+ *  save paths write different files. Unreal resolves the ".uasset" first, so
+ *  the stale fork is the one that wins.
+ *
+ *  ContainsMap is the package flag Unreal sets on world packages and is the
+ *  same test editor(save_dirty) branches on. FindWorldInPackage is the backstop
+ *  for a world built in memory whose flag has not been stamped yet. One-file-
+ *  per-actor packages under __ExternalActors__ hold an AActor and no UWorld, so
+ *  both tests say false and they keep the ".uasset" extension OFPA expects. */
+inline bool IsMapPackage(UPackage* Package)
+{
+	if (!Package) return false;
+	return Package->ContainsMap() || UWorld::FindWorldInPackage(Package) != nullptr;
+}
+
+/** On-disk file extension for a package, dot included. ".umap" for world
+ *  packages, ".uasset" for everything else. */
+inline const FString& PackageFileExtension(UPackage* Package)
+{
+	return IsMapPackage(Package)
+		? FPackageName::GetMapPackageExtension()
+		: FPackageName::GetAssetPackageExtension();
+}
+
+/** Resolve the on-disk filename a package must be written to, extension
+ *  included. Returns false when the package name has no mounted root, which
+ *  keeps callers off FPackageName::LongPackageNameToFilename - that one is
+ *  fatal rather than recoverable when the name does not resolve. */
+inline bool ResolvePackageFileName(UPackage* Package, FString& OutFileName)
+{
+	if (!Package) return false;
+	return FPackageName::TryConvertLongPackageNameToFilename(
+		Package->GetName(), OutFileName, PackageFileExtension(Package));
+}
+
 /** Mark the asset's package dirty and save it to disk. Used by every create/
  *  mutate handler that wants changes persisted across editor restarts.
  *  No-op if Asset or its package is null. Returns true on successful save. */
@@ -1059,8 +1099,11 @@ inline bool SaveAssetPackage(UObject* Asset)
 	UPackage* Package = Asset->GetOutermost();
 	if (!Package) return false;
 	Package->MarkPackageDirty();
-	const FString PackageFileName = FPackageName::LongPackageNameToFilename(
-		Package->GetName(), FPackageName::GetAssetPackageExtension());
+	// The extension has to follow the package, not the call site. Any handler
+	// that mutates an actor or component in the open level reaches this with a
+	// world package as the outermost (#949).
+	FString PackageFileName;
+	if (!ResolvePackageFileName(Package, PackageFileName)) return false;
 	FSavePackageArgs SaveArgs;
 	SaveArgs.TopLevelFlags = RF_Standalone;
 	return UPackage::SavePackage(Package, nullptr, *PackageFileName, SaveArgs);
