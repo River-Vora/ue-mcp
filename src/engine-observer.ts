@@ -385,6 +385,52 @@ function readTailBytes(file: string, bytes: number): { text: string; partial: bo
  * before the plugin module exists, which is where the "editor launched but the
  * bridge never came up" reports have always come from.
  */
+/**
+ * The engine root the project was last actually opened with, from its own log.
+ *
+ * Unreal writes `LogInit: Base Directory: <engine>/Engine/Binaries/<Platform>/`
+ * in the first few lines of every run, which is the only durable record of
+ * which engine tree launched an editor. It survives the editor exiting, so it
+ * answers "which engine is this project on" while the editor is stopped, which
+ * is exactly when a full rebuild has to be resolved (#959, #974).
+ *
+ * Returns null when the log is absent, unreadable, or has no such line.
+ */
+export function readEngineRootFromLog(projectPath: string | null | undefined): string | null {
+  if (!projectPath) return null;
+  const file = projectLogPath(projectPath);
+  let head: string;
+  try {
+    const size = fs.statSync(file).size;
+    const length = Math.min(size, 64 * 1024);
+    if (length <= 0) return null;
+    const buf = Buffer.alloc(length);
+    const fd = fs.openSync(file, "r");
+    try {
+      fs.readSync(fd, buf, 0, length, 0);
+    } finally {
+      fs.closeSync(fd);
+    }
+    head = buf.toString("utf-8");
+  } catch {
+    return null;
+  }
+
+  const match = head.match(/Log\w*:\s*(?:Base|Engine) Directory:\s*(.+)/i);
+  if (!match) return null;
+  const directory = match[1].trim().replace(/[\\/]+$/, "");
+  if (!directory) return null;
+
+  // Base Directory points inside Engine/Binaries/<Platform>; Engine Directory
+  // points at the Engine folder itself. Both sit under the root we want.
+  let current = path.resolve(directory);
+  while (current && current !== path.dirname(current)) {
+    if (path.basename(current).toLowerCase() === "engine") return path.dirname(current);
+    current = path.dirname(current);
+  }
+  return null;
+}
+
 export function readLogState(projectPath: string | null | undefined, tailLines = 25): LogState {
   const empty: LogState = {
     logPath: null,
