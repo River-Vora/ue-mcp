@@ -49,6 +49,7 @@ private:
 	static TSharedPtr<FJsonValue> LoadLevel(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ClearLevelScript(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetComponentProperty(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> NudgeComponent(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetComponentDetails(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetVolumeProperties(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetWorldSettings(const TSharedPtr<FJsonObject>& Params);
