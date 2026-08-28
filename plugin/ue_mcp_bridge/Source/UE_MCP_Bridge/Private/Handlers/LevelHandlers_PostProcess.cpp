@@ -202,7 +202,9 @@ namespace
 		return Near.Num() > 0 ? FString::Join(Near, TEXT(", ")) : FString(TEXT("(no similar field names)"));
 	}
 
-	/** Resolve actorLabel to an actor plus its post-process struct, or fail. */
+	/** Resolve actorLabel or actorPath to an actor plus its post-process
+	 *  struct, or fail. #983: a label naming several actors refuses here
+	 *  rather than writing exposure onto one of them at random. */
 	bool ResolveActorAndPostProcessTarget(
 		UWorld* World,
 		const TSharedPtr<FJsonObject>& Params,
@@ -211,17 +213,13 @@ namespace
 		TSharedPtr<FJsonValue>& OutError)
 	{
 		FString ActorLabel;
-		if (TSharedPtr<FJsonValue> Err = RequireString(Params, TEXT("actorLabel"), ActorLabel))
+		if (TSharedPtr<FJsonValue> Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel))
 		{
 			OutError = Err;
 			return false;
 		}
-		OutActor = FindActorByLabel(World, ActorLabel);
-		if (!OutActor)
-		{
-			OutError = MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-			return false;
-		}
+		OutActor = MCPResolveActor(World, Params, OutError);
+		if (!OutActor) return false;
 		FString ResolveError;
 		if (!ResolvePostProcessTarget(OutActor, Params, OutTarget, ResolveError))
 		{
@@ -235,6 +233,7 @@ namespace
 	void EmitPostProcessTargetFields(const TSharedPtr<FJsonObject>& Result, AActor* Actor, const FMCPPostProcessTarget& Target)
 	{
 		Result->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
+		Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 		Result->SetStringField(TEXT("actorClass"), Actor->GetClass()->GetName());
 		Result->SetStringField(TEXT("settingsOwner"), Target.OwnerKind);
 		Result->SetStringField(TEXT("settingsOwnerName"), Target.OwnerName);

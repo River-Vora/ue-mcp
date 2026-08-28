@@ -122,7 +122,7 @@ namespace
 TSharedPtr<FJsonValue> FLevelHandlers::NudgeComponent(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Error = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Error;
+	if (auto Error = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Error;
 	FString ComponentName;
 	if (auto Error = RequireString(Params, TEXT("componentName"), ComponentName)) return Error;
 
@@ -135,8 +135,13 @@ TSharedPtr<FJsonValue> FLevelHandlers::NudgeComponent(const TSharedPtr<FJsonObje
 			: TEXT("Editor world not available"));
 	}
 
-	AActor* Actor = FindActorByLabelNameOrPath(World, ActorLabel);
-	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	FMCPActorSelector ActorSel;
+	ActorSel.Match = EMCPActorMatch::LabelNameOrPath;
+	ActorSel.WorldLabel = World->IsGameWorld() ? TEXT("PIE") : TEXT("editor");
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr, ActorSel);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 	USceneComponent* Component = FindExactSceneComponent(Actor, ComponentName);
 	if (!Component)
 	{
@@ -276,6 +281,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::NudgeComponent(const TSharedPtr<FJsonObje
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("componentName"), Component->GetName());
 	Result->SetStringField(TEXT("frame"), bRestore ? TEXT("rollback") : Frame);
 	Result->SetStringField(TEXT("world"), WorldScope);
@@ -298,6 +304,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::NudgeComponent(const TSharedPtr<FJsonObje
 
 	auto RollbackPayload = MakeShared<FJsonObject>();
 	RollbackPayload->SetStringField(TEXT("actorLabel"), ActorLabel);
+	RollbackPayload->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	RollbackPayload->SetStringField(TEXT("componentName"), Component->GetName());
 	RollbackPayload->SetStringField(TEXT("world"), WorldScope);
 	double PieInstance = 0.0;

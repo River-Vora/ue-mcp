@@ -168,6 +168,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SpawnLight(const TSharedPtr<FJsonObject>&
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
 	Result->SetStringField(TEXT("actorLabel"), FinalLabel);
+	Result->SetStringField(TEXT("actorPath"), NewLight->GetPathName());
 	Result->SetStringField(TEXT("actorName"), NewLight->GetName());
 	Result->SetStringField(TEXT("lightType"), LightType);
 
@@ -182,15 +183,14 @@ TSharedPtr<FJsonValue> FLevelHandlers::SpawnLight(const TSharedPtr<FJsonObject>&
 TSharedPtr<FJsonValue> FLevelHandlers::SetLightProperties(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	AActor* Actor = FindActorByLabel(World, ActorLabel);
-	if (!Actor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-	}
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	ULightComponent* LightComponent = Actor->FindComponentByClass<ULightComponent>();
 	// #608: USkyLightComponent is not a ULightComponent, so it was previously
@@ -447,6 +447,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetLightProperties(const TSharedPtr<FJson
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetNumberField(TEXT("intensity"), LightComponent ? (double)LightComponent->Intensity : (SkyForProps ? (double)SkyForProps->Intensity : 0.0));
 	Result->SetBoolField(TEXT("isSkyLight"), LightComponent == nullptr && SkyForProps != nullptr);
 	Result->SetStringField(TEXT("mobility"), MobilityToString(PropertyComponent->Mobility));

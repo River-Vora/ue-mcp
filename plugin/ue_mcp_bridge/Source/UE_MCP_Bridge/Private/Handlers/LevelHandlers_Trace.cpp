@@ -134,6 +134,9 @@ namespace
 		if (HitActor)
 		{
 			Result->SetStringField(TEXT("actorLabel"), HitActor->GetActorLabel());
+			// #983: a trace hit is exactly where a caller needs the precise
+			// selector, since it did not choose the actor at all.
+			Result->SetStringField(TEXT("actorPath"), HitActor->GetPathName());
 			Result->SetStringField(TEXT("actorClass"), HitActor->GetClass()->GetName());
 		}
 		if (HitComp)
@@ -211,7 +214,12 @@ namespace
 			{
 				FString Label;
 				if (!V->TryGetString(Label)) continue;
-				if (AActor* A = FindActorByLabel(World, Label)) Query.AddIgnoredActor(A);
+				// #983: an ignore list is the plural case. A label naming
+				// three actors ignores all three, which is what the caller
+				// meant and what ignoring one of them silently was not.
+				TArray<AActor*> Matches;
+				MCPCollectActorsByToken(World, Label, EMCPActorMatch::LabelNameOrPath, Matches);
+				for (AActor* A : Matches) Query.AddIgnoredActor(A);
 			}
 		}
 
@@ -305,10 +313,12 @@ TSharedPtr<FJsonValue> FLevelHandlers::SnapActorToFloor(const TSharedPtr<FJsonOb
 	UWorld* World = ResolveTraceWorld(Params, WorldError);
 	if (!World) return WorldError;
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
-	AActor* Actor = FindActorByLabel(World, ActorLabel);
-	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	const double Offset = OptionalNumber(Params, TEXT("floorOffset"), 0.0);
 	const double MaxDistance = OptionalNumber(Params, TEXT("maxDistance"), 100000.0);
@@ -339,6 +349,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SnapActorToFloor(const TSharedPtr<FJsonOb
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetObjectField(TEXT("from"), MCPVec3ToJsonObject(PrevLoc));
 	Result->SetObjectField(TEXT("to"), MCPVec3ToJsonObject(NewLoc));
 	Result->SetObjectField(TEXT("impactPoint"), MCPVec3ToJsonObject(Hit.ImpactPoint));
@@ -347,6 +358,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SnapActorToFloor(const TSharedPtr<FJsonOb
 
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Payload->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	TSharedPtr<FJsonObject> Loc = MakeShared<FJsonObject>();
 	Loc->SetNumberField(TEXT("x"), PrevLoc.X);
 	Loc->SetNumberField(TEXT("y"), PrevLoc.Y);

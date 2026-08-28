@@ -598,9 +598,9 @@ TSharedPtr<FJsonValue> FLevelHandlers::TestComponentOverlap(const TSharedPtr<FJs
 	}
 
 	FString ActorLabelA;
-	if (auto Err = RequireString(Params, TEXT("actorLabelA"), ActorLabelA)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabelA"), TEXT("actorPathA"), ActorLabelA)) return Err;
 	FString ActorLabelB;
-	if (auto Err = RequireString(Params, TEXT("actorLabelB"), ActorLabelB)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabelB"), TEXT("actorPathB"), ActorLabelB)) return Err;
 	const FString ComponentNameA = OptionalString(Params, TEXT("componentNameA"));
 	const FString ComponentNameB = OptionalString(Params, TEXT("componentNameB"));
 
@@ -610,15 +610,19 @@ TSharedPtr<FJsonValue> FLevelHandlers::TestComponentOverlap(const TSharedPtr<FJs
 		return MCPError(TEXT("'method' must be either 'OBB' (oriented, default) or 'AABB' (axis-aligned world bounds)"));
 	}
 
-	auto ResolveSide = [&](const FString& ActorLabel, const FString& ComponentName,
-		USceneComponent*& OutComponent, TSharedPtr<FJsonValue>& OutError) -> bool
+	// #983: each side is selected by its own label / path pair, so an overlap
+	// test between two copy-pasted props refuses rather than answering about
+	// two actors the caller did not name.
+	auto ResolveSide = [&](const TCHAR* LabelKey, const TCHAR* PathKey, const FString& ComponentName,
+		USceneComponent*& OutComponent, AActor*& OutActor, TSharedPtr<FJsonValue>& OutError) -> bool
 	{
-		AActor* Actor = FindActorByLabel(World, ActorLabel);
-		if (!Actor)
-		{
-			OutError = MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-			return false;
-		}
+		FMCPActorSelector Selector;
+		Selector.LabelKey = LabelKey;
+		Selector.PathKey = PathKey;
+		AActor* Actor = MCPResolveActor(World, Params, OutError, Selector);
+		if (!Actor) return false;
+		OutActor = Actor;
+		const FString ActorLabel = Actor->GetActorLabel();
 		if (ComponentName.IsEmpty())
 		{
 			OutComponent = Actor->GetRootComponent();
@@ -642,23 +646,31 @@ TSharedPtr<FJsonValue> FLevelHandlers::TestComponentOverlap(const TSharedPtr<FJs
 
 	USceneComponent* ComponentA = nullptr;
 	USceneComponent* ComponentB = nullptr;
+	AActor* ActorA = nullptr;
+	AActor* ActorB = nullptr;
 	TSharedPtr<FJsonValue> ResolveError;
-	if (!ResolveSide(ActorLabelA, ComponentNameA, ComponentA, ResolveError)) return ResolveError;
-	if (!ResolveSide(ActorLabelB, ComponentNameB, ComponentB, ResolveError)) return ResolveError;
+	if (!ResolveSide(TEXT("actorLabelA"), TEXT("actorPathA"), ComponentNameA, ComponentA, ActorA, ResolveError)) return ResolveError;
+	if (!ResolveSide(TEXT("actorLabelB"), TEXT("actorPathB"), ComponentNameB, ComponentB, ActorB, ResolveError)) return ResolveError;
 	if (ComponentA == ComponentB)
 	{
 		return MCPError(TEXT("Both sides resolved to the same component; an overlap test between a component and itself has no answer"));
 	}
+	ActorLabelA = ActorA->GetActorLabel();
+	ActorLabelB = ActorB->GetActorLabel();
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("method"), Method);
 	Result->SetStringField(TEXT("actorLabelA"), ActorLabelA);
+	Result->SetStringField(TEXT("actorPathA"), ActorA->GetPathName());
 	Result->SetStringField(TEXT("actorLabelB"), ActorLabelB);
+	Result->SetStringField(TEXT("actorPathB"), ActorB->GetPathName());
 
 	TSharedPtr<FJsonObject> SideA = MCPRefreshDescribeComponent(ComponentA);
 	SideA->SetStringField(TEXT("actorLabel"), ActorLabelA);
+	SideA->SetStringField(TEXT("actorPath"), ActorA->GetPathName());
 	TSharedPtr<FJsonObject> SideB = MCPRefreshDescribeComponent(ComponentB);
 	SideB->SetStringField(TEXT("actorLabel"), ActorLabelB);
+	SideB->SetStringField(TEXT("actorPath"), ActorB->GetPathName());
 	Result->SetObjectField(TEXT("a"), SideA);
 	Result->SetObjectField(TEXT("b"), SideB);
 
