@@ -6,7 +6,7 @@ export const levelTool: ToolDef = categoryTool(
   "level",
   "Level actors, selection, components, level management, volumes, lights, and splines.",
   {
-    get_outliner:       bp("List actors (each row includes editorHidden - hidden in the viewport but still rendering in game). Params: classFilter?, nameFilter?, editorHidden? (filter to only hidden/only visible), world? (editor|pie|auto), limit?, includeStreaming? (#717)", "get_world_outliner"),
+    get_outliner:       bp("List actors (each row includes editorHidden - hidden in the viewport but still rendering in game, and folderPath). classFilter is a case-sensitive SUBSTRING over the class name by default; pass exactClass=true to require the exact class instead. folderPath matches one World Outliner folder exactly and folderPathPrefix matches that folder and everything nested under it, so narrowing a folder to a single class no longer needs a get_actor_details round trip per entry (#911). Params: classFilter?, exactClass?, nameFilter? (case-sensitive substring over the internal name OR the label), folderPath?, folderPathPrefix?, editorHidden? (filter to only hidden/only visible), world? (editor|pie|auto), limit?, includeStreaming? (#717)", "get_world_outliner"),
     set_editor_visibility: bp("Bulk set editor-only visibility (temporarily-hidden-in-editor) on actors. Targets actorLabels[] or all=true. Params: hidden (required; true=hide, false=show), actorLabels?, all? (#717)", "set_editor_visibility", (p) => ({ hidden: p.hidden, actorLabels: p.actorLabels, all: p.all })),
     place_actor:        bp("Spawn actor. Pass world:pie to spawn into the running PIE world (#585). Params: actorClass, label?, location?, rotation?, scale?, staticMesh?, material?, world? (editor|pie)", "place_actor"),
     delete_actor:       bp("Remove actor. Params: actorLabel", "delete_actor"),
@@ -144,6 +144,16 @@ export const levelTool: ToolDef = categoryTool(
         dryRun: p.dryRun, maxSpawn: p.maxSpawn, transactionLabel: p.transactionLabel,
       }),
     },
+    convert_brushes_to_static_mesh: {
+      description: "Convert BSP brushes into StaticMeshActors via UEditorActorSubsystem::ConvertActors, generating the static meshes into destinationPath. Finishing a blockout pass otherwise meant doing it by hand. dryRun DEFAULTS TO TRUE, because conversion DESTROYS the source brushes and there is no way back to a builder brush once the map is saved. Every candidate the selector picked comes back with a verdict, so nothing is silently dropped: the default builder brush, brush shapes, volumes (both derive from ABrush and neither is geometry a player sees) and subtractive brushes (they carve space and have no surface, so converting one yields an empty mesh that looks like success) are all excluded unless you opt in by name. classFilter is EXACT by default here. Reports convertedFrom (recorded before the call, since the actors are gone after it), newActorLabels and newStaticMeshes. Params: actorLabels[] OR folderPath (+ recursiveFolder?, default true), classFilter?, exactClass? (default true), destinationPath? (default /Game/Meshes/Converted), dryRun? (default TRUE), allowSubtractive?, includeVolumes? (#911)",
+      bridge: "convert_brushes_to_static_mesh",
+      timeoutMs: 600_000,
+      mapParams: (p) => ({
+        actorLabels: p.actorLabels, folderPath: p.folderPath, recursiveFolder: p.recursiveFolder,
+        classFilter: p.classFilter, exactClass: p.exactClass, destinationPath: p.destinationPath,
+        dryRun: p.dryRun, allowSubtractive: p.allowSubtractive, includeVolumes: p.includeVolumes,
+      }),
+    },
     rerun_construction: {
       description: "Re-run the construction script on PLACED actor instances, so an SCS or construction-script change reaches the copies already in the level instead of only new ones. blueprint(run_construction_script) builds a TEMPORARY actor and throws it away, and Python cannot do this at all because Actor.rerun_construction_scripts() is missing from the wrapper. Requires actorLabels or className: this destroys and rebuilds every generated component on each match, so it will not run against a whole level implicitly. Reports reran, failed[], samples[], and how many matches have no user construction script (their generated components are still rebuilt, but a caller expecting a script change to land needs to know). Leaves the level dirty and does NOT save. Params: actorLabels? (string[]) and/or className? (Blueprint or native class), matchSubclasses? (default true), world? (editor|pie) (#944)",
       bridge: "rerun_construction_scripts",
@@ -254,6 +264,12 @@ export const levelTool: ToolDef = categoryTool(
     componentNameA: z.string().optional().describe("test_component_overlap: component on actor A; omitted selects its root component"),
     componentNameB: z.string().optional().describe("test_component_overlap: component on actor B; omitted selects its root component"),
     method: z.string().optional().describe("test_component_overlap: OBB (oriented local bounds, default) or AABB (axis-aligned world bounds)"),
+    // Brush conversion + the exact class filter the folder queries lacked (#911)
+    exactClass: z.boolean().optional().describe("get_outliner: require classFilter to be the exact class name rather than a substring. convert_brushes_to_static_mesh: same, defaults to true there"),
+    recursiveFolder: z.boolean().optional().describe("convert_brushes_to_static_mesh: also take brushes in folders nested under folderPath (default true)"),
+    destinationPath: z.string().optional().describe("convert_brushes_to_static_mesh: content path the generated static meshes are written to (default /Game/Meshes/Converted)"),
+    allowSubtractive: z.boolean().optional().describe("convert_brushes_to_static_mesh: opt in to converting subtractive brushes, which have no surface of their own"),
+    includeVolumes: z.boolean().optional().describe("convert_brushes_to_static_mesh: opt in to converting volume brushes, which are collision rather than visible geometry"),
     transforms: z.array(z.record(z.unknown())).optional().describe("add_hismc_instances transform list (#434)"),
     worldSpace: z.boolean().optional().describe("add_hismc_instances/instance ops: treat transforms as world-space (default true) (#434)"),
     index: z.number().optional().describe("update_instance_transform/remove_instance: instance index (#697)"),

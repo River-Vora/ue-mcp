@@ -188,6 +188,9 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandlerWithTimeout(TEXT("rerun_construction_scripts"), &RerunConstruction, 300.0f);
 	Registry.RegisterHandlerWithTimeout(TEXT("recreate_physics_state"), &RecreatePhysicsState, 300.0f);
 	Registry.RegisterHandler(TEXT("test_component_overlap"), &TestComponentOverlap);
+	// #911: BSP to StaticMesh. Generating meshes for hundreds of brushes takes
+	// far longer than the default handler timeout.
+	Registry.RegisterHandlerWithTimeout(TEXT("convert_brushes_to_static_mesh"), &ConvertBrushesToStaticMesh, 600.0f);
 }
 
 TSharedPtr<FJsonValue> FLevelHandlers::GetOutliner(const TSharedPtr<FJsonObject>& Params)
@@ -198,6 +201,13 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetOutliner(const TSharedPtr<FJsonObject>
 
 	FString ClassFilter = OptionalString(Params, TEXT("classFilter"));
 	FString NameFilter = OptionalString(Params, TEXT("nameFilter"));
+	// #911: classFilter has always been a case-sensitive substring on the class
+	// name, which cannot express "only this exact class". Combined with the
+	// folder filters below, that is what forced a get_actor_details round trip
+	// per entry to narrow a folder to one class.
+	const bool bExactClass = OptionalBool(Params, TEXT("exactClass"), false);
+	const FString FolderPathFilter = OptionalString(Params, TEXT("folderPath"));
+	const FString FolderPathPrefixFilter = OptionalString(Params, TEXT("folderPathPrefix"));
 	// Default 50 keeps us snappy on World Partition projects whose levels
 	// contain hundreds of streaming-proxy / HLOD actors. Callers who need the
 	// full list can pass a larger limit explicitly.
@@ -236,13 +246,35 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetOutliner(const TSharedPtr<FJsonObject>
 
 		FString ActorLabel = Actor->GetActorLabel();
 
-		if (!ClassFilter.IsEmpty() && !ActorClass.Contains(ClassFilter))
+		if (!ClassFilter.IsEmpty())
 		{
-			continue;
+			const bool bClassMatches = bExactClass
+				? ActorClass.Equals(ClassFilter, ESearchCase::IgnoreCase)
+				: ActorClass.Contains(ClassFilter);
+			if (!bClassMatches)
+			{
+				continue;
+			}
 		}
 		if (!NameFilter.IsEmpty() && !ActorName.Contains(NameFilter) && !ActorLabel.Contains(NameFilter))
 		{
 			continue;
+		}
+		if (!FolderPathFilter.IsEmpty() || !FolderPathPrefixFilter.IsEmpty())
+		{
+			const FString Folder = Actor->GetFolderPath().ToString();
+			if (!FolderPathFilter.IsEmpty() && !Folder.Equals(FolderPathFilter, ESearchCase::IgnoreCase))
+			{
+				continue;
+			}
+			// A folder prefix matches the folder itself and everything nested
+			// under it, so "Gameplay" does not also match "GameplayOld".
+			if (!FolderPathPrefixFilter.IsEmpty() &&
+				!Folder.Equals(FolderPathPrefixFilter, ESearchCase::IgnoreCase) &&
+				!Folder.StartsWith(FolderPathPrefixFilter + TEXT("/"), ESearchCase::IgnoreCase))
+			{
+				continue;
+			}
 		}
 
 #if WITH_EDITOR

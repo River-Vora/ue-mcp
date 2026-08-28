@@ -148,4 +148,7 @@ private:
 	// #914: geometric overlap between two components, with the unscaled local
 	// bounds a caller needs to reason about the answer.
 	static TSharedPtr<FJsonValue> TestComponentOverlap(const TSharedPtr<FJsonObject>& Params);
+	// #911: wrap UEditorActorSubsystem::ConvertActors for Brush to StaticMesh,
+	// with the safety checks that operation needs because it destroys its input.
+	static TSharedPtr<FJsonValue> ConvertBrushesToStaticMesh(const TSharedPtr<FJsonObject>& Params);
 };

@@ -19,6 +19,7 @@ public class UE_MCP_Bridge : ModuleRules
 	// Private/Tests/LevelQueryComponentsTests.cpp,
 	// Private/Tests/LevelBatchWriteTests.cpp,
 	// Private/Tests/LevelRefreshTests.cpp,
+	// Private/Tests/LevelConvertBrushesTests.cpp,
 	// Private/Tests/AssetBulkReadTests.cpp and
 	// Private/Tests/FoliageBatchTests.cpp: same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
