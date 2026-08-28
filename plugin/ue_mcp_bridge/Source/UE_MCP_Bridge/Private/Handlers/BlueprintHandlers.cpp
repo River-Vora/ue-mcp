@@ -3,6 +3,7 @@
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
 #include "HandlerJsonProperty.h"
+#include "JsonSerializer.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "BlueprintEditorLibrary.h"
@@ -111,6 +112,7 @@ void FBlueprintHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("delete_variable"), &DeleteVariable);
 	Registry.RegisterHandler(TEXT("add_function_parameter"), &AddFunctionParameter);
 	Registry.RegisterHandler(TEXT("set_variable_default"), &SetVariableDefault);
+	Registry.RegisterHandler(TEXT("get_blueprint_variable_default"), &GetVariableDefault);
 
 	// v0.7.8 stubs
 	Registry.RegisterHandler(TEXT("read_blueprint_graph_summary"), &ReadBlueprintGraphSummary);
@@ -1995,10 +1997,212 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ListNodeTypes(const TSharedPtr<FJsonO
 	return MCPResult(Result);
 }
 
+// ---------------------------------------------------------------------------
+// #902 / #931: resolved variable defaults, and whether they are on disk.
+//
+// list_variables could confirm a variable existed but nothing returned the
+// value the generated class actually resolved to, so a write-compile-readback
+// loop was impossible natively and callers dropped to Python for
+// get_default_object(bp.generated_class()).get_editor_property(name).
+//
+// The value lives on the CDO, not on FBPVariableDescription::DefaultValue. The
+// engine documents that string as an "optional new default value", and it is
+// empty for most variables, so reading it answers a different question than
+// the one being asked. Anything that reads it instead reports an empty default
+// for a variable that plainly has one.
+//
+// Persistence is reported separately, and that separation is the point (#931).
+// A write that sets a CDO property and marks the package dirty without saving
+// it reads back correctly for the rest of the session and is gone on the next
+// editor start. UPackage::IsDirty is the engine's own record of exactly that
+// state, so `persisted` is false while the package holds unsaved changes: the
+// readback distinguishes "this value is on disk" from "this value is in this
+// process", instead of echoing the write back at the caller either way.
+// ---------------------------------------------------------------------------
+namespace
+{
+	struct FResolvedVariableDefault
+	{
+		FProperty* Property = nullptr;
+		const void* ValueAddress = nullptr;
+		FString ValueText;
+		TSharedPtr<FJsonValue> Value;
+		FString DeclaringClass;
+		FString DeclaringClassPath;
+		bool bInherited = false;
+	};
+
+	// Resolve one variable's compiled default off the Blueprint's generated
+	// class CDO. Returns false with a caller-facing reason on any miss.
+	bool ResolveVariableDefault(
+		UBlueprint* Blueprint,
+		const FString& VarName,
+		FResolvedVariableDefault& Out,
+		FString& OutError)
+	{
+		if (!Blueprint)
+		{
+			OutError = TEXT("No Blueprint to resolve a variable default from");
+			return false;
+		}
+
+		UClass* GeneratedClass = Blueprint->GeneratedClass.Get();
+		if (!GeneratedClass)
+		{
+			OutError = FString::Printf(
+				TEXT("Blueprint '%s' has no generated class, so it has no resolved defaults yet. Compile it first (blueprint compile)."),
+				*Blueprint->GetName());
+			return false;
+		}
+
+		UObject* CDO = GeneratedClass->GetDefaultObject();
+		if (!CDO)
+		{
+			OutError = FString::Printf(
+				TEXT("Generated class '%s' has no class default object"), *GeneratedClass->GetName());
+			return false;
+		}
+
+		FProperty* Prop = GeneratedClass->FindPropertyByName(FName(*VarName));
+		if (!Prop)
+		{
+			// Name the variables that DO resolve, so a caller that has just
+			// added one can see whether the compile carried it through.
+			TArray<FString> Available;
+			for (TFieldIterator<FProperty> It(GeneratedClass); It && Available.Num() < 60; ++It)
+			{
+				if (*It) Available.Add((*It)->GetName());
+			}
+			OutError = FString::Printf(
+				TEXT("Variable '%s' has no property on generated class '%s'. If it was just added, compile the Blueprint. Resolved properties: [%s]"),
+				*VarName, *GeneratedClass->GetName(), *FString::Join(Available, TEXT(", ")));
+			return false;
+		}
+
+		Out.Property = Prop;
+		Out.ValueAddress = Prop->ContainerPtrToValuePtr<void>(CDO);
+		Prop->ExportText_Direct(Out.ValueText, Out.ValueAddress, Out.ValueAddress, CDO, PPF_None);
+		Out.Value = FMCPJsonSerializer::SerializeValue(Out.ValueAddress, Prop);
+
+		if (UClass* Owner = Prop->GetOwnerClass())
+		{
+			Out.DeclaringClass = Owner->GetName();
+			Out.DeclaringClassPath = Owner->GetPathName();
+			Out.bInherited = Owner != GeneratedClass;
+		}
+		return true;
+	}
+
+	// Write the resolved value onto a JSON object. Shared so list_variables and
+	// get_variable_default cannot report the same value under different names.
+	void WriteResolvedVariableDefault(const TSharedPtr<FJsonObject>& Obj, const FResolvedVariableDefault& Resolved)
+	{
+		if (!Obj.IsValid() || !Resolved.Property) return;
+		Obj->SetField(TEXT("value"), Resolved.Value.IsValid() ? Resolved.Value : MakeShared<FJsonValueNull>());
+		Obj->SetStringField(TEXT("valueText"), Resolved.ValueText);
+		Obj->SetStringField(TEXT("cppType"), Resolved.Property->GetCPPType());
+		if (!Resolved.DeclaringClass.IsEmpty())
+		{
+			Obj->SetStringField(TEXT("declaringClass"), Resolved.DeclaringClass);
+			Obj->SetStringField(TEXT("declaringClassPath"), Resolved.DeclaringClassPath);
+		}
+		Obj->SetBoolField(TEXT("inherited"), Resolved.bInherited);
+	}
+
+	// #931: state whether what was just read is on disk. The package's own
+	// dirty flag is the answer: it is set by every write that reaches the
+	// object and cleared by a successful save, so a value that reads back
+	// correctly out of a dirty package has not been persisted and will be gone
+	// after a restart.
+	void WriteDefaultPersistence(const TSharedPtr<FJsonObject>& Obj, UBlueprint* Blueprint)
+	{
+		if (!Obj.IsValid() || !Blueprint) return;
+		UPackage* Package = Blueprint->GetOutermost();
+		const bool bDirty = Package && Package->IsDirty();
+		if (Package)
+		{
+			Obj->SetStringField(TEXT("packageName"), Package->GetName());
+		}
+		Obj->SetBoolField(TEXT("packageDirty"), bDirty);
+		Obj->SetBoolField(TEXT("persisted"), !bDirty);
+		if (bDirty)
+		{
+			Obj->SetStringField(TEXT("persistenceNote"),
+				TEXT("This value is live in the editor but its package has unsaved changes, so it is not on disk and will revert on the next editor start. Save the Blueprint (blueprint compile_all with save, or asset save) and read again to confirm it persisted."));
+		}
+	}
+}
+
+TSharedPtr<FJsonValue> FBlueprintHandlers::GetVariableDefault(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+
+	FString VarName;
+	if (auto Err = RequireString(Params, TEXT("name"), VarName)) return Err;
+
+	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
+	if (!Blueprint)
+	{
+		return BlueprintNotFoundError(AssetPath);
+	}
+
+	FResolvedVariableDefault Resolved;
+	FString ResolveError;
+	if (!ResolveVariableDefault(Blueprint, VarName, Resolved, ResolveError))
+	{
+		return MCPError(ResolveError);
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("path"), AssetPath);
+	AnnotateResolvedBlueprint(Result, Blueprint);
+	Result->SetStringField(TEXT("name"), VarName);
+	WriteResolvedVariableDefault(Result, Resolved);
+	WriteDefaultPersistence(Result, Blueprint);
+
+	// The authored string, when there is one, is reported alongside rather than
+	// instead of the resolved value. It is advisory: the engine treats it as an
+	// optional override, so an empty one is normal and says nothing. A non-empty
+	// one that disagrees with the CDO means the next recompile can move the
+	// value, which is worth seeing in a verification loop.
+	for (const FBPVariableDescription& Var : Blueprint->NewVariables)
+	{
+		if (Var.VarName.ToString() != VarName) continue;
+		Result->SetBoolField(TEXT("declaredOnThisBlueprint"), true);
+		if (Var.DefaultValue.IsEmpty()) break;
+
+		Result->SetStringField(TEXT("authoredDefault"), Var.DefaultValue);
+		FDefaultConstructedPropertyElement Authored(Resolved.Property);
+		// No owning object on purpose: this is a read, and an owner is what
+		// lets the importer construct instanced subobjects under the real
+		// asset. A question about a value must not touch it.
+		const bool bParsed = FBlueprintEditorUtils::PropertyValueFromString_Direct(
+			Resolved.Property,
+			Var.DefaultValue,
+			static_cast<uint8*>(Authored.GetObjAddress()),
+			/*OwningObject=*/nullptr);
+		if (bParsed)
+		{
+			Result->SetBoolField(TEXT("matchesAuthoredDefault"),
+				Resolved.Property->Identical(Resolved.ValueAddress, Authored.GetObjAddress(), PPF_None));
+		}
+		break;
+	}
+
+	return MCPResult(Result);
+}
+
 TSharedPtr<FJsonValue> FBlueprintHandlers::ListBlueprintVariables(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
 	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
+
+	// #902: resolved values are opt-in. They cost a CDO property read and a
+	// JSON serialization per variable, and every existing caller of this action
+	// wants the declaration list, so the default payload is unchanged and a
+	// verification loop asks for the values it needs.
+	const bool bIncludeValues = OptionalBool(Params, TEXT("includeValues"), false);
 
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
@@ -2066,13 +2270,37 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ListBlueprintVariables(const TSharedP
 			(Var.HasMetaData(FBlueprintMetadata::MD_ExposeOnSpawn) &&
 			 Var.GetMetaData(FBlueprintMetadata::MD_ExposeOnSpawn).ToBool()));
 
+		if (bIncludeValues)
+		{
+			FResolvedVariableDefault Resolved;
+			FString ResolveError;
+			if (ResolveVariableDefault(Blueprint, Var.VarName.ToString(), Resolved, ResolveError))
+			{
+				WriteResolvedVariableDefault(VarObj, Resolved);
+			}
+			else
+			{
+				// A variable that has no compiled property is a real state
+				// (added but not compiled yet), so say so per variable rather
+				// than failing the whole listing.
+				VarObj->SetStringField(TEXT("valueError"), ResolveError);
+			}
+		}
+
 		Variables.Add(MakeShared<FJsonValueObject>(VarObj));
 	}
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
+	AnnotateResolvedBlueprint(Result, Blueprint);
 	Result->SetArrayField(TEXT("variables"), Variables);
 	Result->SetNumberField(TEXT("count"), Variables.Num());
+	if (bIncludeValues)
+	{
+		// Persistence is a property of the package, not of any one variable, so
+		// it is stated once for the whole listing.
+		WriteDefaultPersistence(Result, Blueprint);
+	}
 	return MCPResult(Result);
 }
 TSharedPtr<FJsonValue> FBlueprintHandlers::RemoveComponent(const TSharedPtr<FJsonObject>& Params)

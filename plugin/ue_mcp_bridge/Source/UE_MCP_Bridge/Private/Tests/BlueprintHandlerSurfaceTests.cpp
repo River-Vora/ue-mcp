@@ -85,4 +85,83 @@ bool FBlueprintNotFoundReportingTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// #902: get_variable_default has to be reachable by name and has to reject a
+// malformed request rather than throw. A handler that fails to register reports
+// "Unknown method" at runtime with a clean build behind it, which is the
+// failure mode this asserts away. The value path itself needs a real compiled
+// Blueprint and is covered by the smoke suite.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FBlueprintVariableDefaultRegistrationTest,
+	"UE.MCP.Blueprint.VariableDefault.RegistrationAndValidation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FBlueprintVariableDefaultRegistrationTest::RunTest(const FString& Parameters)
+{
+	FMCPHandlerRegistry Registry;
+	FBlueprintHandlers::RegisterHandlers(Registry);
+
+	TestTrue(TEXT("get_blueprint_variable_default is registered"),
+		Registry.HasHandler(TEXT("get_blueprint_variable_default")));
+
+	// assetPath is required.
+	{
+		TSharedPtr<FJsonObject> MissingPath = MakeShared<FJsonObject>();
+		MissingPath->SetStringField(TEXT("name"), TEXT("Health"));
+		const TSharedPtr<FJsonObject> Response = BlueprintTestResponseObject(
+			Registry.ExecuteHandler(TEXT("get_blueprint_variable_default"), MissingPath));
+		if (TestTrue(TEXT("missing assetPath returns an object"), Response.IsValid()))
+		{
+			TestFalse(TEXT("missing assetPath is unsuccessful"), Response->GetBoolField(TEXT("success")));
+		}
+	}
+
+	// name is required, and is checked before the asset is touched so a caller
+	// that forgot it is told which field it forgot.
+	{
+		TSharedPtr<FJsonObject> MissingName = MakeShared<FJsonObject>();
+		MissingName->SetStringField(TEXT("assetPath"), TEXT("/Game/UEMCPTests/BP_ThisAssetDoesNotExist"));
+		const TSharedPtr<FJsonObject> Response = BlueprintTestResponseObject(
+			Registry.ExecuteHandler(TEXT("get_blueprint_variable_default"), MissingName));
+		if (TestTrue(TEXT("missing name returns an object"), Response.IsValid()))
+		{
+			TestFalse(TEXT("missing name is unsuccessful"), Response->GetBoolField(TEXT("success")));
+			TestTrue(TEXT("missing name identifies the field"),
+				Response->GetStringField(TEXT("error")).Contains(TEXT("name")));
+		}
+	}
+
+	// An unknown asset reports the shared Blueprint lookup failure, not a
+	// property failure: the two are different problems with different fixes.
+	{
+		TSharedPtr<FJsonObject> UnknownAsset = MakeShared<FJsonObject>();
+		UnknownAsset->SetStringField(TEXT("assetPath"), TEXT("/Game/UEMCPTests/BP_ThisAssetDoesNotExist"));
+		UnknownAsset->SetStringField(TEXT("name"), TEXT("Health"));
+		const TSharedPtr<FJsonObject> Response = BlueprintTestResponseObject(
+			Registry.ExecuteHandler(TEXT("get_blueprint_variable_default"), UnknownAsset));
+		if (TestTrue(TEXT("unknown asset returns an object"), Response.IsValid()))
+		{
+			TestFalse(TEXT("unknown asset is unsuccessful"), Response->GetBoolField(TEXT("success")));
+			TestTrue(TEXT("unknown asset reports a missing Blueprint"),
+				Response->GetStringField(TEXT("error")).Contains(TEXT("Blueprint not found")));
+		}
+	}
+
+	// list_variables keeps its default payload: includeValues is opt-in, so a
+	// request without it must not start resolving CDO values.
+	{
+		TSharedPtr<FJsonObject> MissingPath = MakeShared<FJsonObject>();
+		const TSharedPtr<FJsonObject> Response = BlueprintTestResponseObject(
+			Registry.ExecuteHandler(TEXT("list_blueprint_variables"), MissingPath));
+		if (TestTrue(TEXT("list_variables with no path returns an object"), Response.IsValid()))
+		{
+			TestFalse(TEXT("list_variables with no path is unsuccessful"),
+				Response->GetBoolField(TEXT("success")));
+		}
+	}
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
