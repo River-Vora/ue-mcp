@@ -136,12 +136,13 @@ private:
 	// Registered as both set_bt_node_property and set_bt_task_property.
 	static TSharedPtr<FJsonValue> SetBTNodeProperty(const TSharedPtr<FJsonObject>& Params);
 
-	// #889: BehaviorTree editor-graph authoring. These drive
+	// #889/#947: BehaviorTree editor-graph authoring. These drive
 	// UBehaviorTreeGraph and its node classes, then recompile the graph into
 	// the runnable UBTCompositeNode tree, which is the step no reflected
 	// runtime API can perform. Definitions in GameplayHandlers_BTAuthoring.cpp.
 	static TSharedPtr<FJsonValue> ListBTGraphNodes(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AddBTNode(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> MoveBTNode(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> RemoveBTNode(const TSharedPtr<FJsonObject>& Params);
 
 	// #163 - detailed navmesh configuration

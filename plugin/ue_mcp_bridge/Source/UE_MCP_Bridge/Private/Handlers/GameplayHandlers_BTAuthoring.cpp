@@ -1,5 +1,5 @@
-// BehaviorTree editor-graph authoring: add and remove nodes, then recompile the
-// graph into the runnable tree (#889).
+// BehaviorTree editor-graph authoring: add, reparent, reorder and remove nodes,
+// then recompile the graph into the runnable tree (#889, #947).
 //
 // Why this is native rather than a Python or reflection recipe.
 //
@@ -34,9 +34,9 @@
 // Child execution order, the thing Selector and Sequence are defined by, is not
 // stored as a list. BTGraphHelpers::CreateChildren sorts each output pin's
 // LinkedTo by FCompareNodeXLocation before walking it, so a child's ordinal is
-// its graph node's NodePosX. Placing a node at a given index is therefore a
-// position rewrite, done here by MCPBTALayoutChildren rather than by touching
-// the link array, which the compiler would re-sort anyway.
+// its graph node's NodePosX. Reordering is therefore a position rewrite, done
+// here by MCPBTALayoutChildren rather than by touching the link array, which
+// the compiler would re-sort anyway.
 //
 // UBehaviorTreeGraph::AutoArrange() is deliberately never called: it reads
 // DEPRECATED_NodeWidget, the Slate widget that exists only while the graph is
@@ -464,6 +464,31 @@ namespace
 				Child->NodePosY = Parent->NodePosY + MCPBTAChildOffsetY;
 			}
 		}
+	}
+
+	// Is Candidate at or below Node? Used before a reparent, because the
+	// schema's own cycle check walks input pins upward and cannot see the loop
+	// once the moved node's old parent link is gone.
+	bool MCPBTAIsInSubtree(UBehaviorTreeGraphNode* Node, UBehaviorTreeGraphNode* Candidate, int32 Depth = 0)
+	{
+		if (!Node || !Candidate || Depth > MCPBTAMaxDepth) return false;
+		if (Node == Candidate) return true;
+
+		TArray<UBehaviorTreeGraphNode*> Children;
+		MCPBTACollectChildren(Node, Children);
+		for (UBehaviorTreeGraphNode* Child : Children)
+		{
+			if (MCPBTAIsInSubtree(Child, Candidate, Depth + 1)) return true;
+		}
+		for (UBehaviorTreeGraphNode* Sub : Node->Decorators)
+		{
+			if (Sub == Candidate) return true;
+		}
+		for (UBehaviorTreeGraphNode* Sub : Node->Services)
+		{
+			if (Sub == Candidate) return true;
+		}
+		return false;
 	}
 
 	// Apply a properties map onto a node instance, reusing the same writer the
@@ -985,6 +1010,217 @@ TSharedPtr<FJsonValue> FGameplayHandlers::AddBTNode(const TSharedPtr<FJsonObject
 	Payload->SetStringField(TEXT("assetPath"), AssetPath);
 	Payload->SetStringField(TEXT("node"), MCPBTAGuidString(NewNode));
 	MCPSetRollback(Result, TEXT("remove_bt_node"), Payload);
+	return MCPResult(Result);
+}
+
+// -----------------------------------------------------------------
+// move_bt_node - reparent and reorder (#947)
+// -----------------------------------------------------------------
+
+TSharedPtr<FJsonValue> FGameplayHandlers::MoveBTNode(const TSharedPtr<FJsonObject>& Params)
+{
+	FString AssetPath;
+	UBehaviorTree* Tree = nullptr;
+	UBehaviorTreeGraph* Graph = nullptr;
+	bool bGraphCreated = false;
+	if (auto Err = MCPBTAOpen(Params, /*bCreateGraph*/ false, AssetPath, Tree, Graph, bGraphCreated)) return Err;
+	if (!Graph)
+	{
+		return MCPError(FString::Printf(
+			TEXT("%s has no editor graph, so it has no nodes to move."), *AssetPath));
+	}
+
+	FString NodeSpec;
+	if (auto Err = RequireStringAlt(Params, TEXT("node"), TEXT("nodePath"), NodeSpec)) return Err;
+
+	TArray<FMCPBTAEntry> Entries;
+	MCPBTACollectGraph(Graph, Entries);
+
+	FString ResolveError;
+	UBehaviorTreeGraphNode* Node = MCPBTAResolve(Entries, Tree, NodeSpec, ResolveError);
+	if (!Node) return MCPError(FString::Printf(TEXT("node: %s"), *ResolveError));
+	if (Node->IsA<UBehaviorTreeGraphNode_Root>())
+	{
+		return MCPError(TEXT("the root node has no parent and cannot be moved."));
+	}
+
+	const FMCPBTAEntry* Before = MCPBTAFind(Entries, Node);
+	UBehaviorTreeGraphNode* OldParent = Before ? Before->Parent : nullptr;
+	const int32 OldIndex = Before ? Before->IndexInParent : INDEX_NONE;
+	const FString Category = Before ? Before->Category : FString();
+	const bool bIsSubNode = (Category == TEXT("decorator") || Category == TEXT("service"));
+
+	const FString ParentSpec = OptionalString(Params, TEXT("parent")).TrimStartAndEnd();
+	const bool bHasIndex = Params.IsValid() && Params->HasField(TEXT("index"));
+	const int32 RequestedIndex = OptionalInt(Params, TEXT("index"), INDEX_NONE);
+	if (ParentSpec.IsEmpty() && !bHasIndex)
+	{
+		return MCPError(TEXT("pass 'parent' to reconnect the node, 'index' to reorder it, or both."));
+	}
+
+	UBehaviorTreeGraphNode* NewParent = OldParent;
+	if (!ParentSpec.IsEmpty())
+	{
+		NewParent = MCPBTAResolve(Entries, Tree, ParentSpec, ResolveError);
+		if (!NewParent) return MCPError(FString::Printf(TEXT("parent: %s"), *ResolveError));
+	}
+	if (!NewParent)
+	{
+		return MCPError(TEXT(
+			"this node is not attached to anything, so 'parent' has to say where it should go."));
+	}
+
+	// The schema's cycle check walks input pins upward from the new parent. It
+	// cannot see the loop that reparenting under a descendant would create,
+	// because the moved node's own input link is about to be broken, so the
+	// subtree test happens here instead.
+	if (MCPBTAIsInSubtree(Node, NewParent))
+	{
+		return MCPError(TEXT("a node cannot be moved under itself or one of its own descendants."));
+	}
+
+	Tree->Modify();
+	Graph->Modify();
+	Node->Modify();
+
+	int32 PlacedIndex = INDEX_NONE;
+
+	if (bIsSubNode)
+	{
+		if (NewParent->IsA<UBehaviorTreeGraphNode_Decorator>() || NewParent->IsA<UBehaviorTreeGraphNode_Service>())
+		{
+			return MCPError(TEXT(
+				"decorators and services attach to a composite, a task or the root, never to another subnode."));
+		}
+		if (Category == TEXT("service") && NewParent->IsA<UBehaviorTreeGraphNode_Root>())
+		{
+			return MCPError(TEXT(
+				"the root node carries decorators only. Move the service onto the composite beneath it."));
+		}
+
+		if (OldParent && OldParent != NewParent)
+		{
+			OldParent->Modify();
+			OldParent->RemoveSubNode(Node);
+			NewParent->Modify();
+			NewParent->AddSubNode(Node, Graph);
+		}
+
+		TArray<TObjectPtr<UBehaviorTreeGraphNode>>& Bucket =
+			(Category == TEXT("decorator")) ? NewParent->Decorators : NewParent->Services;
+		PlacedIndex = Bucket.IndexOfByKey(Node);
+		if (bHasIndex && RequestedIndex >= 0 && PlacedIndex != INDEX_NONE)
+		{
+			const int32 Target = FMath::Clamp(RequestedIndex, 0, Bucket.Num() - 1);
+			Bucket.RemoveAt(PlacedIndex);
+			Bucket.Insert(Node, Target);
+			PlacedIndex = Target;
+		}
+	}
+	else
+	{
+		const int32 OutputPinCount = MCPBTAOutputPinCount(NewParent);
+		const int32 PinIndex = (OutputPinCount > 1 && RequestedIndex >= 0)
+			? FMath::Clamp(RequestedIndex, 0, OutputPinCount - 1)
+			: 0;
+
+		UEdGraphPin* ChildPin = Node->GetInputPin(0);
+		UEdGraphPin* ParentPin = NewParent->GetOutputPin(PinIndex);
+		const UEdGraphSchema* Schema = Graph->GetSchema();
+		if (!ChildPin || !ParentPin || !Schema)
+		{
+			return MCPError(TEXT("the node or its new parent has no pin to connect."));
+		}
+
+		const bool bReparenting = (NewParent != OldParent) || (OutputPinCount > 1);
+		if (bReparenting)
+		{
+			const FPinConnectionResponse Response = Schema->CanCreateConnection(ParentPin, ChildPin);
+			if (Response.Response == CONNECT_RESPONSE_DISALLOW)
+			{
+				return MCPError(FString::Printf(
+					TEXT("cannot reconnect: %s"), *Response.Message.ToString()));
+			}
+
+			// Break the old link explicitly. CanCreateConnection reports
+			// BREAK_OTHERS for the child's single input pin, but only once the
+			// link is gone is the parent's child list correct for the reorder
+			// that follows.
+			ChildPin->BreakAllPinLinks(true);
+			if (!Schema->TryCreateConnection(ParentPin, ChildPin))
+			{
+				const FString ParentName = NewParent->NodeInstance
+					? NewParent->NodeInstance->GetClass()->GetName()
+					: FString(TEXT("the root"));
+				return MCPError(FString::Printf(
+					TEXT("the BehaviorTree schema refused to link this node under %s."), *ParentName));
+			}
+		}
+
+		if (OutputPinCount > 1)
+		{
+			Node->NodePosX = NewParent->NodePosX + (PinIndex - 1) * MCPBTAChildSpacingX;
+			Node->NodePosY = NewParent->NodePosY + MCPBTAChildOffsetY;
+			PlacedIndex = PinIndex;
+		}
+		else
+		{
+			TArray<UBehaviorTreeGraphNode*> Siblings;
+			MCPBTACollectChildren(NewParent, Siblings);
+			Siblings.Remove(Node);
+			const int32 Target = (bHasIndex && RequestedIndex >= 0)
+				? FMath::Clamp(RequestedIndex, 0, Siblings.Num())
+				: FMath::Min(OldIndex >= 0 ? OldIndex : Siblings.Num(), Siblings.Num());
+			Siblings.Insert(Node, Target);
+			MCPBTALayoutChildren(NewParent, Siblings);
+			PlacedIndex = Target;
+		}
+	}
+
+	const bool bSaved = MCPBTACompileAndSave(Tree, Graph);
+
+	TArray<FMCPBTAEntry> AfterEntries;
+	MCPBTACollectGraph(Graph, AfterEntries);
+	TMap<UBTNode*, FString> Addresses;
+	MapBTNodeAddresses(Tree, Addresses);
+
+	auto Result = MCPSuccess();
+	MCPSetUpdated(Result);
+	Result->SetStringField(TEXT("assetPath"), AssetPath);
+	Result->SetStringField(TEXT("guid"), MCPBTAGuidString(Node));
+	Result->SetStringField(TEXT("category"), Category);
+	Result->SetStringField(TEXT("previousParentGuid"), MCPBTAGuidString(OldParent));
+	Result->SetNumberField(TEXT("previousIndex"), OldIndex);
+	Result->SetStringField(TEXT("parentGuid"), MCPBTAGuidString(NewParent));
+	Result->SetNumberField(TEXT("index"), PlacedIndex);
+	Result->SetBoolField(TEXT("saved"), bSaved);
+
+	if (const FMCPBTAEntry* Entry = MCPBTAFind(AfterEntries, Node))
+	{
+		Result->SetObjectField(TEXT("node"), MCPBTADescribeEntry(*Entry, Addresses));
+	}
+
+	// The sibling order after the compile, which is the thing a Selector or a
+	// Sequence is defined by and the thing this call exists to change.
+	if (const FMCPBTAEntry* ParentEntry = MCPBTAFind(AfterEntries, NewParent))
+	{
+		TArray<TSharedPtr<FJsonValue>> Order;
+		for (const UBehaviorTreeGraphNode* Child : ParentEntry->Children)
+		{
+			if (Child) Order.Add(MakeShared<FJsonValueString>(MCPBTAGuidString(Child)));
+		}
+		Result->SetArrayField(TEXT("siblingOrder"), Order);
+	}
+
+	if (OldParent)
+	{
+		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetStringField(TEXT("assetPath"), AssetPath);
+		Payload->SetStringField(TEXT("node"), MCPBTAGuidString(Node));
+		Payload->SetStringField(TEXT("parent"), MCPBTAGuidString(OldParent));
+		Payload->SetNumberField(TEXT("index"), OldIndex);
+		MCPSetRollback(Result, TEXT("move_bt_node"), Payload);
+	}
 	return MCPResult(Result);
 }
 

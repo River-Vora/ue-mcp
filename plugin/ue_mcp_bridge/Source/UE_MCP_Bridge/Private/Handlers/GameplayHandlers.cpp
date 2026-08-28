@@ -161,11 +161,12 @@ void FGameplayHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// should not have to know it is the general node setter.
 	Registry.RegisterHandler(TEXT("set_bt_node_property"), &SetBTNodeProperty);
 	Registry.RegisterHandler(TEXT("set_bt_task_property"), &SetBTNodeProperty);
-	// #889: author the BT editor graph and recompile it into the runnable tree.
-	// Reading and writing node properties only reaches nodes that already
-	// exist; these are what put nodes there in the first place.
+	// #889/#947: author the BT editor graph and recompile it into the runnable
+	// tree. Reading and writing node properties only reaches nodes that already
+	// exist; these are what put nodes there, reconnect them and reorder them.
 	Registry.RegisterHandler(TEXT("list_bt_graph_nodes"), &ListBTGraphNodes);
 	Registry.RegisterHandler(TEXT("add_bt_node"), &AddBTNode);
+	Registry.RegisterHandler(TEXT("move_bt_node"), &MoveBTNode);
 	Registry.RegisterHandler(TEXT("remove_bt_node"), &RemoveBTNode);
 	Registry.RegisterHandler(TEXT("add_perception_component"), &AddPerceptionComponent);
 	Registry.RegisterHandler(TEXT("configure_ai_perception_sense"), &ConfigureAiPerceptionSense);
