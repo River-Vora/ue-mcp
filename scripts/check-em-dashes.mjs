@@ -42,6 +42,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { isAbsolute, join } from "node:path";
 
 /**
  * The character under ban, written as an escape so this file is not itself a
@@ -134,10 +135,21 @@ export function readTextFile(path) {
 }
 
 /** Scans the given files. Returns `{ file, line, column, text }` findings. */
+/**
+ * Resolve a path the caller named. `git ls-files` yields repo-relative paths,
+ * but the commit-msg hook is handed COMMIT_EDITMSG and git makes that path
+ * ABSOLUTE inside a linked worktree (it lives under .git/worktrees/<name>/).
+ * Gluing cwd onto it produced an unreadable path, and the hook then failed
+ * every commit made from a worktree.
+ */
+function resolveNamed(file, cwd) {
+  return isAbsolute(file) ? file : join(cwd, file);
+}
+
 export function scanFiles(files, cwd = process.cwd()) {
   const findings = [];
   for (const file of files) {
-    const text = readTextFile(`${cwd}/${file}`);
+    const text = readTextFile(resolveNamed(file, cwd));
     if (text === null) continue;
     for (const f of scanText(text)) findings.push({ file, ...f });
   }
@@ -207,10 +219,10 @@ function main() {
   // something that was never read. The git hooks depend on this distinction,
   // because they pass paths and trust the exit code.
   if (named) {
-    const unreadable = named.filter((f) => readTextFile(`${process.cwd()}/${f}`) === null);
+    const unreadable = named.filter((f) => readTextFile(resolveNamed(f, process.cwd())) === null);
     if (unreadable.length > 0) {
       for (const f of unreadable) {
-        console.error(`::error::Could not read '${f}'. Paths are resolved relative to the repository root.`);
+        console.error(`::error::Could not read '${f}'. Relative paths are resolved against the repository root.`);
       }
       process.exit(2);
     }
