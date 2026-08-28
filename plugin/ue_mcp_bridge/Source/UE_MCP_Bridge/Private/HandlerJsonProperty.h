@@ -670,39 +670,48 @@ namespace MCPJsonProperty
 		return Out;
 	}
 
-	/** True when the property can hold an FText anywhere inside it.
+	/** True when two independent applications of one request must produce
+	 *  values that compare Identical.
 	 *
-	 *  FText identity is per instance: two imports of the same source string
-	 *  are not Identical to each other, so a value carrying text cannot be
-	 *  compared by identity without reporting a mismatch that is not one.
-	 *  Depth exhaustion answers "yes" so the conservative path is the one that
-	 *  skips the comparison rather than the one that fails a good write. */
-	inline bool PropertyCanHoldText(const FProperty* Prop, int32 Depth = 0)
+	 *  Two kinds of value are not in that class, and both would report a
+	 *  mismatch that is not one:
+	 *
+	 *  FText identity is per instance. Two imports of the same source string
+	 *  carry different keys and are never Identical.
+	 *
+	 *  An instanced reference is a fresh subobject on every import, so the two
+	 *  applications point at two different objects by design.
+	 *
+	 *  Anything unrecognised, and anything past the depth bound, answers
+	 *  "no", so the conservative path is the one that skips the comparison
+	 *  rather than the one that fails a write that was fine. */
+	inline bool PropertyIsComparableByIdentity(const FProperty* Prop, int32 Depth = 0)
 	{
-		if (!Prop) return false;
-		if (Depth > 12) return true;
-		if (Prop->IsA<FTextProperty>()) return true;
+		if (!Prop || Depth > 12) return false;
+		if (Prop->HasAnyPropertyFlags(CPF_InstancedReference | CPF_ContainsInstancedReference)) return false;
+		if (Prop->IsA<FTextProperty>()) return false;
+
 		if (const FArrayProperty* ArrProp = CastField<FArrayProperty>(Prop))
 		{
-			return PropertyCanHoldText(ArrProp->Inner, Depth + 1);
+			return PropertyIsComparableByIdentity(ArrProp->Inner, Depth + 1);
 		}
 		if (const FSetProperty* SetProp = CastField<FSetProperty>(Prop))
 		{
-			return PropertyCanHoldText(SetProp->ElementProp, Depth + 1);
+			return PropertyIsComparableByIdentity(SetProp->ElementProp, Depth + 1);
 		}
 		if (const FMapProperty* MapProp = CastField<FMapProperty>(Prop))
 		{
-			return PropertyCanHoldText(MapProp->KeyProp, Depth + 1)
-				|| PropertyCanHoldText(MapProp->ValueProp, Depth + 1);
+			return PropertyIsComparableByIdentity(MapProp->KeyProp, Depth + 1)
+				&& PropertyIsComparableByIdentity(MapProp->ValueProp, Depth + 1);
 		}
 		if (const FStructProperty* StructProp = CastField<FStructProperty>(Prop))
 		{
 			for (TFieldIterator<FProperty> It(StructProp->Struct); It; ++It)
 			{
-				if (PropertyCanHoldText(*It, Depth + 1)) return true;
+				if (!PropertyIsComparableByIdentity(*It, Depth + 1)) return false;
 			}
 		}
-		return false;
+		return true;
 	}
 
 	/** The comparable form of an asset path.
@@ -759,7 +768,9 @@ namespace MCPJsonProperty
 	 *  the same request was applied to. That is what catches a value that
 	 *  never reached the destination: a container that stored fewer entries
 	 *  than it was handed, a row copy that dropped the field, a reference
-	 *  cleared by a later step.
+	 *  cleared by a later step. Values whose two applications are not
+	 *  required to be identical, text and instanced references, are exempt
+	 *  rather than failed.
 	 *
 	 *  On a mismatch OutDetail carries the requested and the stored value. */
 	inline bool VerifyJsonOnProperty(
@@ -799,7 +810,7 @@ namespace MCPJsonProperty
 			return true;
 		}
 
-		if (PropertyCanHoldText(Prop)) return true;
+		if (!PropertyIsComparableByIdentity(Prop)) return true;
 
 		FDefaultConstructedPropertyElement Reference(Prop);
 		FString Ignored;
