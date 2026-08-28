@@ -26,7 +26,7 @@ bool FEditorFunctionCallContainerReturnTest::RunTest(const FString& Parameters)
 	// invoke_static_function calls one: a frame, ProcessEvent on the CDO, then
 	// the outputs read back out of the frame.
 	UClass* LibClass = UKismetStringLibrary::StaticClass();
-	UFunction* Func = LibClass->FindFunctionByName(TEXT("ParseIntoArray"));
+	UFunction* Func = LibClass->FindFunctionByName(FName(TEXT("ParseIntoArray")));
 	if (!TestNotNull(TEXT("UKismetStringLibrary::ParseIntoArray is reflected"), Func))
 	{
 		return false;
@@ -39,15 +39,15 @@ bool FEditorFunctionCallContainerReturnTest::RunTest(const FString& Parameters)
 		It->InitializeValue_InContainer(Frame.GetData());
 	}
 
-	if (FStrProperty* SourceProp = CastField<FStrProperty>(Func->FindPropertyByName(TEXT("SourceString"))))
+	if (FStrProperty* SourceProp = CastField<FStrProperty>(Func->FindPropertyByName(FName(TEXT("SourceString")))))
 	{
 		SourceProp->SetPropertyValue_InContainer(Frame.GetData(), TEXT("alpha,beta,gamma"));
 	}
-	if (FStrProperty* DelimProp = CastField<FStrProperty>(Func->FindPropertyByName(TEXT("Delimiter"))))
+	if (FStrProperty* DelimProp = CastField<FStrProperty>(Func->FindPropertyByName(FName(TEXT("Delimiter")))))
 	{
 		DelimProp->SetPropertyValue_InContainer(Frame.GetData(), TEXT(","));
 	}
-	if (FBoolProperty* CullProp = CastField<FBoolProperty>(Func->FindPropertyByName(TEXT("CullEmptyStrings"))))
+	if (FBoolProperty* CullProp = CastField<FBoolProperty>(Func->FindPropertyByName(FName(TEXT("CullEmptyStrings")))))
 	{
 		CullProp->SetPropertyValue_InContainer(Frame.GetData(), true);
 	}
@@ -98,8 +98,8 @@ bool FEditorFunctionCallScalarReturnTest::RunTest(const FString& Parameters)
 	Poly.ItemName = TEXT("Face");
 
 	UScriptStruct* Struct = FBuilderPoly::StaticStruct();
-	FProperty* DirectionProp = Struct->FindPropertyByName(TEXT("Direction"));
-	FProperty* NameProp = Struct->FindPropertyByName(TEXT("ItemName"));
+	FProperty* DirectionProp = Struct->FindPropertyByName(FName(TEXT("Direction")));
+	FProperty* NameProp = Struct->FindPropertyByName(FName(TEXT("ItemName")));
 	if (!TestNotNull(TEXT("FBuilderPoly::Direction is reflected"), DirectionProp)) return false;
 	if (!TestNotNull(TEXT("FBuilderPoly::ItemName is reflected"), NameProp)) return false;
 
@@ -128,7 +128,7 @@ bool FEditorFunctionCallNumericArrayTest::RunTest(const FString& Parameters)
 	Poly.VertexIndices = { 3, 5, 8 };
 
 	FArrayProperty* ArrayProp =
-		CastField<FArrayProperty>(FBuilderPoly::StaticStruct()->FindPropertyByName(TEXT("VertexIndices")));
+		CastField<FArrayProperty>(FBuilderPoly::StaticStruct()->FindPropertyByName(FName(TEXT("VertexIndices"))));
 	if (!TestNotNull(TEXT("FBuilderPoly::VertexIndices is a reflected TArray<int32>"), ArrayProp)) return false;
 
 	const TSharedPtr<FJsonValue> Json =
