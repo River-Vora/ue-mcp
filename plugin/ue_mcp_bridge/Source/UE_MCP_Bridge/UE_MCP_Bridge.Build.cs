@@ -37,6 +37,10 @@ public class UE_MCP_Bridge : ModuleRules
 				"MessageLog",
 				"AnimGraph",
 				"AnimationEditor",
+				// UAnimPoseExtensions / FAnimPoseEvaluationOptions (AnimPose.h),
+				// the engine's own pose evaluator, used by animation(sample_pose)
+				// and animation(measure_natural_speed).
+				"AnimationBlueprintLibrary",
 				"AnimationModifiers",
 				"AssetRegistry",
 				"AssetTools",

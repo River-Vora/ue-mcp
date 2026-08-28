@@ -157,6 +157,9 @@ const OVERRIDES: Readonly<Record<string, ActionClass>> = {
   // engine surface uses it as one (mirror_selected_controls), and a mutate verb
   // anywhere in the name wins, which is wrong for exactly this action.
   "animation.read_mirror_data_table": "read",
+  // Evaluates a clip's pose to derive its planted-foot speed. Reads only, and
+  // "measure" is not a lexicon verb for the reason given above.
+  "animation.measure_natural_speed": "read",
   // Reads whose first segment is not a verb at all.
   "level.line_trace": "read",
   "level.nav_project_point": "read",

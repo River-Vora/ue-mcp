@@ -193,6 +193,11 @@ void FAnimationHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 }
 
 TSharedPtr<FJsonValue> FAnimationHandlers::ListAnimAssets(const TSharedPtr<FJsonObject>& Params)
+
+	// #922/#923/#926 - evaluated pose reads (live component, and asset sampling)
+	Registry.RegisterHandler(TEXT("get_live_bone_transforms"), &GetLiveBoneTransforms);
+	Registry.RegisterHandler(TEXT("sample_pose"), &SamplePose);
+	Registry.RegisterHandler(TEXT("measure_natural_speed"), &MeasureNaturalSpeed);
 {
 	auto Result = MCPSuccess();
 
