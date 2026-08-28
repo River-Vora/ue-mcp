@@ -41,6 +41,7 @@
 #include "RenderingThread.h"
 #include "Misc/AutomationTest.h"
 #include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
 #include "Slate/SceneViewport.h"
 #include "HAL/PlatformMemory.h"
 #include "Misc/App.h"
@@ -2693,12 +2694,27 @@ TSharedPtr<FJsonValue> FEditorHandlers::ListFunctionLibraries(const TSharedPtr<F
 // Headlessly run registered Automation tests whose name matches a filter and
 // report pass/fail + errors. Uses FAutomationTestFramework's synchronous
 // StartTestByName/StopTest, which fully runs non-latent tests. Latent tests
-// (that enqueue cross-frame commands) have their queued commands flushed on a
-// best-effort tick loop with a timeout.
+// (that enqueue cross-frame commands) get a bounded drain, and one that has not
+// finished when the budget runs out is abandoned and reported, never stopped
+// mid-queue.
+//
+// #993: StopTest asserts on LatentCommands.IsEmpty() inside InternalStopTest,
+// and this handler used to call it unconditionally after a drain loop that gave
+// up after a fixed iteration count. A CQTest test that starts multi-client PIE
+// still had commands queued at that point, so the assert fired and took the
+// editor down: the caller saw a WebSocket close 1006, not a test result. A
+// handler must never take the editor down.
 TSharedPtr<FJsonValue> FEditorHandlers::RunAutomationTests(const TSharedPtr<FJsonObject>& Params)
 {
 	const FString NameFilter = OptionalString(Params, TEXT("filter"));
 	const int32 MaxTests = OptionalInt(Params, TEXT("maxTests"), 50);
+	// How long one test's latent queue may take. The handler occupies the game
+	// thread for its whole run, so this is deliberately small by default: a
+	// latent command that needs real frames (PIE, anything waiting on a world
+	// tick) cannot make progress from in here however long it is given, and
+	// waiting longer only holds the editor still for longer.
+	const double LatentBudgetSeconds = FMath::Clamp(
+		OptionalNumber(Params, TEXT("latentTimeoutSeconds"), 5.0), 0.0, 120.0);
 
 	// #765: this handler runs tests SYNCHRONOUSLY via StartTestByName inside a
 	// single tick, so it never depended on the interactive-frame-rate gate that
@@ -2731,7 +2747,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::RunAutomationTests(const TSharedPtr<FJso
 	Framework.GetValidTestNames(AllTests);
 
 	TArray<TSharedPtr<FJsonValue>> Results;
-	int32 Ran = 0, Passed = 0, Failed = 0;
+	int32 Ran = 0, Passed = 0, Failed = 0, Abandoned = 0;
 	for (const FAutomationTestInfo& Info : AllTests)
 	{
 		const FString TestName = Info.GetTestName();
@@ -2745,21 +2761,57 @@ TSharedPtr<FJsonValue> FEditorHandlers::RunAutomationTests(const TSharedPtr<FJso
 
 		Framework.StartTestByName(TestName, /*RoleIndex*/ 0);
 
-		// Flush latent commands (best effort, bounded) so latent tests finish.
-		int32 Guard = 0;
-		while (!Framework.ExecuteLatentCommands() && Guard++ < 1000)
+		// Drain the latent queue, bounded by wall clock rather than by a fixed
+		// iteration count. The old bound was 1000 iterations of a zero-length
+		// sleep, which elapses in no time at all and gave a command that polls
+		// for a condition no real chance to reach one. Network commands are
+		// pumped alongside, because the framework's own per-frame path does and
+		// a latent queue behind an undelivered network command never empties.
+		const double DrainStartedAt = FPlatformTime::Seconds();
+		while (!Framework.ExecuteLatentCommands()
+			&& (FPlatformTime::Seconds() - DrainStartedAt) < LatentBudgetSeconds)
 		{
-			FPlatformProcess::Sleep(0.0f);
+			Framework.ExecuteNetworkCommands();
+			FPlatformProcess::Sleep(0.001f);
+		}
+
+		// #993: StopTest asserts that the latent queue is empty. Anything still
+		// queued here needs frames this handler cannot give it, because the
+		// handler owns the game thread for its whole run and the engine loop
+		// only advances once it returns. Clear the queue and record the test as
+		// abandoned; calling StopTest with commands outstanding is what took
+		// the editor down.
+		const bool bAbandoned = !Framework.IsLatentCommandQueueEmpty();
+		if (bAbandoned)
+		{
+			Framework.DequeueAllCommands();
 		}
 
 		FAutomationTestExecutionInfo ExecInfo;
-		const bool bPassed = Framework.StopTest(ExecInfo);
+		const bool bStopReportedPass = Framework.StopTest(ExecInfo);
+		const bool bPassed = bStopReportedPass && !bAbandoned;
 		++Ran;
-		if (bPassed) ++Passed; else ++Failed;
+		if (bAbandoned) ++Abandoned;
+		else if (bPassed) ++Passed;
+		else ++Failed;
+
+		// An abandoned test may have left PIE running, and leaving it up would
+		// silently change what every later call in this session sees.
+		if (bAbandoned && GEditor && (GEditor->PlayWorld != nullptr || GEditor->bIsSimulatingInEditor))
+		{
+			GEditor->RequestEndPlayMap();
+		}
 
 		TSharedPtr<FJsonObject> R = MakeShared<FJsonObject>();
 		R->SetStringField(TEXT("test"), DisplayName.IsEmpty() ? TestName : DisplayName);
 		R->SetBoolField(TEXT("passed"), bPassed);
+		R->SetBoolField(TEXT("abandoned"), bAbandoned);
+		if (bAbandoned)
+		{
+			R->SetStringField(TEXT("abandonedReason"), FString::Printf(
+				TEXT("Latent commands were still queued after %.1fs. They need engine frames, which cannot happen while this handler holds the game thread, so the test was abandoned rather than stopped mid-queue (stopping mid-queue asserts and terminates the editor). Run this one from the editor's Automation window, or with -ExecCmds=\"Automation RunTests %s\" at launch."),
+				LatentBudgetSeconds, *TestName));
+		}
 		R->SetNumberField(TEXT("errors"), ExecInfo.GetErrorTotal());
 		R->SetNumberField(TEXT("warnings"), ExecInfo.GetWarningTotal());
 		if (ExecInfo.GetErrorTotal() > 0)
@@ -2783,6 +2835,14 @@ TSharedPtr<FJsonValue> FEditorHandlers::RunAutomationTests(const TSharedPtr<FJso
 	Result->SetNumberField(TEXT("ran"), Ran);
 	Result->SetNumberField(TEXT("passed"), Passed);
 	Result->SetNumberField(TEXT("failed"), Failed);
+	Result->SetNumberField(TEXT("abandoned"), Abandoned);
+	Result->SetNumberField(TEXT("latentTimeoutSeconds"), LatentBudgetSeconds);
+	if (Abandoned > 0)
+	{
+		Result->SetStringField(TEXT("warning"), FString::Printf(
+			TEXT("%d test(s) were abandoned with latent commands still queued. They need engine frames, and this handler holds the game thread for its whole run, so it cannot supply any. Raising latentTimeoutSeconds helps a test that only polls; a test that starts PIE needs the editor's Automation window or -ExecCmds=\"Automation RunTests <name>\" at launch. Nothing was stopped mid-queue, which is what used to terminate the editor (#993)."),
+			Abandoned));
+	}
 	Result->SetArrayField(TEXT("results"), Results);
 	return MCPResult(Result);
 }
