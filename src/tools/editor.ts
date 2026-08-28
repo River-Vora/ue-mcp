@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { categoryTool, bp, directive, type ToolDef, type ToolContext } from "../types.js";
-import { startEditor, stopEditor, restartEditor, buildProject } from "../editor-control.js";
+import { startEditor, stopEditor, restartEditor, buildProject, resolveOwnedEditor } from "../editor-control.js";
 import { readEngineState } from "../engine-observer.js";
 import { progressRenderingNote } from "../client-quirks.js";
 import { pushWorkaround, workaroundCount } from "../workaround-tracker.js";
@@ -337,7 +337,26 @@ export const editorTool: ToolDef = categoryTool(
     stage_game_input: bp("Stage input for the running game: set input mode (gameOnly|gameAndUI|uiOnly) and mouse cursor so injected/simulated input reaches the pawn. This only sets the mode - the injection itself lives in the pie category (pie(inject_input*)), not here. Requires PIE. Params: inputMode? (default gameOnly), showMouseCursor? (#671)", "stage_game_input", (p) => ({ inputMode: p.inputMode, showMouseCursor: p.showMouseCursor })),
     run_automation_tests: bp("Run registered Automation tests matching a filter and return per-test pass/fail plus error lines. Runs them synchronously through the test framework rather than the console queue, and suspends the editor's unfocused-CPU throttle for the duration - otherwise an unfocused editor drops to a few FPS and the framework's interactive-frame-rate gate never opens, leaving tests queued forever (#765). Params: filter?, maxTests? (default 50) (#693)", "run_automation_tests", (p) => ({ filter: p.filter, maxTests: p.maxTests })),
     list_dirty_packages: bp("Enumerate currently-dirty content + map packages, read from the editor's own dirty-package lists (the same ones Save All uses). Includes a never-saved /Temp world, because an unsaved new map is exactly the unsaved work a caller needs to see before closing or reloading (#340)", "list_dirty_packages"),
-    request_editor_shutdown: bp("Ask the editor to close itself from inside the engine, after it has checked that closing is safe. Refuses by default when any content or map package is dirty (including an unsaved /Temp world) and reports which ones, so nothing is lost to a silent discard. Ends an active PIE/SIE session first and closes only once play has actually stopped. The response is returned before the process exits. Use editor(stop_editor) for the full stop-and-confirm flow; this action is the in-engine half of it. Params: requireClean? (default true), endPIE? (default true)", "request_editor_shutdown", (p) => ({ requireClean: p.requireClean, endPIE: p.endPIE })),
+    request_editor_shutdown: {
+      description: "Ask the editor to close itself from inside the engine, after it has checked that closing is safe. Refuses by default when any content or map package is dirty (including an unsaved /Temp world) and reports which ones, so nothing is lost to a silent discard. Ends an active PIE/SIE session first and closes only once play has actually stopped. The response is returned before the process exits. Aimed at the same editor stop_editor aims at, through the same ownership check, so the two can never disagree about which editor belongs to the loaded project (#967). Use editor(stop_editor) for the full stop-and-confirm flow; this action is the in-engine half of it. Params: requireClean? (default true), endPIE? (default true)",
+      handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
+        // #967/#970: stop_editor refused on an ownership check this action did
+        // not perform at all, so the two actions gave opposite answers about
+        // one editor. They now ask the same question. A refusal here means the
+        // same thing it means there, in the same words.
+        const ownership = await resolveOwnedEditor(ctx.project.projectDir ?? null, ctx.project.projectPath ?? null);
+        if (!ownership.owned) {
+          return { success: false, error: ownership.message };
+        }
+        const result = await ctx.bridge.call("request_editor_shutdown", {
+          requireClean: p.requireClean,
+          endPIE: p.endPIE,
+        });
+        return ownership.healed && result && typeof result === "object"
+          ? { ...(result as Record<string, unknown>), lockfileNote: ownership.healed }
+          : result;
+      },
+    },
   },
   undefined,
   {

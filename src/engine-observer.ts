@@ -73,10 +73,72 @@ export interface EditorProcess {
 
 const HEADLESS_FLAGS = ["-server", "-game", "-nullrhi", "-unattended", "-run=", "-buildmachine"];
 
-function extractProjectPath(commandLine: string): string | null {
-  const match = commandLine.match(/"?([A-Za-z]:[\\/][^"]*?\.uproject|\/[^"\s]*?\.uproject)"?/);
-  if (!match) return null;
-  return path.resolve(match[1]);
+/**
+ * Where a path argument can begin on a command line: the start of the string,
+ * or straight after a separator that cannot itself be part of a path (a space,
+ * a quote, or the `=` of `-Project=`). Matching the root marker rather than the
+ * whole token is what lets an unquoted path containing spaces still be found.
+ */
+const PATH_ROOT_RE = /(?:^|[\s"'=])((?:[A-Za-z]:[\\/])|\/)/g;
+
+/**
+ * The .uproject argument on a process command line, absolute and resolved.
+ *
+ * #967/#970/#965: this used to be one lazy regex over the whole command line,
+ * `[A-Za-z]:[\\/][^"]*?\.uproject`. `[^"]` matches spaces, so on the unquoted
+ * command line Windows reports for a spawned editor
+ *
+ *     C:\...\UnrealEditor.exe C:\work\Demo\Demo.uproject
+ *
+ * the match started at the drive letter of the EXECUTABLE and ran all the way
+ * to the end, and every process came back with a "project path" that was the
+ * exe and the project concatenated. Nothing ever equalled that, so
+ * editorOwnsProject was false for the very editor that had the project open:
+ * stop_editor refused to stop a healthy editor while printing that same
+ * concatenation back as its evidence, and get_engine_state reported no process
+ * for a project whose editor was answering on the bridge.
+ *
+ * So: find where the .uproject argument ENDS (a token boundary, not just any
+ * occurrence of the extension), then walk back to the last place a path could
+ * have begun. That handles the quoted form, the unquoted form, `-Project=` with
+ * and without quotes, and POSIX roots, without assuming a path has no spaces.
+ */
+export function extractProjectPath(commandLine: string): string | null {
+  const lower = commandLine.toLowerCase();
+  const EXT = ".uproject";
+
+  let end = -1;
+  for (let at = lower.indexOf(EXT); at >= 0; at = lower.indexOf(EXT, at + EXT.length)) {
+    const after = commandLine[at + EXT.length];
+    if (after === undefined || /[\s"']/.test(after)) {
+      end = at + EXT.length;
+      break;
+    }
+  }
+  if (end < 0) return null;
+
+  const head = commandLine.slice(0, end);
+  let start = -1;
+  PATH_ROOT_RE.lastIndex = 0;
+  for (let m = PATH_ROOT_RE.exec(head); m !== null; m = PATH_ROOT_RE.exec(head)) {
+    // m[0] may include the delimiter that proved this is a token boundary;
+    // the path itself starts where the captured root does.
+    start = m.index + m[0].length - m[1].length;
+  }
+  if (start < 0) return null;
+
+  const raw = commandLine.slice(start, end).replace(/^["']|["']$/g, "").trim();
+  if (raw.length === 0) return null;
+
+  // A candidate that still swallowed the executable is the exact failure this
+  // function exists to prevent, so never return one. It can only happen when
+  // the project argument itself is relative, and there the last whitespace
+  // delimited token is the honest answer.
+  if (/\.exe(\s|$)/i.test(raw)) {
+    const token = raw.split(/\s+/).pop();
+    return token && token.toLowerCase().endsWith(EXT) ? path.resolve(token) : null;
+  }
+  return path.resolve(raw);
 }
 
 function classify(pid: number, commandLine: string, responding: boolean, windowTitle: string | null): EditorProcess {
