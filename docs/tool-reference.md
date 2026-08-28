@@ -803,7 +803,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `set_imc_mapping_key` | Rebind an IMC mapping to a new key. Params: `imcPath, newKey, mappingIndex? \| key? \| inputActionPath? (#158)` |
 | `set_imc_mapping_action` | Retarget an IMC mapping to a different InputAction. Params: `imcPath, newInputActionPath, mappingIndex? \| key? \| inputActionPath? (#158)` |
 | `list_behavior_trees` | List behavior trees. Params: `directory?, recursive?` |
-| `get_behavior_tree_info` | Inspect behavior tree (top-level + blackboard). Params: `assetPath` |
+| `get_behavior_tree_info` | Inspect a BehaviorTree asset: root node, blackboard asset, every blackboard key (name, type, instanceSynced, description) plus the keys inherited from the blackboard's parent chain, and the node/decorator counts. Params: `assetPath (#887)` |
 | `read_behavior_tree_graph` | Walk BT tree: composites, tasks, decorators, services with blackboard keys. Params: `assetPath` |
 | `create_blackboard` | Create Blackboard. Params: `name, packagePath?` |
 | `add_blackboard_key` | Add a typed key to a Blackboard asset. baseClass types an Object/Class key - Behaviour Tree nodes filter on it, so an untyped key silently will not bind. For keyType=Enum pass the enum via enumType (or baseClass). Params: `blackboardPath, keyName, keyType (Bool\|Int\|Float\|String\|Name\|Vector\|Rotator\|Object\|Class\|Enum), baseClass? (e.g. /Script/Engine.Actor), enumType? (#250)` |

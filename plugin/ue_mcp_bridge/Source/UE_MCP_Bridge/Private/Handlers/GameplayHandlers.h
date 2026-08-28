@@ -4,10 +4,20 @@
 #include "Dom/JsonValue.h"
 #include "Dom/JsonObject.h"
 
+class UBlackboardData;
+
 class FGameplayHandlers
 {
 public:
 	static void RegisterHandlers(class FMCPHandlerRegistry& Registry);
+
+	// BehaviorTree introspection primitives, exercised directly by the
+	// automation tests in Private/Tests, which build a blackboard in memory
+	// rather than round-tripping an asset through disk. Definitions live in
+	// GameplayHandlers_BehaviorTree.cpp.
+
+	/** Every key on a Blackboard asset: name, type, sync flag, description. */
+	static TArray<TSharedPtr<FJsonValue>> DescribeBlackboardKeys(const UBlackboardData* Blackboard);
 
 private:
 	static TSharedPtr<FJsonValue> CreateSmartObjectDefinition(const TSharedPtr<FJsonObject>& Params);

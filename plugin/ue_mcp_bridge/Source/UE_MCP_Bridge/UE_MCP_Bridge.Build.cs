@@ -140,3 +140,5 @@ public class UE_MCP_Bridge : ModuleRules
 }
 
 // Rescan trigger: round 2 added handler translation units.
+// Round 3: Private/Handlers/GameplayHandlers_BehaviorTree.cpp and
+// Private/Tests/BehaviorTreeNodeTests.cpp.

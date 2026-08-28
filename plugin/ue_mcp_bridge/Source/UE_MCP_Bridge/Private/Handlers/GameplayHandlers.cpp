@@ -1815,72 +1815,8 @@ TSharedPtr<FJsonValue> FGameplayHandlers::SetBehaviorTreeBlackboard(const TShare
 	return MCPResult(Result);
 }
 
-TSharedPtr<FJsonValue> FGameplayHandlers::GetBehaviorTreeInfo(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
-
-	UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("BehaviorTree not found: %s"), *AssetPath));
-	}
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("path"), AssetPath);
-	Result->SetStringField(TEXT("name"), Asset->GetName());
-	Result->SetStringField(TEXT("className"), Asset->GetClass()->GetName());
-
-	// Try to read blackboard asset
-	FProperty* BBProp = Asset->GetClass()->FindPropertyByName(TEXT("BlackboardAsset"));
-	if (BBProp)
-	{
-		FObjectProperty* ObjProp = CastField<FObjectProperty>(BBProp);
-		if (ObjProp)
-		{
-			UObject* BB = ObjProp->GetObjectPropertyValue(BBProp->ContainerPtrToValuePtr<void>(Asset));
-			if (BB)
-			{
-				Result->SetStringField(TEXT("blackboardAsset"), BB->GetPathName());
-
-				// Try to read blackboard keys
-				TArray<TSharedPtr<FJsonValue>> KeysArray;
-				FProperty* KeysProp = BB->GetClass()->FindPropertyByName(TEXT("Keys"));
-				if (KeysProp)
-				{
-					FArrayProperty* ArrProp = CastField<FArrayProperty>(KeysProp);
-					if (ArrProp)
-					{
-						FScriptArrayHelper ArrayHelper(ArrProp, ArrProp->ContainerPtrToValuePtr<void>(BB));
-						for (int32 i = 0; i < ArrayHelper.Num(); i++)
-						{
-							TSharedPtr<FJsonObject> KeyObj = MakeShared<FJsonObject>();
-							UObject* KeyEntry = *reinterpret_cast<UObject**>(ArrayHelper.GetRawPtr(i));
-							if (KeyEntry)
-							{
-								FProperty* NameProp = KeyEntry->GetClass()->FindPropertyByName(TEXT("EntryName"));
-								if (NameProp)
-								{
-									FString EntryName;
-									NameProp->ExportTextItem_Direct(EntryName, NameProp->ContainerPtrToValuePtr<void>(KeyEntry), nullptr, KeyEntry, PPF_None);
-									KeyObj->SetStringField(TEXT("name"), EntryName);
-								}
-								else
-								{
-									KeyObj->SetStringField(TEXT("name"), KeyEntry->GetName());
-								}
-							}
-							KeysArray.Add(MakeShared<FJsonValueObject>(KeyObj));
-						}
-					}
-				}
-				Result->SetArrayField(TEXT("blackboardKeys"), KeysArray);
-			}
-		}
-	}
-
-	return MCPResult(Result);
-}
+// get_behavior_tree_info moved to GameplayHandlers_BehaviorTree.cpp, where
+// the blackboard walk can be read as the struct array it is.
 
 TSharedPtr<FJsonValue> FGameplayHandlers::AddPerceptionComponent(const TSharedPtr<FJsonObject>& Params)
 {
