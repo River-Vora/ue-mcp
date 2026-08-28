@@ -60,6 +60,7 @@ public class UE_MCP_Bridge : ModuleRules
 	// Private/Tests/LevelPostProcessOverrideTests.cpp (#950): same reason.
 	// Private/Handlers/LevelHandlers_Save.cpp and
 	// Private/Tests/LevelSaveReportTests.cpp (#964): same reason.
+	// Private/Tests/LevelComponentTreeInstanceCountTests.cpp (#986): same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;

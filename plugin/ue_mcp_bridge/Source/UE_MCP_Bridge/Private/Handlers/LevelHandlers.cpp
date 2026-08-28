@@ -14,6 +14,9 @@
 #include "Components/AudioComponent.h"
 #include "Sound/SoundBase.h"
 #include "Components/InstancedStaticMeshComponent.h"
+// #986: get_component_tree distinguishes HISM from plain ISM, because per
+// instance culling and LOD change what an edit to one costs.
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/SkeletalMesh.h"
 #include "Animation/SkeletalMeshActor.h"
@@ -822,6 +825,24 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentTree(const TSharedPtr<FJsonOb
 						Mats.Add(MakeShared<FJsonValueString>(Mat ? Mat->GetPathName() : TEXT("")));
 					}
 					C->SetArrayField(TEXT("materials"), Mats);
+
+					// #986: an ISM/HISM reported its class and its mesh and not
+					// how many instances it holds, which is the one number that
+					// decides whether to touch it at all. A component with three
+					// instances and one with three hundred thousand looked
+					// identical here, so the decision was made blind or cost a
+					// separate get_instance_transforms dump of every transform.
+					if (UInstancedStaticMeshComponent* ISMC = Cast<UInstancedStaticMeshComponent>(SMC))
+					{
+						C->SetNumberField(TEXT("instanceCount"), ISMC->GetInstanceCount());
+						TSharedPtr<FJsonObject> Instanced = MakeShared<FJsonObject>();
+						// HISM culls and LODs per instance and ISM does not, so
+						// the distinction changes what an edit costs.
+						Instanced->SetBoolField(TEXT("hierarchical"),
+							ISMC->IsA<UHierarchicalInstancedStaticMeshComponent>());
+						Instanced->SetNumberField(TEXT("numCustomDataFloats"), ISMC->NumCustomDataFloats);
+						C->SetObjectField(TEXT("instanced"), Instanced);
+					}
 				}
 				else if (USkeletalMeshComponent* SKMC = Cast<USkeletalMeshComponent>(PC))
 				{
