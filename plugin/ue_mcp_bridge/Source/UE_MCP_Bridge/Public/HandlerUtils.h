@@ -7,6 +7,7 @@
 #include "UObject/UObjectIterator.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
+#include "HAL/FileManager.h"
 #include "Misc/PackageName.h"
 #include "Engine/World.h"
 #include "Engine/Blueprint.h"
@@ -442,6 +443,16 @@ inline bool MCPIsProtectedAssetPath(const FString& Path)
 	// is rejected wherever it appears, not just as a prefix.
 	if (Lower == TEXT("/script") || Lower.Contains(TEXT("/script/"))) return true;
 	return false;
+}
+
+/** The refusal a protected mount produces. Beside the rule it enforces, so a
+ *  handler cannot pair MCPIsProtectedAssetPath with a message of its own that
+ *  says something slightly different. */
+inline TSharedPtr<FJsonValue> MCPProtectedPathError(const FString& Path)
+{
+	return MCPError(FString::Printf(
+		TEXT("Refusing to mutate protected mount: %s. Engine, /Script/, /Memory/, /Temp/ are read-only via the bridge."),
+		*Path));
 }
 
 /** Emit the standard delete_asset rollback record on a create result. */
@@ -1520,15 +1531,83 @@ inline bool ResolvePackageFileName(UPackage* Package, FString& OutFileName)
 		Package->GetName(), OutFileName, PackageFileExtension(Package));
 }
 
+/** Why an asset's package cannot be written, answered BEFORE the save is
+ *  attempted. Returns true when the write is blocked, with OutReason carrying
+ *  the sentence to hand the caller.
+ *
+ *  #932: blueprint(reparent) saved as part of the operation, and a read-only
+ *  .uasset (a file never checked out of source control) turned the failed save
+ *  into a FATAL engine error that took the whole editor process down. The asset
+ *  was undamaged and the call replayed cleanly after a checkout, but no handler
+ *  may answer a routine, foreseeable condition with a crash.
+ *
+ *  Asking the file system first is what turns that into an ordinary failure,
+ *  and it is the same order asset(set_property) already uses (#931). It lives
+ *  here, as one function, because "can this package be written" has to have a
+ *  single answer: the protected-mount guardrail had four copies once and two of
+ *  them enforced a weaker rule than the others. */
+inline bool MCPPackageWriteBlocked(UObject* Asset, FString& OutReason)
+{
+	OutReason.Reset();
+
+	UPackage* Package = Asset ? Asset->GetOutermost() : nullptr;
+	if (!Package)
+	{
+		OutReason = TEXT("The asset has no package, so there is nothing to write.");
+		return true;
+	}
+
+	const FString PackageName = Package->GetName();
+	if (MCPIsProtectedAssetPath(PackageName))
+	{
+		OutReason = FString::Printf(
+			TEXT("'%s' is on a protected mount, which the bridge never writes to."),
+			*PackageName);
+		return true;
+	}
+
+	FString PackageFileName;
+	if (!ResolvePackageFileName(Package, PackageFileName))
+	{
+		OutReason = FString::Printf(
+			TEXT("'%s' has no mounted content root, so there is no file to write it to."),
+			*PackageName);
+		return true;
+	}
+
+	// Only a file that already exists can be read-only. A package saved for the
+	// first time has nothing on disk to check, and asking about a missing file
+	// answers "not read-only", which is the right answer for a create.
+	if (IFileManager::Get().FileExists(*PackageFileName)
+		&& IFileManager::Get().IsReadOnly(*PackageFileName))
+	{
+		OutReason = FString::Printf(
+			TEXT("'%s' is read-only on disk. Check it out of source control or clear the read-only flag, then retry."),
+			*PackageFileName);
+		return true;
+	}
+
+	return false;
+}
+
 /** Mark the asset's package dirty and save it to disk. Used by every create/
  *  mutate handler that wants changes persisted across editor restarts.
- *  No-op if Asset or its package is null. Returns true on successful save. */
+ *  No-op if Asset or its package is null. Returns true on successful save.
+ *
+ *  Refuses before the engine is asked to write a file it cannot open (#932),
+ *  so the worst outcome of a read-only or protected package is a false return
+ *  rather than a fatal error. Callers that want the sentence explaining the
+ *  false use SaveAssetPackageChecked. */
 inline bool SaveAssetPackage(UObject* Asset)
 {
 	if (!Asset) return false;
 	UPackage* Package = Asset->GetOutermost();
 	if (!Package) return false;
 	Package->MarkPackageDirty();
+
+	FString BlockedReason;
+	if (MCPPackageWriteBlocked(Asset, BlockedReason)) return false;
+
 	// The extension has to follow the package, not the call site. Any handler
 	// that mutates an actor or component in the open level reaches this with a
 	// world package as the outermost (#949).
@@ -1537,6 +1616,77 @@ inline bool SaveAssetPackage(UObject* Asset)
 	FSavePackageArgs SaveArgs;
 	SaveArgs.TopLevelFlags = RF_Standalone;
 	return UPackage::SavePackage(Package, nullptr, *PackageFileName, SaveArgs);
+}
+
+/** SaveAssetPackage, with the reason when it did not write. A handler that
+ *  reports its own persistence uses this so a refusal reads as a named cause
+ *  rather than a bare false. */
+inline bool SaveAssetPackageChecked(UObject* Asset, FString& OutReason)
+{
+	if (MCPPackageWriteBlocked(Asset, OutReason)) return false;
+	if (SaveAssetPackage(Asset)) return true;
+
+	UPackage* Package = Asset ? Asset->GetOutermost() : nullptr;
+	OutReason = FString::Printf(
+		TEXT("The editor refused to write '%s'. The output log carries the reason."),
+		Package ? *Package->GetName() : TEXT("(no package)"));
+	return false;
+}
+
+/** The refusal an action that saves as a side effect returns when the package
+ *  cannot be written. Returns nullptr when the write may go ahead, so a handler
+ *  reads as `if (auto Blocked = MCPAssetWriteBlockedError(...)) return Blocked;`
+ *  placed BEFORE the first mutation.
+ *
+ *  Operation names what the caller asked for, in the imperative, so the message
+ *  reads "Cannot reparent this Blueprint: ...". */
+inline TSharedPtr<FJsonValue> MCPAssetWriteBlockedError(
+	UObject* Asset,
+	const FString& AssetPath,
+	const TCHAR* Operation)
+{
+	FString Reason;
+	if (!MCPPackageWriteBlocked(Asset, Reason)) return nullptr;
+
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField(TEXT("success"), false);
+	Obj->SetStringField(TEXT("error"), FString::Printf(
+		TEXT("Cannot %s: %s Nothing was changed."), Operation, *Reason));
+	Obj->SetStringField(TEXT("assetPath"), AssetPath);
+	Obj->SetStringField(TEXT("path"), AssetPath);
+	Obj->SetStringField(TEXT("reason"), TEXT("package_not_writable"));
+	Obj->SetBoolField(TEXT("saved"), false);
+	if (UPackage* Package = Asset ? Asset->GetOutermost() : nullptr)
+	{
+		Obj->SetStringField(TEXT("packageName"), Package->GetName());
+		FString PackageFileName;
+		if (ResolvePackageFileName(Package, PackageFileName))
+		{
+			Obj->SetStringField(TEXT("packageFile"), PackageFileName);
+		}
+	}
+	return MakeShared<FJsonValueObject>(Obj);
+}
+
+/** Record on a result whether the side-effect save reached disk, and why not
+ *  when it did not. A save that did not happen is a failure, not a success with
+ *  a footnote: the caller's next read comes off the in-memory object and looks
+ *  correct right up until the editor restarts (#931). */
+inline void MCPNoteSaveOutcome(
+	const TSharedPtr<FJsonObject>& Result,
+	const FString& AssetPath,
+	bool bSaved,
+	const FString& Reason)
+{
+	if (!Result.IsValid()) return;
+	Result->SetBoolField(TEXT("saved"), bSaved);
+	if (bSaved) return;
+
+	Result->SetBoolField(TEXT("success"), false);
+	Result->SetStringField(TEXT("saveError"), Reason);
+	Result->SetStringField(TEXT("error"), FString::Printf(
+		TEXT("The change was applied in memory but '%s' was not written: %s"),
+		*AssetPath, *Reason));
 }
 
 // ── GC root RAII ─────────────────────────────────────────────────────────────

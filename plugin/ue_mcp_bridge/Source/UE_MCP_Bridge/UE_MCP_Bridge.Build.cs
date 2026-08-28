@@ -54,6 +54,12 @@ public class UE_MCP_Bridge : ModuleRules
 	// Private/Handlers/AssetHandlers_Subobject.cpp,
 	// Private/Handlers/AssetHandlers_Redirectors.cpp and
 	// Private/Tests/AssetSubobjectTests.cpp: same reason.
+	// Private/Tests/AssetDeleteGuardTests.cpp (#976): same reason.
+	// Private/Tests/PackageWriteGuardTests.cpp (#932): same reason.
+	// Private/Handlers/BlueprintHandlers_Collision.cpp and
+	// Private/Tests/CollisionQueryTests.cpp (#925): same reason.
+	// Private/Handlers/AssetHandlers_MeshBoolean.cpp and
+	// Private/Tests/MeshBooleanTests.cpp (#916): same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;

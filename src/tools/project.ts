@@ -717,6 +717,11 @@ export const projectTool: ToolDef = categoryTool(
       "live_coding_status",
       () => ({}),
     ),
+    resolve_collision_profile: bp(
+      "Read one collision profile's resolved per-channel responses: collisionEnabled, objectType, and every channel with Block/Overlap/Ignore. This is the project-side half of blueprint(get_component_collision) (#925): a component's ResponseArray only lists the channels it OVERRIDES, so the profile is where an inherited response actually comes from. Project trace and object channels appear under their configured names, with enumName (ECC_GameTraceChannel1) alongside so a caller can key on something stable. By default the eight engine channels plus every channel the project configured are returned; includeAllChannels=true adds the unused slots. channel narrows it to one. A profile that does not exist lists the ones that do. Params: profileName, channel?, includeAllChannels?",
+      "resolve_collision_profile",
+      (p) => ({ profileName: p.profileName, channel: p.channel, includeAllChannels: p.includeAllChannels }),
+    ),
 
     write_cpp_file: {
       description:
@@ -1013,5 +1018,8 @@ export const projectTool: ToolDef = categoryTool(
     declaration: z.string().optional().describe("For add_cpp_member: full UPROPERTY(...) / UFUNCTION(...) block plus the member or function signature."),
     memberName: z.string().optional().describe("For add_cpp_member: the identifier the declaration introduces (used for idempotency)."),
     access: z.enum(["public", "private"]).optional().describe("For add_module_dependency: 'public' (PublicDependencyModuleNames) or 'private' (default)."),
+    profileName: z.string().optional().describe("For resolve_collision_profile: the profile to resolve, e.g. 'Pawn', 'BlockAll', or one the project defined."),
+    channel: z.string().optional().describe("For resolve_collision_profile: narrow the answer to one channel. Accepts the configured name ('Camera', 'Weapon'), the C++ enumerator ('ECC_Camera'), or the container index."),
+    includeAllChannels: z.boolean().optional().describe("For resolve_collision_profile: include the unused GameTraceChannel slots as well as the engine channels and the project's own. Default false."),
   },
 );

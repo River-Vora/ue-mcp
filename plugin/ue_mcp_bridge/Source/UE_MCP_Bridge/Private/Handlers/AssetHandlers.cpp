@@ -76,17 +76,11 @@
 #include "AI/Navigation/NavCollisionBase.h"
 
 // ─── Protected mount guardrail ──────────────────────────────────────────
-// The rule itself is MCPIsProtectedAssetPath in HandlerUtils.h, shared by
-// every asset translation unit so the write paths cannot drift apart.
+// The rule itself is MCPIsProtectedAssetPath in HandlerUtils.h, and the
+// refusal it produces is MCPProtectedPathError beside it, shared by every
+// asset translation unit so the write paths cannot drift apart.
 namespace
 {
-	TSharedPtr<FJsonValue> MakeProtectedPathError(const FString& Path)
-	{
-		return MCPError(FString::Printf(
-			TEXT("Refusing to mutate protected mount: %s. Engine, /Script/, /Memory/, /Temp/ are read-only via the bridge."),
-			*Path));
-	}
-
 	// Split "/Game/Foo/Bar.Bar" (or "/Game/Foo/Bar") into mount "/Game/" + rel "Foo/Bar".
 	// Returns false if the path is malformed or has no mount segment.
 	bool SplitMountAndRel(const FString& AssetOrPackagePath, FString& OutMountRoot, FString& OutRelPath, FString& OutPackageName, FString& OutAssetName)
@@ -749,36 +743,14 @@ static bool MCPPersistAssetWrite(UObject* Asset, UBlueprint* OwningBlueprint, bo
 			*PackageName);
 		return false;
 	}
-	if (MCPIsProtectedAssetPath(PackageName))
-	{
-		OutReason = FString::Printf(
-			TEXT("'%s' is on a protected mount, which the bridge never writes to. The change is in memory only."),
-			*PackageName);
-		return false;
-	}
-
-	// A read-only package file is a real and common failure, and asking the
-	// engine to write a file it cannot open is the case #932 reported as a
-	// crash elsewhere. Answer it before the save rather than after.
-	FString PackageFileName;
-	if (FPackageName::DoesPackageExist(PackageName, &PackageFileName)
-		&& IFileManager::Get().IsReadOnly(*PackageFileName))
-	{
-		OutReason = FString::Printf(
-			TEXT("'%s' is read-only on disk. Check it out of source control or clear the read-only flag, then save."),
-			*PackageFileName);
-		return false;
-	}
-
+	// Protected mounts and read-only package files are both answered before the
+	// engine is asked to write, by the one shared guard (#932): asking it to
+	// open a file it cannot is what took the editor down with a fatal error.
 	// For a Blueprint the package's asset is the UBlueprint; the CDO is one of
-	// its exports and rides along.
-	if (SaveAssetPackage(OwningBlueprint ? static_cast<UObject*>(OwningBlueprint) : Asset))
-	{
-		return true;
-	}
-	OutReason = FString::Printf(
-		TEXT("The editor refused to write '%s'. The output log carries the reason."), *PackageName);
-	return false;
+	// its exports and rides along, so the guard and the save see the same
+	// object.
+	UObject* WriteTarget = OwningBlueprint ? static_cast<UObject*>(OwningBlueprint) : Asset;
+	return SaveAssetPackageChecked(WriteTarget, OutReason);
 }
 
 // A CDO write is a genuine package export and survives both the save and a
@@ -1603,8 +1575,8 @@ TSharedPtr<FJsonValue> FAssetHandlers::RenameAsset(const TSharedPtr<FJsonObject>
 		return MCPError(TEXT("Missing 'sourcePath'+'destinationPath' or 'assetPath'+'newName'"));
 	}
 
-	if (MCPIsProtectedAssetPath(SourcePath)) return MakeProtectedPathError(SourcePath);
-	if (MCPIsProtectedAssetPath(DestPath))   return MakeProtectedPathError(DestPath);
+	if (MCPIsProtectedAssetPath(SourcePath)) return MCPProtectedPathError(SourcePath);
+	if (MCPIsProtectedAssetPath(DestPath))   return MCPProtectedPathError(DestPath);
 
 	// Idempotency: if already at destination, no-op.
 	if (SourcePath == DestPath)
@@ -1710,6 +1682,89 @@ namespace
 		return true;
 	}
 
+	// #976: UEditorAssetLibrary::DeleteAsset is the FORCE-delete entry point.
+	// Its own header says so: "It doesn't check if the asset has references in
+	// other Levels or by Actors." Both delete handlers called it whatever the
+	// caller passed for `force`, so a referenced asset was destroyed and its
+	// referencers were rewritten to point at nothing, with `force=false`
+	// reading as a safety flag that did not exist.
+	//
+	// The Asset Registry holds the same reference graph the Content Browser's
+	// reference viewer draws, so asking it first is what turns a force delete
+	// back into a checked one. Self-references are dropped: a package always
+	// lists itself.
+	TArray<FString> CollectPackageReferencers(const FString& AssetPath)
+	{
+		TArray<FString> Out;
+
+		const FMCPAssetPathForms Forms = MCPAssetPathForms(AssetPath);
+		if (Forms.PackagePath.IsEmpty()) return Out;
+
+		FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+		const FName PackageFName(*Forms.PackagePath);
+		TArray<FName> Refs;
+		ARM.Get().GetReferencers(PackageFName, Refs);
+		for (const FName& R : Refs)
+		{
+			if (R != PackageFName)
+			{
+				Out.AddUnique(R.ToString());
+			}
+		}
+		Out.Sort([](const FString& A, const FString& B) { return A < B; });
+		return Out;
+	}
+
+	/** The refusal a checked delete hands back. Names the packages that would
+	 *  have been rewritten, so the caller can decide rather than discover. */
+	void ApplyReferencerRefusalToJson(
+		const TSharedPtr<FJsonObject>& Out,
+		const FString& AssetPath,
+		const TArray<FString>& Referencers)
+	{
+		// Long lists are the interesting case and truncating them would hide
+		// exactly the referencer a caller is looking for, so the count is
+		// reported alongside a bounded sample rather than a silent slice.
+		constexpr int32 MaxNamed = 25;
+		const int32 Named = FMath::Min(Referencers.Num(), MaxNamed);
+
+		TArray<FString> Sample;
+		Sample.Append(Referencers.GetData(), Named);
+
+		Out->SetStringField(TEXT("error"), FString::Printf(
+			TEXT("'%s' is referenced by %d package(s) and force=false, so it was not deleted. ")
+			TEXT("Deleting it would rewrite those referencers to point at nothing. ")
+			TEXT("Repoint or delete the referencers first, or pass force=true to delete anyway. Referencers: %s%s"),
+			*AssetPath,
+			Referencers.Num(),
+			*FString::Join(Sample, TEXT(", ")),
+			Referencers.Num() > Named ? TEXT(", ...") : TEXT("")));
+		Out->SetStringField(TEXT("path"), AssetPath);
+		Out->SetBoolField(TEXT("deleted"), false);
+		Out->SetStringField(TEXT("reason"), TEXT("has_referencers"));
+		Out->SetNumberField(TEXT("referencerCount"), Referencers.Num());
+
+		TArray<TSharedPtr<FJsonValue>> RefsJson;
+		for (const FString& R : Referencers)
+		{
+			RefsJson.Add(MakeShared<FJsonValueString>(R));
+		}
+		Out->SetArrayField(TEXT("referencers"), RefsJson);
+	}
+
+	/** Run the checked-delete gate for one path. Returns true and fills Out
+	 *  with the refusal when the asset has referencers; false when the delete
+	 *  may proceed. Both delete handlers go through this so the single and
+	 *  batch forms cannot drift into enforcing different rules. */
+	bool CheckedDeleteRefusal(const FString& AssetPath, const TSharedPtr<FJsonObject>& Out)
+	{
+		const TArray<FString> Referencers = CollectPackageReferencers(AssetPath);
+		if (Referencers.IsEmpty()) return false;
+		Out->SetStringField(TEXT("status"), TEXT("refused"));
+		ApplyReferencerRefusalToJson(Out, AssetPath, Referencers);
+		return true;
+	}
+
 	FDeleteDiagnostics DiagnoseDeleteFailure(const FString& AssetPath)
 	{
 		FDeleteDiagnostics Diag;
@@ -1812,7 +1867,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::DeleteAsset(const TSharedPtr<FJsonObject>
 	FString AssetPath;
 	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
 
-	if (MCPIsProtectedAssetPath(AssetPath)) return MakeProtectedPathError(AssetPath);
+	if (MCPIsProtectedAssetPath(AssetPath)) return MCPProtectedPathError(AssetPath);
 
 	const bool bForce = OptionalBool(Params, TEXT("force"), false);
 
@@ -1823,6 +1878,18 @@ TSharedPtr<FJsonValue> FAssetHandlers::DeleteAsset(const TSharedPtr<FJsonObject>
 		Result->SetStringField(TEXT("path"), AssetPath);
 		Result->SetBoolField(TEXT("alreadyDeleted"), true);
 		return MCPResult(Result);
+	}
+
+	// #976: the delete below is a force delete, so the reference check has to
+	// happen here rather than being left to an API that does not do one.
+	if (!bForce)
+	{
+		TSharedPtr<FJsonObject> Refused = MakeShared<FJsonObject>();
+		Refused->SetBoolField(TEXT("success"), false);
+		if (CheckedDeleteRefusal(AssetPath, Refused))
+		{
+			return MCPResult(Refused);
+		}
 	}
 
 	bool bClosedEditor = false;
@@ -1836,6 +1903,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::DeleteAsset(const TSharedPtr<FJsonObject>
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("path"), AssetPath);
 	Result->SetBoolField(TEXT("deleted"), bSuccess);
+	Result->SetBoolField(TEXT("forced"), bForce);
 	if (bClosedEditor)
 	{
 		Result->SetBoolField(TEXT("closedOpenEditor"), true);
@@ -1864,6 +1932,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::DeleteAssetBatch(const TSharedPtr<FJsonOb
 	int32 Deleted = 0;
 	int32 Absent = 0;
 	int32 Failed = 0;
+	int32 Refused = 0;
 	int32 ClosedEditors = 0;
 
 	int32 Protected = 0;
@@ -1888,6 +1957,15 @@ TSharedPtr<FJsonValue> FAssetHandlers::DeleteAssetBatch(const TSharedPtr<FJsonOb
 		{
 			Entry->SetStringField(TEXT("status"), TEXT("absent"));
 			Absent++;
+		}
+		else if (!bForce && CheckedDeleteRefusal(Path, Entry))
+		{
+			// #976: same rule as the single delete. Per-asset, because one
+			// referenced entry in a batch is not a reason to refuse the rest,
+			// and a bare "failed" count never said which entry was skipped or
+			// why. Status is its own value so a caller can tell a refusal
+			// apart from a delete the editor attempted and could not finish.
+			Refused++;
 		}
 		else
 		{
@@ -1918,6 +1996,8 @@ TSharedPtr<FJsonValue> FAssetHandlers::DeleteAssetBatch(const TSharedPtr<FJsonOb
 	Result->SetNumberField(TEXT("deleted"), Deleted);
 	Result->SetNumberField(TEXT("absent"), Absent);
 	Result->SetNumberField(TEXT("failed"), Failed);
+	Result->SetNumberField(TEXT("refused"), Refused);
+	Result->SetBoolField(TEXT("forced"), bForce);
 	if (Protected > 0) Result->SetNumberField(TEXT("protected"), Protected);
 	Result->SetNumberField(TEXT("total"), PerPath.Num());
 	if (ClosedEditors > 0) Result->SetNumberField(TEXT("closedEditors"), ClosedEditors);
@@ -2720,8 +2800,8 @@ TSharedPtr<FJsonValue> FAssetHandlers::MoveFolder(const TSharedPtr<FJsonObject>&
 	SourcePath.RemoveFromEnd(TEXT("/"));
 	DestinationPath.RemoveFromEnd(TEXT("/"));
 
-	if (MCPIsProtectedAssetPath(SourcePath))      return MakeProtectedPathError(SourcePath);
-	if (MCPIsProtectedAssetPath(DestinationPath)) return MakeProtectedPathError(DestinationPath);
+	if (MCPIsProtectedAssetPath(SourcePath))      return MCPProtectedPathError(SourcePath);
+	if (MCPIsProtectedAssetPath(DestinationPath)) return MCPProtectedPathError(DestinationPath);
 
 	// Scan source path to discover all assets
 	IAssetRegistry& AR = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
