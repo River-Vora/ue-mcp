@@ -23,6 +23,87 @@ namespace MCPJsonProperty
 {
 	inline bool SetJsonOnProperty(FProperty* Prop, void* ValueAddr, const TSharedPtr<FJsonValue>& InValue, FString& OutError);
 
+	// The reference-property kinds, as one closed answer per property.
+	//
+	// The reflection types nest: FClassProperty derives from FObjectProperty,
+	// and FSoftClassProperty from FSoftObjectProperty; FWeakObjectProperty and
+	// FLazyObjectProperty are siblings of both under FObjectPropertyBase.
+	// CastField<Base>() succeeds on a derived instance, so a chain that tests
+	// the base first swallows the derived kind and leaves the derived branch
+	// unreachable. That is exactly how a TSubclassOf<> field came to be
+	// resolved by the generic asset loader instead of the class loader: the
+	// class branch sat below the object branch and never ran (#935).
+	//
+	// Classifying once and switching on the answer is used here in preference
+	// to simply reordering the branches. Ordering is invisible at the point of
+	// use, is not checkable by a test, and one tidy-up edit that moves a block
+	// silently reinstates the bug. A wrong answer here is a single function to
+	// read and a single function to test, and no later edit to the call sites
+	// can bring the dead branch back.
+	enum class ERefKind : uint8
+	{
+		NotAReference,
+		SoftClass,
+		SoftObject,
+		Class,
+		Object,
+		WeakObject,
+		LazyObject,
+		Interface,
+	};
+
+	inline ERefKind ClassifyReference(const FProperty* Prop)
+	{
+		if (!Prop) return ERefKind::NotAReference;
+		// Most derived first: each test is reached only once every
+		// more-derived test above it has failed.
+		if (Prop->IsA<FSoftClassProperty>())  return ERefKind::SoftClass;
+		if (Prop->IsA<FSoftObjectProperty>()) return ERefKind::SoftObject;
+		if (Prop->IsA<FClassProperty>())      return ERefKind::Class;
+		if (Prop->IsA<FObjectProperty>())     return ERefKind::Object;
+		if (Prop->IsA<FWeakObjectProperty>()) return ERefKind::WeakObject;
+		if (Prop->IsA<FLazyObjectProperty>()) return ERefKind::LazyObject;
+		if (Prop->IsA<FInterfaceProperty>())  return ERefKind::Interface;
+		return ERefKind::NotAReference;
+	}
+
+	// Resolve a class path the way a caller means it, without inventing a
+	// suffix the path did not ask for.
+	//
+	// #489: a caller naming a Blueprint commonly passes the asset path
+	// (/Game/Foo/BP_GameMode.BP_GameMode) for a class-typed field, and the
+	// generated class is that path plus "_C".
+	// #928: the suffix used to be appended unconditionally on the soft-class
+	// path, so a native /Script/Module.ClassName reference was stored as
+	// /Script/Module.ClassName_C, which names no class at all, and the write
+	// still reported success. The suffix is now only ever used when the path
+	// as written does not name a class and the suffixed form does.
+	inline UClass* ResolveClassPath(const FString& Path)
+	{
+		if (Path.IsEmpty()) return nullptr;
+
+		if (UClass* Direct = LoadClass<UObject>(nullptr, *Path))
+		{
+			return Direct;
+		}
+		// A native class lives at its /Script/ path and never carries "_C".
+		if (!Path.StartsWith(TEXT("/Script/")) && !Path.EndsWith(TEXT("_C")))
+		{
+			const FString WithSuffix = Path + TEXT("_C");
+			if (UClass* Generated = LoadClass<UObject>(nullptr, *WithSuffix))
+			{
+				return Generated;
+			}
+		}
+		// Last ditch: load the asset as a UBlueprint and take its generated
+		// class. Covers paths written without the .Name object suffix.
+		if (UBlueprint* BP = Cast<UBlueprint>(StaticLoadObject(UBlueprint::StaticClass(), nullptr, *Path)))
+		{
+			return BP->GeneratedClass;
+		}
+		return nullptr;
+	}
+
 	// One (key, value) write for a TMap, in whichever JSON shape the caller
 	// used. `KeyJson` is null for the object shape, where the field name is the
 	// key text.
@@ -117,31 +198,32 @@ namespace MCPJsonProperty
 		// to ImportText and surfaced "asset not found: None".
 		if (Value->Type == EJson::Null)
 		{
-			if (FObjectProperty* OP = CastField<FObjectProperty>(Prop))
+			// One dispatch on the classified kind: FClassProperty used to sit
+			// below FObjectProperty here and never be reached (#935). Clearing
+			// happens to mean the same thing for both, so this branch was not
+			// the one that corrupted data, but leaving the same inverted chain
+			// in place invites the next reader to copy it.
+			switch (ClassifyReference(Prop))
 			{
-				OP->SetObjectPropertyValue(ValueAddr, nullptr);
+			case ERefKind::SoftClass:
+			case ERefKind::SoftObject:
+				CastFieldChecked<FSoftObjectProperty>(Prop)->SetPropertyValue(ValueAddr, FSoftObjectPtr());
 				return true;
-			}
-			if (FSoftObjectProperty* SOP = CastField<FSoftObjectProperty>(Prop))
-			{
-				SOP->SetPropertyValue(ValueAddr, FSoftObjectPtr());
+			case ERefKind::Class:
+			case ERefKind::Object:
+				CastFieldChecked<FObjectProperty>(Prop)->SetObjectPropertyValue(ValueAddr, nullptr);
 				return true;
-			}
-			if (FWeakObjectProperty* WOP = CastField<FWeakObjectProperty>(Prop))
-			{
-				WOP->SetObjectPropertyValue(ValueAddr, nullptr);
+			case ERefKind::WeakObject:
+				CastFieldChecked<FWeakObjectProperty>(Prop)->SetObjectPropertyValue(ValueAddr, nullptr);
 				return true;
-			}
-			if (FClassProperty* CP = CastField<FClassProperty>(Prop))
-			{
-				CP->SetObjectPropertyValue(ValueAddr, nullptr);
-				return true;
-			}
-			if (FInterfaceProperty* IP = CastField<FInterfaceProperty>(Prop))
+			case ERefKind::Interface:
 			{
 				FScriptInterface Empty;
-				IP->SetPropertyValue(ValueAddr, Empty);
+				CastFieldChecked<FInterfaceProperty>(Prop)->SetPropertyValue(ValueAddr, Empty);
 				return true;
+			}
+			default:
+				break;
 			}
 			OutError = FString::Printf(TEXT("property '%s' is not an object/class/interface reference; null value not allowed"), *Prop->GetName());
 			return false;
@@ -351,84 +433,81 @@ namespace MCPJsonProperty
 			}
 		}
 
-		// Hard UObject ref - accept asset path
-		if (FObjectProperty* ObjProp = CastField<FObjectProperty>(Prop))
+		// Object, class and soft references, all addressed by path. One
+		// dispatch on the classified kind (see ClassifyReference), so the
+		// class kinds are handled by the class-aware code rather than being
+		// swallowed by their base's branch (#935). A value that is not a
+		// string falls out of the switch to the ImportText fallback below,
+		// exactly as it did when these were separate `if` blocks.
+		switch (ClassifyReference(Prop))
+		{
+		case ERefKind::Class:
 		{
 			FString Path;
 			if (Value->TryGetString(Path) && !Path.IsEmpty())
 			{
+				UClass* Loaded = ResolveClassPath(Path);
+				if (!Loaded) { OutError = FString::Printf(TEXT("class not found: %s"), *Path); return false; }
+				CastFieldChecked<FClassProperty>(Prop)->SetObjectPropertyValue(ValueAddr, Loaded);
+				return true;
+			}
+			break;
+		}
+		case ERefKind::Object:
+		{
+			FString Path;
+			if (Value->TryGetString(Path) && !Path.IsEmpty())
+			{
+				FObjectProperty* ObjProp = CastFieldChecked<FObjectProperty>(Prop);
 				UObject* Loaded = StaticLoadObject(ObjProp->PropertyClass, nullptr, *Path);
 				if (!Loaded) { OutError = FString::Printf(TEXT("asset not found: %s"), *Path); return false; }
 				ObjProp->SetObjectPropertyValue(ValueAddr, Loaded);
 				return true;
 			}
+			break;
 		}
-
-		// Hard UClass ref - accept class path
-		if (FClassProperty* ClassProp = CastField<FClassProperty>(Prop))
-		{
-			FString Path;
-			if (Value->TryGetString(Path) && !Path.IsEmpty())
-			{
-				UClass* Loaded = LoadClass<UObject>(nullptr, *Path);
-				if (!Loaded)
-				{
-					// #489: callers commonly pass a Blueprint asset path
-					// (/Game/Foo/BP_GameMode.BP_GameMode) for a TSubclassOf
-					// field. Retry with the generated-class suffix.
-					if (!Path.EndsWith(TEXT("_C")))
-					{
-						const FString WithSuffix = Path + TEXT("_C");
-						Loaded = LoadClass<UObject>(nullptr, *WithSuffix);
-					}
-				}
-				if (!Loaded)
-				{
-					// Last-ditch: load the asset as UBlueprint and grab its
-					// GeneratedClass. Covers paths that omit the .Name suffix.
-					if (UBlueprint* BP = Cast<UBlueprint>(StaticLoadObject(UBlueprint::StaticClass(), nullptr, *Path)))
-					{
-						Loaded = BP->GeneratedClass;
-					}
-				}
-				if (!Loaded) { OutError = FString::Printf(TEXT("class not found: %s"), *Path); return false; }
-				ClassProp->SetObjectPropertyValue(ValueAddr, Loaded);
-				return true;
-			}
-		}
-
-		// Soft class ref - accept class path string, same Blueprint suffix tolerance.
-		if (FSoftClassProperty* SoftClassProp = CastField<FSoftClassProperty>(Prop))
+		case ERefKind::SoftClass:
 		{
 			FString Path;
 			if (Value->TryGetString(Path))
 			{
+				FSoftClassProperty* SoftClassProp = CastFieldChecked<FSoftClassProperty>(Prop);
 				if (Path.IsEmpty())
 				{
 					SoftClassProp->SetPropertyValue(ValueAddr, FSoftObjectPtr());
 					return true;
 				}
-				if (!Path.EndsWith(TEXT("_C")))
+				// #928: store the path that actually names a class. Only a
+				// Blueprint-generated class carries the "_C" suffix, and it is
+				// added only when the path as written names nothing and the
+				// suffixed form does. A path that resolves to neither is
+				// stored verbatim: a soft reference to an asset that does not
+				// exist yet is legitimate, and silently rewriting it was how a
+				// native /Script/ reference got corrupted.
+				if (UClass* Resolved = ResolveClassPath(Path))
 				{
-					Path += TEXT("_C");
+					SoftClassProp->SetPropertyValue(ValueAddr, FSoftObjectPtr(FSoftObjectPath(Resolved)));
+					return true;
 				}
-				FSoftObjectPath PathObj(Path);
-				SoftClassProp->SetPropertyValue(ValueAddr, FSoftObjectPtr(PathObj));
+				SoftClassProp->SetPropertyValue(ValueAddr, FSoftObjectPtr(FSoftObjectPath(Path)));
 				return true;
 			}
+			break;
 		}
-
-		// Soft object ref - accept path string
-		if (FSoftObjectProperty* SoftObjProp = CastField<FSoftObjectProperty>(Prop))
+		case ERefKind::SoftObject:
 		{
 			FString Path;
 			if (Value->TryGetString(Path))
 			{
 				FSoftObjectPath PathObj(Path);
 				FSoftObjectPtr Ptr(PathObj);
-				SoftObjProp->SetPropertyValue(ValueAddr, Ptr);
+				CastFieldChecked<FSoftObjectProperty>(Prop)->SetPropertyValue(ValueAddr, Ptr);
 				return true;
 			}
+			break;
+		}
+		default:
+			break;
 		}
 
 		// Enum / Byte-with-enum: accept friendly aliases ("center", "Center"),
