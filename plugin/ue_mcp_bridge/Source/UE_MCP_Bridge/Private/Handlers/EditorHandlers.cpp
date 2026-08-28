@@ -248,6 +248,7 @@ void FEditorHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// order in BridgeServer.cpp, which is not a contract.
 	Registry.RegisterHandler(TEXT("save_dirty"), &SaveDirty);
 	Registry.RegisterHandler(TEXT("list_dirty_packages"), &ListDirtyPackages);
+	Registry.RegisterHandler(TEXT("get_world_state"), &GetWorldState);
 	Registry.RegisterHandler(TEXT("request_editor_shutdown"), &RequestEditorShutdown);
 	Registry.RegisterHandler(TEXT("list_pie_instances"), &ListPIEInstances);
 	Registry.RegisterHandler(TEXT("invoke_object_function"), &InvokeObjectFunction);
@@ -1910,6 +1911,71 @@ TSharedPtr<FJsonValue> FEditorHandlers::ListDirtyPackages(const TSharedPtr<FJson
 	Result->SetNumberField(TEXT("mapCount"), Maps.Num());
 	Result->SetArrayField(TEXT("content"), Content);
 	Result->SetArrayField(TEXT("maps"), Maps);
+	return MCPResult(Result);
+}
+
+// #920 / #921: one read that answers "which world is open, and what is unsaved"
+// together. level(get_current) and list_dirty_packages are two calls, so the
+// editor can change between them and neither answer proves which world the
+// other described. Both reports were filed independently by the same team,
+// which is a fair signal that two calls is genuinely not good enough for a QA
+// gate. This runs in one game-thread dispatch, so the pair is consistent.
+TSharedPtr<FJsonValue> FEditorHandlers::GetWorldState(const TSharedPtr<FJsonObject>& Params)
+{
+	if (!GEditor)
+	{
+		return MCPError(TEXT("Editor not available"));
+	}
+
+	UWorld* EditorWorld = GEditor->GetEditorWorldContext().World();
+	if (!EditorWorld)
+	{
+		// Fail closed. An empty answer here would read as "nothing is open and
+		// nothing is dirty", which is the reassuring shape of a wrong answer.
+		return MCPError(TEXT("No editor world is currently resolvable, so world state cannot be reported"));
+	}
+
+	auto Result = MCPSuccess();
+
+	UPackage* WorldPackage = EditorWorld->GetOutermost();
+	Result->SetStringField(TEXT("editorWorldName"), EditorWorld->GetName());
+	Result->SetStringField(TEXT("editorWorldPackage"), WorldPackage ? WorldPackage->GetName() : FString());
+	Result->SetBoolField(TEXT("worldPackageDirty"), WorldPackage != nullptr && WorldPackage->IsDirty());
+
+	if (ULevel* Persistent = EditorWorld->PersistentLevel)
+	{
+		if (UPackage* LevelPackage = Persistent->GetOutermost())
+		{
+			Result->SetStringField(TEXT("persistentLevelPackage"), LevelPackage->GetName());
+		}
+	}
+
+	// PIE and SIE are distinct states and a caller acting on the wrong one gets
+	// a confidently wrong result, so report both rather than one "inPIE" flag.
+	const bool bSimulating = GEditor->bIsSimulatingInEditor;
+	const bool bPlayWorld = GEditor->PlayWorld != nullptr;
+	Result->SetBoolField(TEXT("playInEditor"), bPlayWorld && !bSimulating);
+	Result->SetBoolField(TEXT("simulateInEditor"), bSimulating);
+	Result->SetStringField(TEXT("mode"), bSimulating ? TEXT("simulate") : (bPlayWorld ? TEXT("play") : TEXT("editor")));
+
+	const FDirtyEditorPackages Dirty = CollectDirtyEditorPackages();
+	TArray<FString> All;
+	All.Reserve(Dirty.Content.Num() + Dirty.Maps.Num());
+	All.Append(Dirty.Content);
+	All.Append(Dirty.Maps);
+	All.Sort();
+
+	TArray<TSharedPtr<FJsonValue>> DirtyJson;
+	DirtyJson.Reserve(All.Num());
+	for (const FString& PackageName : All)
+	{
+		DirtyJson.Add(MakeShared<FJsonValueString>(PackageName));
+	}
+	Result->SetArrayField(TEXT("dirtyPackages"), DirtyJson);
+	Result->SetNumberField(TEXT("dirtyPackageCount"), All.Num());
+	Result->SetNumberField(TEXT("dirtyContentCount"), Dirty.Content.Num());
+	Result->SetNumberField(TEXT("dirtyMapCount"), Dirty.Maps.Num());
+
 	return MCPResult(Result);
 }
 
