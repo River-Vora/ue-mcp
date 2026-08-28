@@ -596,6 +596,10 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorDetails(const TSharedPtr<FJsonObj
 		if (!World) return MCPError(TEXT("No editor world available"));
 	}
 
+	// LabelOrName, not label alone: a caller often has an internal name rather
+	// than a label, because a PIE-spawned actor has no label worth guessing.
+	// The label tier is still exhausted first and the name tier refuses on
+	// ambiguity, so accepting the name cannot reintroduce a silent pick (#983).
 	FMCPActorSelector ActorSel;
 	ActorSel.Match = EMCPActorMatch::LabelOrName;
 	ActorSel.WorldLabel = World->IsGameWorld() ? TEXT("PIE") : TEXT("editor");
@@ -724,6 +728,10 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentTree(const TSharedPtr<FJsonOb
 		return MCPError(FString::Printf(TEXT("World '%s' not available"), *WorldScope));
 	}
 
+	// LabelOrName, not label alone: a caller often has an internal name rather
+	// than a label, because a PIE-spawned actor has no label worth guessing.
+	// The label tier is still exhausted first and the name tier refuses on
+	// ambiguity, so accepting the name cannot reintroduce a silent pick (#983).
 	FMCPActorSelector ActorSel;
 	ActorSel.Match = EMCPActorMatch::LabelOrName;
 	ActorSel.WorldLabel = World->IsGameWorld() ? TEXT("PIE") : TEXT("editor");
@@ -1107,6 +1115,10 @@ TSharedPtr<FJsonValue> FLevelHandlers::MoveActor(const TSharedPtr<FJsonObject>& 
 	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
+	// LabelOrName, not label alone: a caller often has an internal name rather
+	// than a label, because a PIE-spawned actor has no label worth guessing.
+	// The label tier is still exhausted first and the name tier refuses on
+	// ambiguity, so accepting the name cannot reintroduce a silent pick (#983).
 	FMCPActorSelector ActorSel;
 	ActorSel.Match = EMCPActorMatch::LabelOrName;
 	ActorSel.WorldLabel = World->IsGameWorld() ? TEXT("PIE") : TEXT("editor");
@@ -2871,6 +2883,11 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorProperty(const TSharedPtr<FJsonOb
 		FString S = Value->AsString();
 		if (FObjectProperty* OP = CastField<FObjectProperty>(Prop))
 		{
+			// LabelNameOrPath, where this used to be label alone: the value
+			// slot has to take an actorPath back, which is the whole point of
+			// returning one. An actor object path contains ":PersistentLevel."
+			// and so cannot collide with an asset path, and a value matching
+			// nothing still falls through to the generic setter as before.
 			TArray<AActor*> RefMatches;
 			MCPCollectActorsByToken(World, S, EMCPActorMatch::LabelNameOrPath, RefMatches);
 			// #983: wiring a reference to whichever namesake came first is the
