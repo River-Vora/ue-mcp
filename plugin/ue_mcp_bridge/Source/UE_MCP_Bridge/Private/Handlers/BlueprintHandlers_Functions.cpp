@@ -866,9 +866,19 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::OverrideFunction(const TSharedPtr<FJs
 	// and one inherited from a parent Anim Blueprint, and it stays correct if
 	// Epic adds another graph-backed override kind.
 	//
-	// Only an animation graph is mirrored, and only into a Blueprint that
-	// supports anim layers, so an ordinary function override cannot change
-	// shape because of this.
+	// The predicate is deliberately the narrowest one that can be CHECKED
+	// rather than inferred. Both halves have to hold: the Blueprint answers
+	// SupportsAnimLayers (which only UAnimBlueprint does), and the graph that
+	// declared the function is a UAnimationGraph. Reading the declaration is
+	// stronger than testing the signature for a pose parameter, because it asks
+	// what the layer IS instead of what it looks like, and it cannot turn an
+	// ordinary function override on an Anim Blueprint into an animation graph.
+	//
+	// The cost of that narrowness is one case it does not cover: a layer
+	// declared on a native class has no declaring Blueprint graph to read, so
+	// it falls through to the K2 default. That is the false negative, and it is
+	// the right direction to be wrong in. Anim layers are authored on Animation
+	// Layer Interfaces and on parent Anim Blueprints, both of which are covered.
 	TSubclassOf<UEdGraph> GraphClass = UEdGraph::StaticClass();
 	TSubclassOf<UEdGraphSchema> SchemaClass = UEdGraphSchema_K2::StaticClass();
 	FString MirroredFromGraph;
@@ -909,6 +919,17 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::OverrideFunction(const TSharedPtr<FJs
 	}
 
 	FBlueprintEditorUtils::AddFunctionGraph<UClass>(Blueprint, NewGraph, /*bIsUserCreated=*/false, OverrideFuncClass);
+
+	// #894: creating the graph with the right class and schema is only half of
+	// it. CreateFunctionGraph gives an AnimationGraph its result node, but the
+	// layer's input pose nodes come from the interface function's own pose
+	// parameters, and only ConformAnimGraphToInterface seeds those. Without
+	// this the override is correctly typed and still unusable: an empty layer
+	// with nothing to plug a pose into.
+	if (!MirroredFromGraph.IsEmpty())
+	{
+		UAnimationGraphSchema::ConformAnimGraphToInterface(Blueprint, *NewGraph, OverrideFunc);
+	}
 
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 	FKismetEditorUtilities::CompileBlueprint(Blueprint);
