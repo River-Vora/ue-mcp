@@ -15,11 +15,19 @@
 
 namespace
 {
-	// The key type class is resolved by path rather than included by header, so
-	// a build without it skips that assertion instead of failing to link.
+	// The BT node classes under test are resolved by path rather than included
+	// by header, so a build without one of them skips the case instead of
+	// failing to link.
 	UClass* MCPBTTestFindClass(const TCHAR* ClassPath)
 	{
 		return FindObject<UClass>(nullptr, ClassPath);
+	}
+
+	UBTNode* MCPBTTestMakeNode(const TCHAR* ClassPath)
+	{
+		UClass* Class = MCPBTTestFindClass(ClassPath);
+		if (!Class) return nullptr;
+		return NewObject<UBTNode>(GetTransientPackage(), Class);
 	}
 
 	FString MCPBTTestGetString(const TSharedPtr<FJsonObject>& Object, const TCHAR* Field)
@@ -86,8 +94,7 @@ bool FMCPBehaviorTreeBlackboardKeysTest::RunTest(const FString& Parameters)
 
 // #888: BTDecorator_Blackboard keeps its whole configuration in protected C++
 // fields, so the graph read used to report class and name only. Every field a
-// "the tree runs but the wrong branch fires" investigation needs is surfaced
-// now, straight off the node.
+// "the tree runs but the wrong branch fires" investigation needs comes back now.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FMCPBehaviorTreeDecoratorConfigTest,
 	"UE.MCP.Gameplay.BehaviorTree.DecoratorConfig",
@@ -95,48 +102,188 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 
 bool FMCPBehaviorTreeDecoratorConfigTest::RunTest(const FString& Parameters)
 {
-	UClass* DecoratorClass = MCPBTTestFindClass(TEXT("/Script/AIModule.BTDecorator_Blackboard"));
-	if (!DecoratorClass)
+	UBTNode* Decorator = MCPBTTestMakeNode(TEXT("/Script/AIModule.BTDecorator_Blackboard"));
+	if (!Decorator)
 	{
 		AddInfo(TEXT("BTDecorator_Blackboard is not present in this build; skipping."));
 		return true;
 	}
-	UBTNode* Decorator = NewObject<UBTNode>(GetTransientPackage(), DecoratorClass);
+
+	// The nested write is the #919 path: a dotted address into a protected
+	// struct field on an owned node subobject.
+	FString Error;
+	TestTrue(TEXT("selected blackboard key is writable through a dotted path"),
+		FGameplayHandlers::WriteBTNodeProperty(Decorator, TEXT("BlackboardKey.SelectedKeyName"),
+			MakeShared<FJsonValueString>(TEXT("TargetActor")), Error));
+	TestEqual(TEXT("no error writing the selected key"), Error, FString());
+
+#if WITH_EDITORONLY_DATA
+	// The comparison operation is authored data, so the engine declares it
+	// editor-only. It is the field that says whether the branch tests for
+	// "is set" or "is not set".
+	TestTrue(TEXT("basic operation is writable by enumerator name"),
+		FGameplayHandlers::WriteBTNodeProperty(Decorator, TEXT("BasicOperation"),
+			MakeShared<FJsonValueString>(TEXT("NotSet")), Error));
+#endif
+	TestTrue(TEXT("flow abort mode is writable by enumerator name"),
+		FGameplayHandlers::WriteBTNodeProperty(Decorator, TEXT("FlowAbortMode"),
+			MakeShared<FJsonValueString>(TEXT("LowerPriority")), Error));
+	TestTrue(TEXT("notify observer is writable by enumerator name"),
+		FGameplayHandlers::WriteBTNodeProperty(Decorator, TEXT("NotifyObserver"),
+			MakeShared<FJsonValueString>(TEXT("ResultChange")), Error));
 
 	const TSharedPtr<FJsonObject> Described = FGameplayHandlers::DescribeBTNode(
-		Decorator, TEXT("Root.Children[0].Decorators[0]"), TEXT("Root.Children[0]"));
+		Decorator, TEXT("Root.Children[0].Decorators[0]"), TEXT("Root.Children[0]"),
+		/*bIncludeProperties*/ false, /*bIncludeInherited*/ false, TSet<FString>());
 
 	TestEqual(TEXT("kind"), MCPBTTestGetString(Described, TEXT("kind")), FString(TEXT("decorator")));
 	TestEqual(TEXT("path"), MCPBTTestGetString(Described, TEXT("path")), FString(TEXT("Root.Children[0].Decorators[0]")));
 	TestEqual(TEXT("parentPath"), MCPBTTestGetString(Described, TEXT("parentPath")), FString(TEXT("Root.Children[0]")));
 	TestEqual(TEXT("class"), MCPBTTestGetString(Described, TEXT("class")), FString(TEXT("BTDecorator_Blackboard")));
-
-	TestTrue(TEXT("flowAbortMode is reported"), Described->HasField(TEXT("flowAbortMode")));
-	TestTrue(TEXT("notifyObserver is reported"), Described->HasField(TEXT("notifyObserver")));
 	TestTrue(TEXT("inverseCondition is reported"), Described->HasField(TEXT("inverseCondition")));
+	TestEqual(TEXT("flowAbortMode"), MCPBTTestGetString(Described, TEXT("flowAbortMode")), FString(TEXT("LowerPriority")));
+	TestEqual(TEXT("notifyObserver"), MCPBTTestGetString(Described, TEXT("notifyObserver")), FString(TEXT("ResultChange")));
 #if WITH_EDITORONLY_DATA
-	// The comparison operation is authored data, so the engine declares it
-	// editor-only. It is the field that says whether the branch tests for
-	// "is set" or "is not set".
-	TestTrue(TEXT("basicOperation is reported"), Described->HasField(TEXT("basicOperation")));
+	TestEqual(TEXT("basicOperation"), MCPBTTestGetString(Described, TEXT("basicOperation")), FString(TEXT("NotSet")));
 #endif
 
 	const TSharedPtr<FJsonObject>* BlackboardKey = nullptr;
 	TestTrue(TEXT("blackboardKey is reported"), Described->TryGetObjectField(TEXT("blackboardKey"), BlackboardKey));
 	if (BlackboardKey && (*BlackboardKey).IsValid())
 	{
-		TestTrue(TEXT("blackboardKey carries the selected key name"),
-			(*BlackboardKey)->HasField(TEXT("selectedKeyName")));
+		TestEqual(TEXT("selectedKeyName"),
+			MCPBTTestGetString(*BlackboardKey, TEXT("selectedKeyName")), FString(TEXT("TargetActor")));
 	}
 
 	// A null node is answered, not dereferenced.
-	const TSharedPtr<FJsonObject> Empty = FGameplayHandlers::DescribeBTNode(nullptr, TEXT("Root"), FString());
+	const TSharedPtr<FJsonObject> Empty = FGameplayHandlers::DescribeBTNode(
+		nullptr, TEXT("Root"), FString(), false, false, TSet<FString>());
 	TestTrue(TEXT("a null node yields an empty object"), Empty.IsValid() && Empty->Values.Num() == 0);
 	return true;
 }
 
-// The action has to stay reachable under the name the TypeScript schema
-// advertises, and answer a call with no parameters with a structured error.
+// #940: on UE 5.8 BTTask_MoveTo::FilterClass is a FValueOrBBKey_Class, so the
+// class lives in DefaultValue and get_editor_property reads the field as empty.
+// #889 is the same struct shape one field over: AcceptableRadius is a
+// FValueOrBBKey_Float, so the number a caller sends has to reach DefaultValue
+// rather than bounce off the struct's export-text importer.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FMCPBehaviorTreeMoveToFilterClassTest,
+	"UE.MCP.Gameplay.BehaviorTree.MoveToFilterClass",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCPBehaviorTreeMoveToFilterClassTest::RunTest(const FString& Parameters)
+{
+	UBTNode* MoveTo = MCPBTTestMakeNode(TEXT("/Script/AIModule.BTTask_MoveTo"));
+	if (!MoveTo)
+	{
+		AddInfo(TEXT("BTTask_MoveTo is not present in this build; skipping."));
+		return true;
+	}
+
+	FString Error;
+
+	// A JSON number aimed at the struct lands on its DefaultValue.
+	TestTrue(TEXT("AcceptableRadius accepts a bare JSON number"),
+		FGameplayHandlers::WriteBTNodeProperty(MoveTo, TEXT("AcceptableRadius"),
+			MakeShared<FJsonValueNumber>(60.0), Error));
+	TestEqual(TEXT("no error writing AcceptableRadius"), Error, FString());
+
+	TSharedPtr<FJsonValue> Radius = FGameplayHandlers::ReadBTNodeProperty(MoveTo, TEXT("AcceptableRadius"), Error);
+	TestTrue(TEXT("AcceptableRadius reads back as an object"), Radius.IsValid() && Radius->Type == EJson::Object);
+	if (Radius.IsValid() && Radius->Type == EJson::Object)
+	{
+		double Stored = 0.0;
+		Radius->AsObject()->TryGetNumberField(TEXT("defaultValue"), Stored);
+		TestEqual(TEXT("AcceptableRadius DefaultValue"), Stored, 60.0);
+	}
+
+	// #919: the filtered property read names what it wants and gets that, with
+	// the FValueOrBBKey_* struct already unpacked.
+	TSet<FString> Filter;
+	Filter.Add(TEXT("acceptableradius"));
+	const TSharedPtr<FJsonObject> Filtered = FGameplayHandlers::DescribeBTNode(
+		MoveTo, TEXT("Root.Children[0]"), TEXT("Root"),
+		/*bIncludeProperties*/ true, /*bIncludeInherited*/ false, Filter);
+	const TSharedPtr<FJsonObject>* Properties = nullptr;
+	TestTrue(TEXT("a filtered read reports properties"), Filtered->TryGetObjectField(TEXT("properties"), Properties));
+	if (Properties && (*Properties).IsValid())
+	{
+		TestEqual(TEXT("only the named property is reported"), (*Properties)->Values.Num(), 1);
+		TestTrue(TEXT("the named property is the one asked for"), (*Properties)->HasField(TEXT("AcceptableRadius")));
+	}
+
+	// FilterClass is the same shape holding a class.
+	UClass* FilterClass = MCPBTTestFindClass(TEXT("/Script/NavigationSystem.RecastFilter_UseDefaultArea"));
+	if (!FilterClass)
+	{
+		AddInfo(TEXT("RecastFilter_UseDefaultArea is not present in this build; skipping the class half."));
+		return true;
+	}
+	const FString FilterClassPath = FilterClass->GetPathName();
+
+	TestTrue(TEXT("FilterClass accepts a class path"),
+		FGameplayHandlers::WriteBTNodeProperty(MoveTo, TEXT("FilterClass"),
+			MakeShared<FJsonValueString>(FilterClassPath), Error));
+	TestEqual(TEXT("no error writing FilterClass"), Error, FString());
+
+	TSharedPtr<FJsonValue> Filter = FGameplayHandlers::ReadBTNodeProperty(MoveTo, TEXT("FilterClass"), Error);
+	TestTrue(TEXT("FilterClass reads back as an object"), Filter.IsValid() && Filter->Type == EJson::Object);
+	if (Filter.IsValid() && Filter->Type == EJson::Object)
+	{
+		TestEqual(TEXT("FilterClass DefaultValue is the class that was written"),
+			MCPBTTestGetString(Filter->AsObject(), TEXT("defaultValue")), FilterClassPath);
+		bool bBound = true;
+		Filter->AsObject()->TryGetBoolField(TEXT("isBound"), bBound);
+		TestFalse(TEXT("a literal class is not a blackboard binding"), bBound);
+	}
+
+	// An object value writes the struct's own fields, which is how the field
+	// is bound to a blackboard key instead of pinned to a literal.
+	TSharedPtr<FJsonObject> Binding = MakeShared<FJsonObject>();
+	Binding->SetStringField(TEXT("Key"), TEXT("NavFilter"));
+	TestTrue(TEXT("FilterClass accepts a blackboard key binding"),
+		FGameplayHandlers::WriteBTNodeProperty(MoveTo, TEXT("FilterClass"),
+			MakeShared<FJsonValueObject>(Binding), Error));
+
+	Filter = FGameplayHandlers::ReadBTNodeProperty(MoveTo, TEXT("FilterClass"), Error);
+	if (Filter.IsValid() && Filter->Type == EJson::Object)
+	{
+		TestEqual(TEXT("bound key name"),
+			MCPBTTestGetString(Filter->AsObject(), TEXT("key")), FString(TEXT("NavFilter")));
+		bool bBound = false;
+		Filter->AsObject()->TryGetBoolField(TEXT("isBound"), bBound);
+		TestTrue(TEXT("a key name reads as bound"), bBound);
+	}
+
+	// Null clears the class without touching the binding.
+	TestTrue(TEXT("FilterClass accepts null to clear the class"),
+		FGameplayHandlers::WriteBTNodeProperty(MoveTo, TEXT("FilterClass"),
+			MakeShared<FJsonValueNull>(), Error));
+	Filter = FGameplayHandlers::ReadBTNodeProperty(MoveTo, TEXT("FilterClass"), Error);
+	if (Filter.IsValid() && Filter->Type == EJson::Object)
+	{
+		TestEqual(TEXT("cleared DefaultValue"),
+			MCPBTTestGetString(Filter->AsObject(), TEXT("defaultValueName")), FString());
+	}
+
+	// A property the node does not declare is a structured error, never a
+	// silent no-op and never a dereference.
+	TestFalse(TEXT("an unknown property is rejected"),
+		FGameplayHandlers::WriteBTNodeProperty(MoveTo, TEXT("NotAProperty"),
+			MakeShared<FJsonValueNumber>(1.0), Error));
+	TestTrue(TEXT("the rejection names the property"), Error.Contains(TEXT("NotAProperty")));
+
+	// A null node is answered, not dereferenced.
+	TestFalse(TEXT("a null node is rejected"),
+		FGameplayHandlers::WriteBTNodeProperty(nullptr, TEXT("AcceptableRadius"),
+			MakeShared<FJsonValueNumber>(1.0), Error));
+	return true;
+}
+
+// The BT actions have to be reachable by the names the TypeScript schema
+// advertises, and each has to answer a call with no parameters with a
+// structured error rather than a crash.
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FMCPBehaviorTreeRegistrationTest,
 	"UE.MCP.Gameplay.BehaviorTree.RegistrationAndPreflight",
@@ -150,11 +297,27 @@ bool FMCPBehaviorTreeRegistrationTest::RunTest(const FString& Parameters)
 	const TCHAR* Methods[] = {
 		TEXT("get_behavior_tree_info"),
 		TEXT("read_behavior_tree_graph"),
+		TEXT("read_bt_node_properties"),
+		TEXT("list_bt_tasks"),
+		TEXT("set_bt_node_property"),
+		TEXT("set_bt_task_property"),
 	};
 	for (const TCHAR* Method : Methods)
 	{
 		TestTrue(FString::Printf(TEXT("%s is registered"), Method), Registry.HasHandler(Method));
+	}
 
+	// Every action that needs an asset path says so, and list_bt_tasks answers
+	// without one because a directory sweep is its whole point.
+	const TCHAR* NeedAssetPath[] = {
+		TEXT("get_behavior_tree_info"),
+		TEXT("read_behavior_tree_graph"),
+		TEXT("read_bt_node_properties"),
+		TEXT("set_bt_node_property"),
+		TEXT("set_bt_task_property"),
+	};
+	for (const TCHAR* Method : NeedAssetPath)
+	{
 		const TSharedPtr<FJsonValue> Response = Registry.ExecuteHandler(Method, MakeShared<FJsonObject>());
 		TestTrue(FString::Printf(TEXT("%s returns an object"), Method),
 			Response.IsValid() && Response->Type == EJson::Object);

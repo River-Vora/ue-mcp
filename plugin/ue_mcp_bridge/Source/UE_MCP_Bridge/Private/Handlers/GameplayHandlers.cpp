@@ -152,6 +152,15 @@ void FGameplayHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// New handlers
 	Registry.RegisterHandler(TEXT("get_behavior_tree_info"), &GetBehaviorTreeInfo);
 	Registry.RegisterHandler(TEXT("read_behavior_tree_graph"), &ReadBehaviorTreeGraph);
+	// #919: pick BT nodes and read only their own UPROPERTY values.
+	Registry.RegisterHandler(TEXT("read_bt_node_properties"), &ReadBTNodeProperties);
+	// #940: inventory BTTask nodes, FilterClass included.
+	Registry.RegisterHandler(TEXT("list_bt_tasks"), &ListBTTasks);
+	// #919/#940: one scoped write onto an owned BT node subobject. Registered
+	// under both names because a caller reaching for the task-specific one
+	// should not have to know it is the general node setter.
+	Registry.RegisterHandler(TEXT("set_bt_node_property"), &SetBTNodeProperty);
+	Registry.RegisterHandler(TEXT("set_bt_task_property"), &SetBTNodeProperty);
 	Registry.RegisterHandler(TEXT("add_perception_component"), &AddPerceptionComponent);
 	Registry.RegisterHandler(TEXT("configure_ai_perception_sense"), &ConfigureAiPerceptionSense);
 	Registry.RegisterHandler(TEXT("add_state_tree_component"), &AddStateTreeComponent);
@@ -1816,8 +1825,8 @@ TSharedPtr<FJsonValue> FGameplayHandlers::SetBehaviorTreeBlackboard(const TShare
 }
 
 // get_behavior_tree_info and read_behavior_tree_graph moved to
-// GameplayHandlers_BehaviorTree.cpp, where they share one node walker and
-// one property reflection layer.
+// GameplayHandlers_BehaviorTree.cpp, alongside the node-level BT reads and
+// writes they now share their walker and property reflection with.
 
 TSharedPtr<FJsonValue> FGameplayHandlers::AddPerceptionComponent(const TSharedPtr<FJsonObject>& Params)
 {
@@ -2193,6 +2202,7 @@ TSharedPtr<FJsonValue> FGameplayHandlers::AddSmartObjectComponent(const TSharedP
 
 	return MCPResult(Result);
 }
+
 // ─────────────────────────────────────────────────────────────
 // #163  get_navmesh_details - Detailed ARecastNavMesh configuration
 // ─────────────────────────────────────────────────────────────
