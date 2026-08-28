@@ -20,7 +20,7 @@ export const animationTool: ToolDef = categoryTool(
     create_blendspace:    bp("Create blendspace (2D). Params: skeletonPath, name?, packagePath?, axisHorizontal?, axisVertical?", "create_blendspace"),
     create_blendspace_1d: bp("Create BlendSpace1D. Params: skeletonPath, name?, packagePath?, axisName? (default Speed), axisMin?, axisMax?, gridNum? (#459)", "create_blendspace_1d", (p) => ({ name: p.name, skeletonPath: p.skeletonPath, packagePath: p.packagePath, axisName: p.axisName, axisMin: p.axisMin, axisMax: p.axisMax, gridNum: p.gridNum, onConflict: p.onConflict })),
     populate_blendspace:  bp("One-call axis params + samples authoring for BlendSpace 1D/2D. Params: assetPath, axis? ({name?, min?, max?, gridNum?}) for axis 0, blendspaceAxes? (per-axis array), axisHorizontal?/axisVertical? + horizontalMin/horizontalMax/verticalMin/verticalMax/gridNumHorizontal/gridNumVertical (back-compat), samples ([{animationPath, x, y?}]), clearExisting? (default true) (#459)", "populate_blendspace", (p) => ({ assetPath: p.assetPath, axis: p.axis, axes: p.blendspaceAxes, axisIndex: p.axisIndex, axisHorizontal: p.axisHorizontal, axisVertical: p.axisVertical, horizontalMin: p.horizontalMin, horizontalMax: p.horizontalMax, verticalMin: p.verticalMin, verticalMax: p.verticalMax, gridNumHorizontal: p.gridNumHorizontal, gridNumVertical: p.gridNumVertical, samples: p.samples, clearExisting: p.clearExisting })),
-    add_notify:           bp("Add notify. For PlayMontageNotify the notifyName is also written onto the spawned notify object so OnPlayMontageNotifyBegin broadcasts it (not 'None'), and montage branching-point markers refresh (#528). notifyProperties writes EditAnywhere fields onto the spawned notify object and therefore requires a notifyClass that resolves. Params: assetPath, notifyName, triggerTime, notifyClass?, notifyProperties?", "add_anim_notify"),
+    add_notify:           bp("Add notify. For PlayMontageNotify the notifyName is also written onto the spawned notify object so OnPlayMontageNotifyBegin broadcasts it (not 'None'), and montage branching-point markers refresh (#528/#880). On a montage the PlayMontageNotify classes are added as BRANCHING POINT notifies, which is the only tick type UAnimNotify_PlayMontageNotify::BranchingPointNotify runs at, so OnPlayMontageNotifyBegin broadcasts without a montage reload; pass branchingPoint to force it either way, and read branchingPointMarkerCount in the response to see what the montage cached. notifyProperties writes EditAnywhere fields onto the spawned notify object and therefore requires a notifyClass that resolves. Params: assetPath, notifyName, triggerTime, notifyClass?, notifyProperties?", "add_anim_notify"),
     remove_notify:        bp("Remove notify(s) by name and/or class. Pass at least one of notifyName/notifyClass; both filters AND. Idempotent: alreadyDeleted=true if no match. Params: assetPath, notifyName?, notifyClass? (#471)", "remove_anim_notify", (p) => ({ assetPath: p.assetPath, notifyName: p.notifyName, notifyClass: p.notifyClass })),
     get_skeleton_info:    bp("Read skeleton. Params: assetPath", "get_skeleton_info"),
     list_sockets:         bp("List sockets. Params: assetPath", "list_animation_sockets"),
@@ -158,6 +158,7 @@ export const animationTool: ToolDef = categoryTool(
     triggerTime: z.number().optional(),
     notifyClass: z.string().optional(),
     notifyProperties: z.record(z.unknown()).optional().describe("add_notify: EditAnywhere fields to set on the spawned notify object (requires notifyClass)"),
+    branchingPoint: z.boolean().optional().describe("add_notify: force the montage notify's tick type. Branching-point notifies are the only ones UAnimNotify_PlayMontageNotify::BranchingPointNotify runs, so OnPlayMontageNotifyBegin needs one; the PlayMontageNotify classes default to true on a montage, everything else to the engine's queued tick (#880)"),
     slotIndex: z.number().optional(),
     segmentIndex: z.number().optional().describe("set_montage_sequence: replace only this segment index within the slot (#626). remove_montage_segment: segment to remove. add_montage_section: segment to anchor the section to (#826)"),
     // Montage segment authoring params (#826)
@@ -318,11 +319,11 @@ export const animationTool: ToolDef = categoryTool(
     componentName: z.string().optional().describe("SkeletalMeshComponent name (default: CharacterMesh0 / Mesh)"),
     bodyComponent: z.string().optional().describe("rebind_leader_pose: explicit body component name"),
     enabled: z.boolean().optional().describe("preview_animation: toggle on/off"),
-  },
     // #922/#923/#926 - evaluated pose reads
     times: z.array(z.number()).optional().describe("sample_pose / measure_natural_speed: sample times in seconds; pass either this or 'frames'"),
     incorporateRootMotion: z.boolean().optional().describe("sample_pose: fold the clip's root motion into the returned pose (default true, matching the engine). measure_natural_speed always excludes it, because it measures travel relative to the planted foot"),
     blendPosition: z.object({ x: z.number().optional(), y: z.number().optional(), z: z.number().optional() }).optional().describe("sample_pose / measure_natural_speed: BlendSpace blend input, in the blendspace's own axis units"),
     footBones: z.array(z.string()).optional().describe("measure_natural_speed: the foot bones to track, e.g. ['foot_l','foot_r']"),
     contactThreshold: z.number().optional().describe("measure_natural_speed: height in cm below which a foot counts as planted; omit to derive it from the clip's own lowest foot height, which is what makes the measurement scale-independent across skeletons"),
+  },
 );

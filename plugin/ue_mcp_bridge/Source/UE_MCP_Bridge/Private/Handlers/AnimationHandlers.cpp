@@ -33,6 +33,9 @@
 #include "Factories/BlendSpaceFactoryNew.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/Package.h"
+// FArrayProperty / FScriptArrayHelper: the #880 readback of the montage's
+// private BranchingPointMarkers cache goes through its UPROPERTY.
+#include "UObject/UnrealType.h"
 #include "Misc/PackageName.h"
 #include "UObject/SavePackage.h"
 #include "Dom/JsonObject.h"
@@ -190,14 +193,14 @@ void FAnimationHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("list_bones"), &ListBones);
 	Registry.RegisterHandler(TEXT("rebind_leader_pose"), &RebindLeaderPose);
 	Registry.RegisterHandler(TEXT("preview_animation"), &PreviewAnimation);
-}
-
-TSharedPtr<FJsonValue> FAnimationHandlers::ListAnimAssets(const TSharedPtr<FJsonObject>& Params)
 
 	// #922/#923/#926 - evaluated pose reads (live component, and asset sampling)
 	Registry.RegisterHandler(TEXT("get_live_bone_transforms"), &GetLiveBoneTransforms);
 	Registry.RegisterHandler(TEXT("sample_pose"), &SamplePose);
 	Registry.RegisterHandler(TEXT("measure_natural_speed"), &MeasureNaturalSpeed);
+}
+
+TSharedPtr<FJsonValue> FAnimationHandlers::ListAnimAssets(const TSharedPtr<FJsonObject>& Params)
 {
 	auto Result = MCPSuccess();
 
@@ -1127,11 +1130,52 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AddAnimNotify(const TSharedPtr<FJsonO
 		}
 	}
 
+	// #880: a notify only becomes a branching point when its event says so.
+	// FAnimNotifyEvent::MontageTickType defaults to Queued, and
+	// UAnimMontage::RefreshBranchingPointMarkers only records the events whose
+	// tick type is BranchingPoint - so a PlayMontageNotify added with the
+	// default left BranchingPointMarkers empty and
+	// UAnimNotify_PlayMontageNotify::BranchingPointNotify, the only thing that
+	// broadcasts OnPlayMontageNotifyBegin, was never reached. #528 set the name
+	// the delegate carries; this sets the tick type that gets it called.
+	//
+	// Montage notifies whose class is one of the PlayMontageNotify pair default
+	// to BranchingPoint because that is the only tick type at which they do
+	// anything. Everything else keeps the engine's Queued default, which is the
+	// cheaper tick. `branchingPoint` overrides either way.
+	const bool bIsMontage = AnimAsset->IsA<UAnimMontage>();
+	bool bWantBranchingPoint = false;
+	if (bIsMontage && NewNotify)
+	{
+		for (const UClass* NotifyClass = NewNotify->GetClass(); NotifyClass; NotifyClass = NotifyClass->GetSuperClass())
+		{
+			const FString ClassName = NotifyClass->GetName();
+			if (ClassName == TEXT("AnimNotify_PlayMontageNotify") ||
+				ClassName == TEXT("AnimNotify_PlayMontageNotifyWindow"))
+			{
+				bWantBranchingPoint = true;
+				break;
+			}
+		}
+	}
+	bool bExplicitBranchingPoint = false;
+	if (Params->TryGetBoolField(TEXT("branchingPoint"), bExplicitBranchingPoint))
+	{
+		bWantBranchingPoint = bExplicitBranchingPoint;
+	}
+	if (bWantBranchingPoint)
+	{
+		NewEvent.MontageTickType = EMontageNotifyTickType::BranchingPoint;
+	}
+
 	AnimAsset->SortNotifies();
 
-	// #528: PostEditChange + save rebuilds the montage's branching-point markers
-	// from the notifies (RefreshBranchingPointMarkers itself is private), so the
-	// notify fires as a branching point with the name just written.
+	// RefreshBranchingPointMarkers itself is private; RefreshCacheData is the
+	// public entry that calls it, and it also rebuilds the notify tracks and
+	// sync markers the editor caches. PostEditChange alone dispatches a
+	// property-changed event with no property attached, which is not the path
+	// that rebuilds the cache.
+	AnimAsset->RefreshCacheData();
 	AnimAsset->PostEditChange();
 	AnimAsset->MarkPackageDirty();
 
@@ -1146,6 +1190,26 @@ TSharedPtr<FJsonValue> FAnimationHandlers::AddAnimNotify(const TSharedPtr<FJsonO
 	if (NewNotify)
 	{
 		Result->SetStringField(TEXT("notifyClass"), NewNotify->GetClass()->GetName());
+	}
+	if (bIsMontage)
+	{
+		// #880 read back what the refresh produced rather than asserting it
+		// happened. BranchingPointMarkers is private, so this goes through the
+		// UPROPERTY, which is what the runtime reads too.
+		Result->SetBoolField(TEXT("branchingPoint"), bWantBranchingPoint);
+		int32 MarkerCount = INDEX_NONE;
+		if (const FArrayProperty* MarkersProperty =
+			CastField<FArrayProperty>(AnimAsset->GetClass()->FindPropertyByName(TEXT("BranchingPointMarkers"))))
+		{
+			FScriptArrayHelper Helper(MarkersProperty, MarkersProperty->ContainerPtrToValuePtr<void>(AnimAsset));
+			MarkerCount = Helper.Num();
+		}
+		Result->SetNumberField(TEXT("branchingPointMarkerCount"), MarkerCount);
+		if (bWantBranchingPoint && MarkerCount == 0)
+		{
+			Result->SetStringField(TEXT("branchingPointWarning"),
+				TEXT("The notify was added as a branching point but the montage's BranchingPointMarkers cache is empty, so OnPlayMontageNotifyBegin will not broadcast until the montage is reloaded."));
+		}
 	}
 	// #471: paired remove handler now exists.
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
