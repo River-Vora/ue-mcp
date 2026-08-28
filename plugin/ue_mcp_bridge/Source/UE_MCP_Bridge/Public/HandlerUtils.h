@@ -400,6 +400,21 @@ inline bool OptionalBool(
 	return Params->TryGetBoolField(Key, Value) ? Value : DefaultValue;
 }
 
+/** Render a TArray<FString> as a JSON string array. The inverse of
+ *  JsonArrayToStringList, shared so batch handlers that report label lists do
+ *  not each define their own file-local copy (unity build: two anonymous
+ *  namespaces sharing a blob merge, and the second definition is C2084). */
+inline TArray<TSharedPtr<FJsonValue>> MCPStringListToJson(const TArray<FString>& Values)
+{
+	TArray<TSharedPtr<FJsonValue>> Out;
+	Out.Reserve(Values.Num());
+	for (const FString& Value : Values)
+	{
+		Out.Add(MakeShared<FJsonValueString>(Value));
+	}
+	return Out;
+}
+
 /** Extract a JSON array of strings into a TArray<FString>. */
 inline TArray<FString> JsonArrayToStringList(const TArray<TSharedPtr<FJsonValue>>* Arr)
 {
