@@ -1089,6 +1089,53 @@ T* LoadAssetByPath(const FString& AssetPath)
 	Type* OutVar = LoadAssetByPath<Type>(AssetPath); \
 	if (!OutVar) return MCPError(FString::Printf(TEXT("%s not found: %s"), TEXT(#Type), *AssetPath));
 
+/** Export a property's value as text, honouring C-style fixed arrays.
+ *
+ *  A UPROPERTY declared as `int32 Foo[3]` is ONE FProperty with ArrayDim == 3,
+ *  not three properties. ExportTextItem_Direct exports a single element, so a
+ *  caller that passes ContainerPtrToValuePtr<void>(Container) with no index
+ *  gets element 0 and nothing else, and the value reads as a plain scalar.
+ *
+ *  That is how #927 hid two thirds of RecastNavMesh's NavMeshResolutionParams:
+ *  the Low tier was reported as if it were the whole property while the engine
+ *  was generating from Default and High, so a navmesh diagnosis was performed
+ *  against numbers the engine was not using.
+ *
+ *  Returns a JSON string for a normal property, and a JSON array of one string
+ *  per element for a fixed array, so a caller can tell the two apart. */
+inline TSharedPtr<FJsonValue> MCPExportPropertyValue(const FProperty* Prop, const void* Container)
+{
+	if (!Prop || !Container) return MakeShared<FJsonValueString>(FString());
+
+	auto ExportOne = [Prop, Container](int32 Index) -> FString
+	{
+		FString Text;
+		Prop->ExportTextItem_Direct(
+			Text, Prop->ContainerPtrToValuePtr<void>(Container, Index), nullptr, nullptr, PPF_None);
+		return Text;
+	};
+
+	if (Prop->ArrayDim <= 1)
+	{
+		return MakeShared<FJsonValueString>(ExportOne(0));
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Elements;
+	Elements.Reserve(Prop->ArrayDim);
+	for (int32 Index = 0; Index < Prop->ArrayDim; ++Index)
+	{
+		Elements.Add(MakeShared<FJsonValueString>(ExportOne(Index)));
+	}
+	return MakeShared<FJsonValueArray>(Elements);
+}
+
+/** True when a property is a C-style fixed array, so callers that must emit a
+ *  scalar can say the value was truncated rather than silently truncating. */
+inline bool MCPPropertyIsFixedArray(const FProperty* Prop)
+{
+	return Prop != nullptr && Prop->ArrayDim > 1;
+}
+
 // ── Package save ─────────────────────────────────────────────────────────────
 
 /** True when the package is a map package, i.e. one whose on-disk form is a
