@@ -153,6 +153,20 @@ inline TSharedPtr<FJsonValue> MCPCheckAssetExists(
 inline UObject* MCPLoadAssetObject(const FString& AssetPath)
 {
 	if (AssetPath.IsEmpty()) return nullptr;
+
+	// An object already in memory is the answer, and running a path validator
+	// over it can only turn a good answer into a null and an error log. The
+	// object name is required for this step: a path with no "." names a
+	// package, and returning the UPackage in place of the asset would be a
+	// worse answer than not looking.
+	if (AssetPath.Contains(TEXT(".")))
+	{
+		if (UObject* Loaded = FindObject<UObject>(nullptr, *AssetPath))
+		{
+			if (!Loaded->IsA<UPackage>()) return Loaded;
+		}
+	}
+
 	if (UObject* ViaEditorLibrary = UEditorAssetLibrary::LoadAsset(AssetPath))
 	{
 		return ViaEditorLibrary;
