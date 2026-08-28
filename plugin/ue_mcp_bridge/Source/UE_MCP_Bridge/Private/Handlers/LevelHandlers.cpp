@@ -614,10 +614,26 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorDetails(const TSharedPtr<FJsonObj
 			P->SetStringField(TEXT("name"), Prop->GetName());
 			P->SetStringField(TEXT("type"), Prop->GetCPPType());
 
-			FString ValueStr;
-			const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Actor);
-			Prop->ExportText_Direct(ValueStr, ValuePtr, ValuePtr, Actor, PPF_None);
-			P->SetStringField(TEXT("value"), ValueStr);
+			// #927: a UPROPERTY declared as a C-style fixed array, `int32 Foo[3]`,
+			// is ONE FProperty with ArrayDim == 3, not three properties. Exporting
+			// it without an index writes element 0 and stops, and the value then
+			// reads as an ordinary scalar with the remaining elements invisible.
+			//
+			// This is a general serialization bug, not a navmesh one. It was
+			// noticed on RecastNavMesh's NavMeshResolutionParams, a three-element
+			// fixed array holding the Low, Default and High generation tiers, and
+			// reporting only the Low tier as if it were the whole property sent a
+			// user tuning cell sizes against numbers Recast was not using. Any
+			// fixed array on any class had the same problem.
+			//
+			// MCPExportPropertyValue returns a JSON array of one string per
+			// element when ArrayDim > 1 and a plain string otherwise, so the two
+			// cases stay distinguishable rather than being conflated.
+			P->SetField(TEXT("value"), MCPExportPropertyValue(Prop, Actor));
+			if (MCPPropertyIsFixedArray(Prop))
+			{
+				P->SetNumberField(TEXT("arrayDim"), Prop->ArrayDim);
+			}
 			PropsArr.Add(MakeShared<FJsonValueObject>(P));
 		}
 		Result->SetArrayField(TEXT("properties"), PropsArr);
@@ -830,10 +846,15 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentTree(const TSharedPtr<FJsonOb
 				TSharedPtr<FJsonObject> P = MakeShared<FJsonObject>();
 				P->SetStringField(TEXT("name"), Prop->GetName());
 				P->SetStringField(TEXT("type"), Prop->GetCPPType());
-				FString ValueStr;
-				const void* VP = Prop->ContainerPtrToValuePtr<void>(Comp);
-				Prop->ExportText_Direct(ValueStr, VP, VP, Comp, PPF_None);
-				P->SetStringField(TEXT("value"), ValueStr);
+				// #927: a fixed array is one FProperty with ArrayDim > 1, and
+				// exporting it without an index reports element 0 as though it
+				// were the whole value. Same helper as the actor dump, so the
+				// two cannot drift.
+				P->SetField(TEXT("value"), MCPExportPropertyValue(Prop, Comp));
+				if (MCPPropertyIsFixedArray(Prop))
+				{
+					P->SetNumberField(TEXT("arrayDim"), Prop->ArrayDim);
+				}
 				Props.Add(MakeShared<FJsonValueObject>(P));
 			}
 			C->SetArrayField(TEXT("properties"), Props);
@@ -1473,24 +1494,65 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 	UStruct* CurrentStruct = TargetComp->GetClass();
 	void* CurrentContainer = TargetComp;
 	FProperty* Prop = nullptr;
+	// #927: same fixed-array indexing as set_actor_property. A component
+	// property declared `float Foo[4]` is one FProperty with ArrayDim 4, and
+	// without an index every write lands on element 0.
+	int32 LeafArrayIndex = 0;
 	for (int32 i = 0; i < PathParts.Num(); ++i)
 	{
-		FProperty* SegmentProp = CurrentStruct->FindPropertyByName(FName(*PathParts[i]));
+		FString Token = PathParts[i];
+		int32 SegmentIndex = 0;
+		bool bHasSegmentIndex = false;
+		{
+			int32 OpenBracket = INDEX_NONE;
+			int32 CloseBracket = INDEX_NONE;
+			if (Token.FindChar(TEXT('['), OpenBracket) &&
+				Token.FindChar(TEXT(']'), CloseBracket) &&
+				CloseBracket > OpenBracket)
+			{
+				SegmentIndex = FCString::Atoi(*Token.Mid(OpenBracket + 1, CloseBracket - OpenBracket - 1));
+				Token = Token.Left(OpenBracket);
+				bHasSegmentIndex = true;
+			}
+		}
+
+		FProperty* SegmentProp = CurrentStruct->FindPropertyByName(FName(*Token));
 		if (!SegmentProp)
 		{
-			return MCPError(FString::Printf(TEXT("Property '%s' not found at '%s'"), *PathParts[i], *PropertyName));
+			return MCPError(FString::Printf(TEXT("Property '%s' not found at '%s'"), *Token, *PropertyName));
+		}
+		if (bHasSegmentIndex)
+		{
+			if (CastField<FArrayProperty>(SegmentProp))
+			{
+				return MCPError(FString::Printf(
+					TEXT("'%s' is a TArray. Indexing a dynamic array is not supported here; use asset(set_property) for dotted TArray paths. An index on this action addresses a C-style fixed array such as `float Foo[4]`."),
+					*Token));
+			}
+			if (SegmentProp->ArrayDim <= 1)
+			{
+				return MCPError(FString::Printf(
+					TEXT("'%s' is not a fixed array, so it cannot be indexed [%d]"), *Token, SegmentIndex));
+			}
+			if (SegmentIndex < 0 || SegmentIndex >= SegmentProp->ArrayDim)
+			{
+				return MCPError(FString::Printf(
+					TEXT("Index %d is out of range on '%s', which has ArrayDim %d"),
+					SegmentIndex, *Token, SegmentProp->ArrayDim));
+			}
 		}
 		if (i < PathParts.Num() - 1)
 		{
 			if (FStructProperty* SP = CastField<FStructProperty>(SegmentProp))
 			{
-				CurrentContainer = SP->ContainerPtrToValuePtr<void>(CurrentContainer);
+				CurrentContainer = SP->ContainerPtrToValuePtr<void>(CurrentContainer, SegmentIndex);
 				CurrentStruct = SP->Struct;
 			}
 			else if (FObjectProperty* OP = CastField<FObjectProperty>(SegmentProp))
 			{
 				// #305: descend through Instanced UObject sub-objects.
-				UObject* SubObject = OP->GetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(CurrentContainer));
+				UObject* SubObject = OP->GetObjectPropertyValue(
+					OP->ContainerPtrToValuePtr<void>(CurrentContainer, SegmentIndex));
 				if (!SubObject)
 				{
 					return MCPError(FString::Printf(
@@ -1510,6 +1572,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 		else
 		{
 			Prop = SegmentProp;
+			LeafArrayIndex = SegmentIndex;
 		}
 	}
 
@@ -1519,7 +1582,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 		return MCPError(TEXT("Missing 'value' parameter"));
 	}
 
-	void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(CurrentContainer);
+	void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(CurrentContainer, LeafArrayIndex);
 
 	// Capture previous value as a string for self-inverse rollback.
 	FString PreviousValueStr;
@@ -1703,9 +1766,9 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentDetails(const TSharedPtr<FJso
 				FProperty* Prop = *It;
 				const FString PName = Prop->GetName();
 				if (PropFilter.Num() > 0 && !PropFilter.Contains(PName)) continue;
-				FString Exported;
-				Prop->ExportText_Direct(Exported, Prop->ContainerPtrToValuePtr<void>(Comp), Prop->ContainerPtrToValuePtr<void>(Comp), Comp, PPF_None);
-				Values->SetStringField(PName, Exported);
+				// #927: fixed arrays come back as a JSON array of elements
+				// rather than as element 0 wearing the whole property's name.
+				Values->SetField(PName, MCPExportPropertyValue(Prop, Comp));
 			}
 			Obj->SetObjectField(TEXT("values"), Values);
 		}
@@ -2368,15 +2431,62 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorProperty(const TSharedPtr<FJsonOb
 	UStruct* CurrentStruct = TargetActor->GetClass();
 	void* CurrentContainer = TargetActor;
 	FProperty* Prop = nullptr;
+	// #927: the leaf element of a C-style fixed array, `int32 Foo[3]`. That is
+	// ONE FProperty with ArrayDim == 3, so without an index the write lands on
+	// element 0 and the other elements are unreachable. The read side has the
+	// mirror of this bug; a read that shows three tiers and a write that can
+	// only reach the first is not a usable pair.
+	int32 LeafArrayIndex = 0;
 	for (int32 i = 0; i < PathParts.Num(); ++i)
 	{
-		FProperty* Seg = CurrentStruct->FindPropertyByName(FName(*PathParts[i]));
-		if (!Seg) return MCPError(FString::Printf(TEXT("Property '%s' not found at '%s'"), *PathParts[i], *PropertyName));
+		FString Token = PathParts[i];
+		int32 SegmentIndex = 0;
+		bool bHasSegmentIndex = false;
+		{
+			int32 OpenBracket = INDEX_NONE;
+			int32 CloseBracket = INDEX_NONE;
+			if (Token.FindChar(TEXT('['), OpenBracket) &&
+				Token.FindChar(TEXT(']'), CloseBracket) &&
+				CloseBracket > OpenBracket)
+			{
+				SegmentIndex = FCString::Atoi(*Token.Mid(OpenBracket + 1, CloseBracket - OpenBracket - 1));
+				Token = Token.Left(OpenBracket);
+				bHasSegmentIndex = true;
+			}
+		}
+
+		FProperty* Seg = CurrentStruct->FindPropertyByName(FName(*Token));
+		if (!Seg) return MCPError(FString::Printf(TEXT("Property '%s' not found at '%s'"), *Token, *PropertyName));
+
+		if (bHasSegmentIndex)
+		{
+			if (CastField<FArrayProperty>(Seg))
+			{
+				// A TArray element needs the shared resolver's array helper,
+				// which this walker does not have. Say which action does
+				// rather than writing element 0 and calling it a success.
+				return MCPError(FString::Printf(
+					TEXT("'%s' is a TArray. Indexing a dynamic array is not supported here; use asset(set_property) for dotted TArray paths. An index on this action addresses a C-style fixed array such as `int32 Foo[3]`."),
+					*Token));
+			}
+			if (Seg->ArrayDim <= 1)
+			{
+				return MCPError(FString::Printf(
+					TEXT("'%s' is not a fixed array, so it cannot be indexed [%d]"), *Token, SegmentIndex));
+			}
+			if (SegmentIndex < 0 || SegmentIndex >= Seg->ArrayDim)
+			{
+				return MCPError(FString::Printf(
+					TEXT("Index %d is out of range on '%s', which has ArrayDim %d"),
+					SegmentIndex, *Token, Seg->ArrayDim));
+			}
+		}
+
 		if (i < PathParts.Num() - 1)
 		{
 			if (FStructProperty* SP = CastField<FStructProperty>(Seg))
 			{
-				CurrentContainer = SP->ContainerPtrToValuePtr<void>(CurrentContainer);
+				CurrentContainer = SP->ContainerPtrToValuePtr<void>(CurrentContainer, SegmentIndex);
 				CurrentStruct = SP->Struct;
 			}
 			// #305: descend through Instanced UObject sub-objects too. The path
@@ -2385,7 +2495,8 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorProperty(const TSharedPtr<FJsonOb
 			// rejection forced execute_python on every instanced-subobject write.
 			else if (FObjectProperty* OP = CastField<FObjectProperty>(Seg))
 			{
-				UObject* SubObject = OP->GetObjectPropertyValue(OP->ContainerPtrToValuePtr<void>(CurrentContainer));
+				UObject* SubObject = OP->GetObjectPropertyValue(
+					OP->ContainerPtrToValuePtr<void>(CurrentContainer, SegmentIndex));
 				if (!SubObject)
 				{
 					return MCPError(FString::Printf(
@@ -2405,6 +2516,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorProperty(const TSharedPtr<FJsonOb
 		else
 		{
 			Prop = Seg;
+			LeafArrayIndex = SegmentIndex;
 		}
 	}
 
@@ -2416,7 +2528,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorProperty(const TSharedPtr<FJsonOb
 		Prop->PropertyFlags &= ~CPF_DisableEditOnInstance;
 	}
 
-	void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(CurrentContainer);
+	void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(CurrentContainer, LeafArrayIndex);
 
 	FString PrevValue;
 	Prop->ExportText_Direct(PrevValue, ValuePtr, ValuePtr, TargetActor, PPF_None);
