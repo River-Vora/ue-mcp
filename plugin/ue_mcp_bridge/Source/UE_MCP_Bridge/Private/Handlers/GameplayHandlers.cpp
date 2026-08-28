@@ -152,6 +152,15 @@ void FGameplayHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// New handlers
 	Registry.RegisterHandler(TEXT("get_behavior_tree_info"), &GetBehaviorTreeInfo);
 	Registry.RegisterHandler(TEXT("read_behavior_tree_graph"), &ReadBehaviorTreeGraph);
+	// #919: pick BT nodes and read only their own UPROPERTY values.
+	Registry.RegisterHandler(TEXT("read_bt_node_properties"), &ReadBTNodeProperties);
+	// #940: inventory BTTask nodes, FilterClass included.
+	Registry.RegisterHandler(TEXT("list_bt_tasks"), &ListBTTasks);
+	// #919/#940: one scoped write onto an owned BT node subobject. Registered
+	// under both names because a caller reaching for the task-specific one
+	// should not have to know it is the general node setter.
+	Registry.RegisterHandler(TEXT("set_bt_node_property"), &SetBTNodeProperty);
+	Registry.RegisterHandler(TEXT("set_bt_task_property"), &SetBTNodeProperty);
 	Registry.RegisterHandler(TEXT("add_perception_component"), &AddPerceptionComponent);
 	Registry.RegisterHandler(TEXT("configure_ai_perception_sense"), &ConfigureAiPerceptionSense);
 	Registry.RegisterHandler(TEXT("add_state_tree_component"), &AddStateTreeComponent);
@@ -1815,72 +1824,9 @@ TSharedPtr<FJsonValue> FGameplayHandlers::SetBehaviorTreeBlackboard(const TShare
 	return MCPResult(Result);
 }
 
-TSharedPtr<FJsonValue> FGameplayHandlers::GetBehaviorTreeInfo(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
-
-	UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("BehaviorTree not found: %s"), *AssetPath));
-	}
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("path"), AssetPath);
-	Result->SetStringField(TEXT("name"), Asset->GetName());
-	Result->SetStringField(TEXT("className"), Asset->GetClass()->GetName());
-
-	// Try to read blackboard asset
-	FProperty* BBProp = Asset->GetClass()->FindPropertyByName(TEXT("BlackboardAsset"));
-	if (BBProp)
-	{
-		FObjectProperty* ObjProp = CastField<FObjectProperty>(BBProp);
-		if (ObjProp)
-		{
-			UObject* BB = ObjProp->GetObjectPropertyValue(BBProp->ContainerPtrToValuePtr<void>(Asset));
-			if (BB)
-			{
-				Result->SetStringField(TEXT("blackboardAsset"), BB->GetPathName());
-
-				// Try to read blackboard keys
-				TArray<TSharedPtr<FJsonValue>> KeysArray;
-				FProperty* KeysProp = BB->GetClass()->FindPropertyByName(TEXT("Keys"));
-				if (KeysProp)
-				{
-					FArrayProperty* ArrProp = CastField<FArrayProperty>(KeysProp);
-					if (ArrProp)
-					{
-						FScriptArrayHelper ArrayHelper(ArrProp, ArrProp->ContainerPtrToValuePtr<void>(BB));
-						for (int32 i = 0; i < ArrayHelper.Num(); i++)
-						{
-							TSharedPtr<FJsonObject> KeyObj = MakeShared<FJsonObject>();
-							UObject* KeyEntry = *reinterpret_cast<UObject**>(ArrayHelper.GetRawPtr(i));
-							if (KeyEntry)
-							{
-								FProperty* NameProp = KeyEntry->GetClass()->FindPropertyByName(TEXT("EntryName"));
-								if (NameProp)
-								{
-									FString EntryName;
-									NameProp->ExportTextItem_Direct(EntryName, NameProp->ContainerPtrToValuePtr<void>(KeyEntry), nullptr, KeyEntry, PPF_None);
-									KeyObj->SetStringField(TEXT("name"), EntryName);
-								}
-								else
-								{
-									KeyObj->SetStringField(TEXT("name"), KeyEntry->GetName());
-								}
-							}
-							KeysArray.Add(MakeShared<FJsonValueObject>(KeyObj));
-						}
-					}
-				}
-				Result->SetArrayField(TEXT("blackboardKeys"), KeysArray);
-			}
-		}
-	}
-
-	return MCPResult(Result);
-}
+// get_behavior_tree_info and read_behavior_tree_graph moved to
+// GameplayHandlers_BehaviorTree.cpp, alongside the node-level BT reads and
+// writes they now share their walker and property reflection with.
 
 TSharedPtr<FJsonValue> FGameplayHandlers::AddPerceptionComponent(const TSharedPtr<FJsonObject>& Params)
 {
@@ -2254,97 +2200,6 @@ TSharedPtr<FJsonValue> FGameplayHandlers::AddSmartObjectComponent(const TSharedP
 	Payload->SetStringField(TEXT("componentName"), TEXT("SmartObjectComp"));
 	MCPSetRollback(Result, TEXT("remove_component"), Payload);
 
-	return MCPResult(Result);
-}
-TSharedPtr<FJsonValue> FGameplayHandlers::ReadBehaviorTreeGraph(const TSharedPtr<FJsonObject>& Params)
-{
-	FString AssetPath;
-	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
-
-	UBehaviorTree* BT = LoadObject<UBehaviorTree>(nullptr, *AssetPath);
-	if (!BT) return MCPError(FString::Printf(TEXT("BehaviorTree not found: %s"), *AssetPath));
-
-	TFunction<TSharedPtr<FJsonObject>(UBTNode*)> Walk;
-	Walk = [&](UBTNode* Node) -> TSharedPtr<FJsonObject>
-	{
-		if (!Node) return nullptr;
-		TSharedPtr<FJsonObject> NObj = MakeShared<FJsonObject>();
-		NObj->SetStringField(TEXT("class"), Node->GetClass()->GetName());
-		NObj->SetStringField(TEXT("name"), Node->GetName());
-		FProperty* NameProp = Node->GetClass()->FindPropertyByName(TEXT("NodeName"));
-		if (NameProp)
-		{
-			FString NodeDisplay;
-			NameProp->ExportText_Direct(NodeDisplay, NameProp->ContainerPtrToValuePtr<void>(Node), nullptr, Node, PPF_None);
-			NObj->SetStringField(TEXT("nodeName"), NodeDisplay);
-		}
-
-		if (UBTCompositeNode* Comp = Cast<UBTCompositeNode>(Node))
-		{
-			NObj->SetStringField(TEXT("kind"), TEXT("composite"));
-
-			TArray<TSharedPtr<FJsonValue>> ChildrenArr;
-			for (const FBTCompositeChild& Child : Comp->Children)
-			{
-				TSharedPtr<FJsonObject> ChildEntry = MakeShared<FJsonObject>();
-				if (Child.ChildComposite)
-					ChildEntry->SetObjectField(TEXT("child"), Walk(Child.ChildComposite));
-				else if (Child.ChildTask)
-					ChildEntry->SetObjectField(TEXT("child"), Walk(Child.ChildTask));
-
-				TArray<TSharedPtr<FJsonValue>> Decs;
-				for (UBTDecorator* D : Child.Decorators)
-				{
-					if (!D) continue;
-					TSharedPtr<FJsonObject> DObj = MakeShared<FJsonObject>();
-					DObj->SetStringField(TEXT("class"), D->GetClass()->GetName());
-					DObj->SetStringField(TEXT("name"), D->GetName());
-					Decs.Add(MakeShared<FJsonValueObject>(DObj));
-				}
-				ChildEntry->SetArrayField(TEXT("decorators"), Decs);
-				ChildrenArr.Add(MakeShared<FJsonValueObject>(ChildEntry));
-			}
-			NObj->SetArrayField(TEXT("children"), ChildrenArr);
-
-			TArray<TSharedPtr<FJsonValue>> Services;
-			for (UBTService* S : Comp->Services)
-			{
-				if (!S) continue;
-				TSharedPtr<FJsonObject> SObj = MakeShared<FJsonObject>();
-				SObj->SetStringField(TEXT("class"), S->GetClass()->GetName());
-				SObj->SetStringField(TEXT("name"), S->GetName());
-				Services.Add(MakeShared<FJsonValueObject>(SObj));
-			}
-			NObj->SetArrayField(TEXT("services"), Services);
-		}
-		else if (Cast<UBTTaskNode>(Node))
-		{
-			NObj->SetStringField(TEXT("kind"), TEXT("task"));
-		}
-		return NObj;
-	};
-
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("assetPath"), AssetPath);
-	Result->SetStringField(TEXT("name"), BT->GetName());
-	if (BT->BlackboardAsset)
-	{
-		Result->SetStringField(TEXT("blackboardAsset"), BT->BlackboardAsset->GetPathName());
-	}
-	if (BT->RootNode)
-	{
-		Result->SetObjectField(TEXT("root"), Walk(BT->RootNode));
-	}
-	TArray<TSharedPtr<FJsonValue>> RootDecs;
-	for (UBTDecorator* D : BT->RootDecorators)
-	{
-		if (!D) continue;
-		TSharedPtr<FJsonObject> DObj = MakeShared<FJsonObject>();
-		DObj->SetStringField(TEXT("class"), D->GetClass()->GetName());
-		DObj->SetStringField(TEXT("name"), D->GetName());
-		RootDecs.Add(MakeShared<FJsonValueObject>(DObj));
-	}
-	Result->SetArrayField(TEXT("rootDecorators"), RootDecs);
 	return MCPResult(Result);
 }
 

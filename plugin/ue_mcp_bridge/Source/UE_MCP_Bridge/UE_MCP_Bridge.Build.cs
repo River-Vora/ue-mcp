@@ -163,3 +163,5 @@ public class UE_MCP_Bridge : ModuleRules
 // Rescan trigger: Private/Tests/AutomationRunnerTests.cpp (#993).
 // Rescan trigger: Mass and skeletal-mesh handler translation units.
 // Rescan trigger: FInstancedStruct scalar, wrapper-array and nested path tests added.
+// Round 3: Private/Handlers/GameplayHandlers_BehaviorTree.cpp and
+// Private/Tests/BehaviorTreeNodeTests.cpp.
