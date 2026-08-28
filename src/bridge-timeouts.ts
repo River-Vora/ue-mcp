@@ -66,6 +66,7 @@ export const REGISTERED_HANDLER_TIMEOUT_SECONDS: Readonly<Record<string, number>
   refresh_landscape_physical_material_collision: 600,
   run_automation_tests: 300,
   sculpt_landscape: 120,
+  search_blueprint_call_sites: 600,
   snap_instances_to_surface: 300,
 };
 
