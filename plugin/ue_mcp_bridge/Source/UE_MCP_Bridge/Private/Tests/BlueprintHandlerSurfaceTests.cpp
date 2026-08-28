@@ -15,6 +15,9 @@
 #include "Misc/AutomationTest.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "EdGraphSchema_K2.h"
+#include "BehaviorTree/Tasks/BTTask_BlueprintBase.h"
+#include "UObject/UnrealType.h"
 
 namespace
 {
@@ -158,6 +161,78 @@ bool FBlueprintVariableDefaultRegistrationTest::RunTest(const FString& Parameter
 		{
 			TestFalse(TEXT("list_variables with no path is unsuccessful"),
 				Response->GetBoolField(TEXT("success")));
+		}
+	}
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// #886: authoring a BTTask Blueprint's event graph needs ReceiveExecuteAI and
+// ReceiveAbortAI as override events and FinishExecute / FinishAbort as call
+// nodes. The existing override_function and add_node surface already places
+// all four; what makes that true is the shape those two actions test for on
+// the engine side, so that shape is what is asserted here. If Epic ever
+// changes one of these functions, the recipe the skill documents becomes wrong
+// here first, in a test, rather than in somebody's build.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FBlueprintBTTaskEventShapeTest,
+	"UE.MCP.Blueprint.BTTask.EventShape",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FBlueprintBTTaskEventShapeTest::RunTest(const FString& Parameters)
+{
+	UClass* TaskBase = UBTTask_BlueprintBase::StaticClass();
+	if (!TestNotNull(TEXT("UBTTask_BlueprintBase resolves"), TaskBase))
+	{
+		return false;
+	}
+
+	// override_function accepts a name only when GetOverrideFunctionClass can
+	// resolve it, which needs CanKismetOverrideFunction; it places an override
+	// EVENT rather than a function graph only when FunctionCanBePlacedAsEvent
+	// agrees. Both have to hold for the documented call sequence to work.
+	const TCHAR* OverrideEvents[] = {
+		TEXT("ReceiveExecuteAI"), TEXT("ReceiveAbortAI"), TEXT("ReceiveTickAI"),
+		TEXT("ReceiveExecute"), TEXT("ReceiveAbort"), TEXT("ReceiveTick"),
+	};
+	for (const TCHAR* EventName : OverrideEvents)
+	{
+		UFunction* Function = TaskBase->FindFunctionByName(FName(EventName));
+		if (!TestNotNull(*FString::Printf(TEXT("%s exists on UBTTask_BlueprintBase"), EventName), Function))
+		{
+			continue;
+		}
+		TestTrue(*FString::Printf(TEXT("%s is overridable from Kismet"), EventName),
+			UEdGraphSchema_K2::CanKismetOverrideFunction(Function));
+		TestTrue(*FString::Printf(TEXT("%s can be placed as an override event"), EventName),
+			UEdGraphSchema_K2::FunctionCanBePlacedAsEvent(Function));
+	}
+
+	// add_node(nodeClass="CallFunction") binds a K2Node_CallFunction to a
+	// UFUNCTION resolved by name on the named class, and only a
+	// BlueprintCallable function yields a usable node.
+	const TCHAR* CallableFinishers[] = { TEXT("FinishExecute"), TEXT("FinishAbort") };
+	for (const TCHAR* CallName : CallableFinishers)
+	{
+		UFunction* Function = TaskBase->FindFunctionByName(FName(CallName));
+		if (!TestNotNull(*FString::Printf(TEXT("%s exists on UBTTask_BlueprintBase"), CallName), Function))
+		{
+			continue;
+		}
+		TestTrue(*FString::Printf(TEXT("%s is BlueprintCallable"), CallName),
+			Function->HasAnyFunctionFlags(FUNC_BlueprintCallable));
+	}
+
+	// The skill documents setting bSuccess as a pin default on FinishExecute,
+	// which only holds while the parameter is there and is a bool.
+	if (UFunction* FinishExecute = TaskBase->FindFunctionByName(TEXT("FinishExecute")))
+	{
+		FProperty* SuccessParam = FinishExecute->FindPropertyByName(TEXT("bSuccess"));
+		if (TestNotNull(TEXT("FinishExecute exposes bSuccess"), SuccessParam))
+		{
+			TestTrue(TEXT("FinishExecute's bSuccess is a bool"), SuccessParam->IsA<FBoolProperty>());
 		}
 	}
 
