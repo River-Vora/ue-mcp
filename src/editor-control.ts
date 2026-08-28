@@ -462,6 +462,17 @@ function describeTimeline(timeline: ReadyPhase[]): string {
   return timeline.map((entry) => `${entry.phase} ${entry.atSeconds}s`).join(" -> ");
 }
 
+/** Startup-only editor settings travel in the environment, because the bridge
+ *  reads them before it is listening. Kept in one place so a second setting
+ *  cannot quietly drop the first by rebuilding the env inline. */
+function buildEditorLaunchEnv(dialogPolicy?: string, paramEcho?: boolean): NodeJS.ProcessEnv {
+  if (!dialogPolicy && !paramEcho) return process.env;
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  if (dialogPolicy) env.UE_MCP_DIALOG_POLICY = dialogPolicy;
+  if (paramEcho) env.UE_MCP_PARAM_ECHO = "1";
+  return env;
+}
+
 export async function startEditor(
   project: ProjectContext,
   timeoutSeconds = 300,
@@ -475,6 +486,16 @@ export async function startEditor(
      * the launch in the first place.
      */
     dialogPolicy?: string;
+
+    /**
+     * Arm the bridge's parameter echo for this editor. The live tier's leak
+     * assertions, which prove a routing key never reaches an editor, can only
+     * run when the editor was LAUNCHED with it: it is read at startup, so
+     * turning it on over the socket afterwards is too late, exactly like the
+     * dialog policy above. Without it those cases skip and say why, which
+     * leaves the sharpest part of the tier unexercised by default.
+     */
+    paramEcho?: boolean;
   } = {},
 ): Promise<{ success: boolean; message: string; state?: EngineState; timeline?: ReadyPhase[]; elapsedSeconds?: number }> {
   // Every check below is about ONE editor: the one holding this project. Know
@@ -529,9 +550,7 @@ export async function startEditor(
     const editorProcess = spawn(editorExe, [project.projectPath], {
       stdio: "ignore",
       detached: true,
-      env: opts.dialogPolicy
-        ? { ...process.env, UE_MCP_DIALOG_POLICY: opts.dialogPolicy }
-        : process.env,
+      env: buildEditorLaunchEnv(opts.dialogPolicy, opts.paramEcho),
     });
 
     editorProcess.unref();

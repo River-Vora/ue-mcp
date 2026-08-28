@@ -24,7 +24,8 @@ export const editorTool: ToolDef = categoryTool(
       handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
         const timeout = typeof p?.timeout === "number" && p.timeout > 0 ? p.timeout : 300;
         const dialogPolicy = typeof p?.dialogPolicy === "string" && p.dialogPolicy.trim() !== "" ? p.dialogPolicy.trim() : undefined;
-        const result = await startEditor(ctx.project, timeout, ctx.onProgress, { dialogPolicy });
+        const paramEcho = p?.paramEcho === true;
+        const result = await startEditor(ctx.project, timeout, ctx.onProgress, { dialogPolicy, paramEcho });
 
         // The call blocks for as long as the editor takes, so when its progress
         // is not visible the user is left to conclude the tool hung. Say which
@@ -396,6 +397,7 @@ export const editorTool: ToolDef = categoryTool(
     timeout: z.number().optional().describe("start_editor: seconds to wait for the bridge (default 120) (#758)"),
     probeWindows: z.boolean().optional().describe("get_engine_state: also enumerate native windows to catch pre-Slate dialogs (default true, costs ~2s)"),
     dialogPolicy: z.string().optional().describe("start_editor: semicolon-separated pattern=response pairs answered automatically from the first prompt of startup, before the bridge is listening (e.g. \"Restore=no\"). Responses are the ones set_dialog_policy takes (#968)"),
+    paramEcho: z.boolean().optional().describe("start_editor: arm the bridge parameter echo for the launched editor. It is read at startup, so it cannot be turned on over the socket afterwards. The live tier's leak assertions skip without it"),
     requireClean: z.boolean().optional().describe("request_editor_shutdown: refuse to close while any content or map package is dirty (default true)"),
     endPIE: z.boolean().optional().describe("request_editor_shutdown: end an active PIE/SIE session before closing (default true); false refuses to close while play is running"),
     pieInstance: z.number().optional().describe("Select which PIE world to target: 0 = server/primary, 1..N = clients. See list_pie_instances (#778)"),
