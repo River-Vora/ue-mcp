@@ -14,12 +14,14 @@ public class UE_MCP_Bridge : ModuleRules
 	// Private/Handlers/LevelHandlers_BatchWrite.cpp,
 	// Private/Handlers/LevelHandlers_Convert.cpp,
 	// Private/Handlers/LevelHandlers_Refresh.cpp,
+	// Private/Handlers/LevelHandlers_Transient.cpp,
 	// Private/Handlers/AssetHandlers_BulkRead.cpp,
 	// Private/Handlers/FoliageHandlers_Batch.cpp,
 	// Private/Tests/LevelQueryComponentsTests.cpp,
 	// Private/Tests/LevelBatchWriteTests.cpp,
 	// Private/Tests/LevelRefreshTests.cpp,
 	// Private/Tests/LevelConvertBrushesTests.cpp,
+	// Private/Tests/LevelTransientActorTests.cpp,
 	// Private/Tests/AssetBulkReadTests.cpp and
 	// Private/Tests/FoliageBatchTests.cpp: same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)

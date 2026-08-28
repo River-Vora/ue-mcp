@@ -151,4 +151,11 @@ private:
 	// #911: wrap UEditorActorSubsystem::ConvertActors for Brush to StaticMesh,
 	// with the safety checks that operation needs because it destroys its input.
 	static TSharedPtr<FJsonValue> ConvertBrushesToStaticMesh(const TSharedPtr<FJsonObject>& Params);
+	// #946: per-slot COMPONENT material overrides on placed actors, which is a
+	// different thing from the mesh asset's own slots.
+	static TSharedPtr<FJsonValue> SetComponentMaterials(const TSharedPtr<FJsonObject>& Params);
+	// #956: a verification subject that cannot be saved into the map.
+	static TSharedPtr<FJsonValue> SpawnTransientActor(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> DestroyTransientActor(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> ListTransientActors(const TSharedPtr<FJsonObject>& Params);
 };

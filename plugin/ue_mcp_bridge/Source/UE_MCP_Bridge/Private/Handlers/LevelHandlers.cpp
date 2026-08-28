@@ -191,6 +191,13 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// #911: BSP to StaticMesh. Generating meshes for hundreds of brushes takes
 	// far longer than the default handler timeout.
 	Registry.RegisterHandlerWithTimeout(TEXT("convert_brushes_to_static_mesh"), &ConvertBrushesToStaticMesh, 600.0f);
+	// #946: component-level material overrides on placed actors.
+	Registry.RegisterHandlerWithTimeout(TEXT("set_component_materials"), &SetComponentMaterials, 300.0f);
+	// #956: a transient verification subject, and the two actions that keep it
+	// from being left behind.
+	Registry.RegisterHandler(TEXT("spawn_transient_actor"), &SpawnTransientActor);
+	Registry.RegisterHandler(TEXT("destroy_transient_actor"), &DestroyTransientActor);
+	Registry.RegisterHandler(TEXT("list_transient_actors"), &ListTransientActors);
 }
 
 TSharedPtr<FJsonValue> FLevelHandlers::GetOutliner(const TSharedPtr<FJsonObject>& Params)
@@ -3158,25 +3165,56 @@ TSharedPtr<FJsonValue> FLevelHandlers::SpawnSkeletalMeshActor(const TSharedPtr<F
 	if (!Actor) return MCPError(TEXT("Failed to spawn SkeletalMeshActor"));
 	if (!Label.IsEmpty()) Actor->SetActorLabel(Label);
 
+	// #946: per-slot COMPONENT material overrides, reported rather than
+	// applied silently. These write the component's OverrideMaterials, which
+	// is a different thing from the mesh ASSET's own slots: the asset is
+	// untouched here. For an actor that is already placed, or to apply one
+	// material to every slot, use level(set_component_materials).
+	TArray<TSharedPtr<FJsonValue>> MaterialResults;
+	int32 FailedMaterials = 0;
 	USkeletalMeshComponent* Comp = Actor->GetSkeletalMeshComponent();
 	if (Comp)
 	{
 		Comp->SetSkeletalMeshAsset(Mesh);
 
-		// Optional per-slot material overrides.
 		const TArray<TSharedPtr<FJsonValue>>* Mats = nullptr;
 		if (Params->TryGetArrayField(TEXT("materials"), Mats) && Mats)
 		{
+			const int32 SlotCount = Comp->GetNumMaterials();
 			for (int32 i = 0; i < Mats->Num(); ++i)
 			{
 				FString MatPath;
-				if ((*Mats)[i].IsValid() && (*Mats)[i]->TryGetString(MatPath) && !MatPath.IsEmpty())
+				const bool bHasPath =
+					(*Mats)[i].IsValid() && (*Mats)[i]->TryGetString(MatPath) && !MatPath.IsEmpty();
+				if (!bHasPath) continue;
+
+				TSharedPtr<FJsonObject> MatRow = MakeShared<FJsonObject>();
+				MatRow->SetNumberField(TEXT("slotIndex"), i);
+				MatRow->SetStringField(TEXT("materialPath"), MatPath);
+
+				// A slot index past the end, or a path that does not load,
+				// used to be dropped on the floor. That reads as a successful
+				// assignment that never happened.
+				if (i >= SlotCount)
 				{
-					if (UMaterialInterface* Mat = LoadAssetByPath<UMaterialInterface>(MatPath))
-					{
-						Comp->SetMaterial(i, Mat);
-					}
+					MatRow->SetBoolField(TEXT("ok"), false);
+					MatRow->SetStringField(TEXT("error"), FString::Printf(
+						TEXT("slot %d is past the mesh's %d material slots"), i, SlotCount));
+					++FailedMaterials;
 				}
+				else if (UMaterialInterface* Mat = LoadAssetByPath<UMaterialInterface>(MatPath))
+				{
+					Comp->SetMaterial(i, Mat);
+					MatRow->SetBoolField(TEXT("ok"), true);
+					MatRow->SetStringField(TEXT("source"), TEXT("componentOverride"));
+				}
+				else
+				{
+					MatRow->SetBoolField(TEXT("ok"), false);
+					MatRow->SetStringField(TEXT("error"), TEXT("material not found"));
+					++FailedMaterials;
+				}
+				MaterialResults.Add(MakeShared<FJsonValueObject>(MatRow));
 			}
 		}
 
@@ -3210,9 +3248,18 @@ TSharedPtr<FJsonValue> FLevelHandlers::SpawnSkeletalMeshActor(const TSharedPtr<F
 
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
+	Result->SetBoolField(TEXT("success"), FailedMaterials == 0);
+	if (FailedMaterials > 0)
+	{
+		Result->SetStringField(TEXT("error"), FString::Printf(
+			TEXT("The actor was spawned but %d material override(s) did not apply; see materials[]."),
+			FailedMaterials));
+	}
 	Result->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
 	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("skeletalMesh"), Mesh->GetPathName());
+	Result->SetNumberField(TEXT("materialSlotCount"), Comp ? Comp->GetNumMaterials() : 0);
+	Result->SetArrayField(TEXT("materials"), MaterialResults);
 	Result->SetObjectField(TEXT("location"), MCPVec3ToJsonObject(Loc));
 	Result->SetObjectField(TEXT("boxExtent"), MCPVec3ToJsonObject(BoxExtent));
 	TSharedPtr<FJsonObject> Rb = MakeShared<FJsonObject>();

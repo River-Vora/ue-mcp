@@ -78,6 +78,9 @@ const MUTATE_VERBS: ReadonlySet<string> = new Set<string>([
   "toggle", "reactivate", "reorder", "wrap", "sculpt", "paint", "snap", "aim",
   "undo", "redo", "purge", "begin", "end", "lock", "unlock", "drop", "retarget",
   "install", "uninstall", "restore", "revert", "activate", "deactivate",
+  // "destroy" is what the engine calls deleting an actor, and the asset
+  // lexicon never needed it because assets are deleted rather than destroyed.
+  "destroy",
   "trigger", "emit", "send", "post", "publish", "upload", "convert", "promote",
   "mark", "dirty", "refresh", "trim", "crop", "resize", "rotate", "translate",
   "transform", "split", "merge", "patch", "seek", "mute", "unmute",

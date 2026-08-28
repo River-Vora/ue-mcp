@@ -28,6 +28,7 @@
 #include "LevelHandlers.h"
 
 #include "Components/ActorComponent.h"
+#include "Components/MeshComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/SplineComponent.h"
 #include "Dom/JsonObject.h"
@@ -40,6 +41,7 @@
 #include "HandlerQuery.h"
 #include "HandlerRegistry.h"
 #include "HandlerUtils.h"
+#include "Materials/MaterialInterface.h"
 #include "ScopedTransaction.h"
 
 namespace
@@ -1181,6 +1183,239 @@ TSharedPtr<FJsonValue> FLevelHandlers::SpawnActorsBatch(const TSharedPtr<FJsonOb
 		MCPSetCreated(Result);
 		Result->SetStringField(TEXT("saveNote"),
 			TEXT("The level is left dirty and is NOT saved. Call level(save) when you are done."));
+	}
+	return MCPResult(Result);
+}
+
+// ---------------------------------------------------------------------------
+// set_component_materials (#946)
+//
+// material(build_material) writes the ASSET's material slots. A placed actor
+// usually needs the other thing: a per-slot COMPONENT override, which is what
+// the details panel edits and what SetMaterial writes into OverrideMaterials.
+// There was no action for that. set_actor_material does one slot, on whichever
+// primitive component it happens to find first, so dressing a placed skeletal
+// mesh meant a Python loop over get_num_materials().
+// ---------------------------------------------------------------------------
+TSharedPtr<FJsonValue> FLevelHandlers::SetComponentMaterials(const TSharedPtr<FJsonObject>& Params)
+{
+	MCP_CHECK_GAME_THREAD();
+	REQUIRE_EDITOR_WORLD(World);
+
+	FMCPBatchSelector Selector;
+	if (auto Err = MCPBatchReadSelector(Params, Selector)) return Err;
+	if (!Selector.bAny)
+	{
+		return MCPError(TEXT("Pass at least one selector: actorLabels, labelPrefix, labelContains, tag, classFilter, folderPath or folderPathPrefix"));
+	}
+
+	const FString ComponentName = OptionalString(Params, TEXT("componentName"));
+	const bool bDryRun = OptionalBool(Params, TEXT("dryRun"), false);
+	const bool bClearOverrides = OptionalBool(Params, TEXT("clearOverrides"), false);
+	const FString SingleMaterialPath = OptionalString(Params, TEXT("material"));
+
+	const TArray<TSharedPtr<FJsonValue>>* MaterialValues = nullptr;
+	const bool bHasMaterialList = Params->TryGetArrayField(TEXT("materials"), MaterialValues) && MaterialValues;
+
+	const int32 ModeCount = (bHasMaterialList ? 1 : 0) + (SingleMaterialPath.IsEmpty() ? 0 : 1) + (bClearOverrides ? 1 : 0);
+	if (ModeCount == 0)
+	{
+		return MCPError(TEXT("Pass 'materials' (per-slot paths), 'material' (one path applied to every slot) or clearOverrides=true"));
+	}
+	if (ModeCount > 1)
+	{
+		return MCPError(TEXT("Pass only ONE of 'materials', 'material' or clearOverrides; together they would fight over the same slots"));
+	}
+
+	// Resolve every requested material up front. A path that does not load is
+	// a caller error, and finding that out after writing half the slots on
+	// half the actors is not a useful place to find it out.
+	TArray<UMaterialInterface*> SlotMaterials;
+	if (bHasMaterialList)
+	{
+		for (int32 Index = 0; Index < MaterialValues->Num(); ++Index)
+		{
+			const TSharedPtr<FJsonValue>& Entry = (*MaterialValues)[Index];
+			FString Path;
+			const bool bIsClear = !Entry.IsValid() || Entry->Type == EJson::Null ||
+				(Entry->TryGetString(Path) && Path.IsEmpty());
+			if (bIsClear)
+			{
+				// An explicit null clears that one slot's override, so a caller
+				// can reset slot 2 without touching the rest.
+				SlotMaterials.Add(nullptr);
+				continue;
+			}
+			UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, *Path);
+			if (!Material)
+			{
+				return MCPError(FString::Printf(
+					TEXT("Material not found for 'materials[%d]': %s"), Index, *Path));
+			}
+			SlotMaterials.Add(Material);
+		}
+	}
+	UMaterialInterface* SingleMaterial = nullptr;
+	if (!SingleMaterialPath.IsEmpty())
+	{
+		SingleMaterial = LoadObject<UMaterialInterface>(nullptr, *SingleMaterialPath);
+		if (!SingleMaterial)
+		{
+			return MCPError(FString::Printf(TEXT("Material not found: %s"), *SingleMaterialPath));
+		}
+	}
+
+	TArray<AActor*> Actors;
+	MCPBatchCollectActors(World, Selector, Actors);
+	if (Actors.Num() > MCPBatchMaxActors)
+	{
+		return MCPError(FString::Printf(
+			TEXT("The selector matched %d actors, over the maximum of %d. Narrow it."),
+			Actors.Num(), MCPBatchMaxActors));
+	}
+
+	auto Result = MCPSuccess();
+	Result->SetBoolField(TEXT("dryRun"), bDryRun);
+	Result->SetNumberField(TEXT("matchedActors"), Actors.Num());
+	MCPNoteLoadedOnlyEnumeration(World, Result);
+	{
+		const TArray<FString> Missing = MCPBatchMissingLabels(Selector, Actors);
+		if (Missing.Num() > 0)
+		{
+			Result->SetArrayField(TEXT("missingLabels"), MCPStringListToJson(Missing));
+		}
+	}
+
+	TUniquePtr<FScopedTransaction> Transaction;
+	if (!bDryRun && !Actors.IsEmpty())
+	{
+		Transaction = MakeUnique<FScopedTransaction>(FText::FromString(
+			OptionalString(Params, TEXT("transactionLabel"), TEXT("MCP set component materials"))));
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Rows;
+	int32 Updated = 0;
+	int32 WithoutComponent = 0;
+	int32 SlotWrites = 0;
+	int32 OutOfRange = 0;
+
+	for (AActor* Actor : Actors)
+	{
+		TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+		Row->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
+
+		UMeshComponent* MeshComponent = nullptr;
+		if (ComponentName.IsEmpty())
+		{
+			MeshComponent = Actor->FindComponentByClass<UMeshComponent>();
+		}
+		else
+		{
+			MeshComponent = Cast<UMeshComponent>(MCPBatchFindComponent(Actor, ComponentName));
+		}
+		if (!MeshComponent)
+		{
+			++WithoutComponent;
+			Row->SetBoolField(TEXT("ok"), false);
+			Row->SetStringField(TEXT("status"), TEXT("no_mesh_component"));
+			if (Rows.Num() < MCPBatchMaxResultRows) Rows.Add(MakeShared<FJsonValueObject>(Row));
+			continue;
+		}
+		Row->SetStringField(TEXT("componentName"), MeshComponent->GetName());
+		Row->SetStringField(TEXT("componentClass"), MeshComponent->GetClass()->GetName());
+
+		const int32 SlotCount = MeshComponent->GetNumMaterials();
+		Row->SetNumberField(TEXT("slotCount"), SlotCount);
+		const TArray<FName> SlotNames = MeshComponent->GetMaterialSlotNames();
+
+		if (bHasMaterialList && SlotMaterials.Num() > SlotCount)
+		{
+			// Extra entries would silently do nothing, which reads as a
+			// successful assignment that did not happen.
+			++OutOfRange;
+			Row->SetBoolField(TEXT("ok"), false);
+			Row->SetStringField(TEXT("status"), TEXT("too_many_materials"));
+			Row->SetStringField(TEXT("error"), FString::Printf(
+				TEXT("%d materials given but the component has %d slots"), SlotMaterials.Num(), SlotCount));
+			if (Rows.Num() < MCPBatchMaxResultRows) Rows.Add(MakeShared<FJsonValueObject>(Row));
+			continue;
+		}
+
+		TArray<TSharedPtr<FJsonValue>> SlotRows;
+		const int32 WriteCount = bHasMaterialList ? SlotMaterials.Num() : SlotCount;
+		for (int32 SlotIndex = 0; SlotIndex < WriteCount; ++SlotIndex)
+		{
+			UMaterialInterface* Before = MeshComponent->GetMaterial(SlotIndex);
+			const bool bWasOverride =
+				MeshComponent->OverrideMaterials.IsValidIndex(SlotIndex) &&
+				MeshComponent->OverrideMaterials[SlotIndex] != nullptr;
+
+			UMaterialInterface* Desired = nullptr;
+			if (bHasMaterialList) Desired = SlotMaterials[SlotIndex];
+			else if (SingleMaterial) Desired = SingleMaterial;
+
+			if (!bDryRun)
+			{
+				MeshComponent->Modify();
+				// A null override is how the asset's own slot shows through
+				// again, which is the inverse of what this action does and is
+				// otherwise unreachable.
+				MeshComponent->SetMaterial(SlotIndex, bClearOverrides ? nullptr : Desired);
+				++SlotWrites;
+			}
+
+			UMaterialInterface* After = bDryRun ? Before : MeshComponent->GetMaterial(SlotIndex);
+			const bool bIsOverride = bDryRun
+				? bWasOverride
+				: (MeshComponent->OverrideMaterials.IsValidIndex(SlotIndex) &&
+				   MeshComponent->OverrideMaterials[SlotIndex] != nullptr);
+
+			TSharedPtr<FJsonObject> SlotRow = MakeShared<FJsonObject>();
+			SlotRow->SetNumberField(TEXT("slotIndex"), SlotIndex);
+			SlotRow->SetStringField(TEXT("slotName"),
+				SlotNames.IsValidIndex(SlotIndex) ? SlotNames[SlotIndex].ToString() : FString());
+			SlotRow->SetStringField(TEXT("previousMaterialPath"), Before ? Before->GetPathName() : FString());
+			SlotRow->SetStringField(TEXT("previousSource"),
+				bWasOverride ? TEXT("componentOverride") : (Before ? TEXT("meshDefault") : TEXT("none")));
+			SlotRow->SetStringField(TEXT("materialPath"), After ? After->GetPathName() : FString());
+			// Read back rather than echoing: the difference between "the
+			// component now overrides this slot" and "the asset happens to
+			// have that material" is the whole distinction #946 is about.
+			SlotRow->SetStringField(TEXT("source"),
+				bIsOverride ? TEXT("componentOverride") : (After ? TEXT("meshDefault") : TEXT("none")));
+			SlotRows.Add(MakeShared<FJsonValueObject>(SlotRow));
+		}
+
+		if (!bDryRun)
+		{
+			MeshComponent->MarkRenderStateDirty();
+			Actor->MarkPackageDirty();
+			++Updated;
+		}
+		Row->SetBoolField(TEXT("ok"), true);
+		Row->SetStringField(TEXT("status"), bDryRun ? TEXT("would_write") : TEXT("written"));
+		Row->SetArrayField(TEXT("slots"), SlotRows);
+		if (Rows.Num() < MCPBatchMaxResultRows) Rows.Add(MakeShared<FJsonValueObject>(Row));
+	}
+
+	Result->SetBoolField(TEXT("success"), OutOfRange == 0);
+	if (OutOfRange > 0)
+	{
+		Result->SetStringField(TEXT("error"), FString::Printf(
+			TEXT("%d actor(s) were given more materials than their component has slots; see results[]."), OutOfRange));
+	}
+	Result->SetNumberField(bDryRun ? TEXT("wouldUpdate") : TEXT("updated"),
+		bDryRun ? Actors.Num() - WithoutComponent : Updated);
+	Result->SetNumberField(TEXT("slotWrites"), SlotWrites);
+	Result->SetNumberField(TEXT("actorsWithoutMeshComponent"), WithoutComponent);
+	Result->SetNumberField(TEXT("returnedResults"), Rows.Num());
+	Result->SetBoolField(TEXT("resultsTruncated"), Rows.Num() < Actors.Num());
+	Result->SetArrayField(TEXT("results"), Rows);
+	if (!bDryRun && Updated > 0)
+	{
+		MCPSetUpdated(Result);
+		Result->SetStringField(TEXT("saveNote"),
+			TEXT("These are COMPONENT overrides on placed actors, so the LEVEL is dirty and is NOT saved. The mesh ASSET is untouched; use material(build_material) or asset(set_property) to write the asset's own slots."));
 	}
 	return MCPResult(Result);
 }
