@@ -13,6 +13,8 @@
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "EditorAssetLibrary.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
 
 // Engine API tiers. One macro per supported minor version, so a gate reads the
 // same everywhere and nobody writes a second scheme. The supported range is
@@ -136,6 +138,67 @@ inline TSharedPtr<FJsonValue> MCPCheckAssetExists(
 	return TSharedPtr<FJsonValue>();
 }
 
+// -- Asset path forms ---------------------------------------------------------
+
+/** The forms one asset path can take. `/Game/Foo/DT_Thing` names the package
+ *  and `/Game/Foo/DT_Thing.DT_Thing` names the asset inside it; both are
+ *  legitimate ways to address the same asset, asset(search) reports the first
+ *  one, and #957 was a set of actions that accepted only the second. Deriving
+ *  both forms once, here, is what lets every action accept either and lets a
+ *  miss report which form it actually tried. */
+struct FMCPAssetPathForms
+{
+	/** Exactly what the caller sent, untouched. */
+	FString Input;
+	/** `/Game/Foo/DT_Thing` */
+	FString PackagePath;
+	/** `/Game/Foo/DT_Thing.DT_Thing` */
+	FString ObjectPath;
+	/** `DT_Thing` */
+	FString AssetName;
+	/** True when the caller already supplied the object name. */
+	bool bInputCarriedObjectName = false;
+};
+
+/** Derive every path form from whatever the caller supplied. Accepts the
+ *  export-text form (`DataTable'/Game/Foo/DT.DT'`), the object path and the
+ *  bare package path, and tolerates surrounding whitespace. */
+inline FMCPAssetPathForms MCPAssetPathForms(const FString& AssetPath)
+{
+	FMCPAssetPathForms Forms;
+	Forms.Input = AssetPath;
+
+	FString Normalized = FPackageName::ExportTextPathToObjectPath(AssetPath);
+	Normalized.TrimStartAndEndInline();
+	if (Normalized.IsEmpty()) return Forms;
+
+	Forms.PackagePath = FPackageName::ObjectPathToPackageName(Normalized);
+	// ObjectPathToPackageName is the identity on a bare package path, so a
+	// longer input is the only thing that can have carried an object name.
+	Forms.bInputCarriedObjectName = Normalized.Len() > Forms.PackagePath.Len();
+
+	if (Forms.bInputCarriedObjectName)
+	{
+		Forms.ObjectPath = Normalized;
+		Forms.AssetName = FPackageName::ObjectPathToObjectName(Normalized);
+	}
+	else
+	{
+		// A package holds its asset under the package's own leaf name. This is
+		// the convention every content asset follows and the form
+		// UEditorAssetLibrary::LoadAsset builds internally.
+		if (!Forms.PackagePath.Split(TEXT("/"), nullptr, &Forms.AssetName,
+			ESearchCase::CaseSensitive, ESearchDir::FromEnd))
+		{
+			Forms.AssetName = Forms.PackagePath;
+		}
+		Forms.ObjectPath = Forms.AssetName.IsEmpty()
+			? Forms.PackagePath
+			: Forms.PackagePath + TEXT(".") + Forms.AssetName;
+	}
+	return Forms;
+}
+
 /** Load the asset at `AssetPath`, the way asset(read) does.
  *
  *  UEditorAssetLibrary::LoadAsset is the usual entry point, but it validates
@@ -154,24 +217,199 @@ inline UObject* MCPLoadAssetObject(const FString& AssetPath)
 {
 	if (AssetPath.IsEmpty()) return nullptr;
 
+	const FMCPAssetPathForms Forms = MCPAssetPathForms(AssetPath);
+	if (Forms.ObjectPath.IsEmpty()) return nullptr;
+
 	// An object already in memory is the answer, and running a path validator
 	// over it can only turn a good answer into a null and an error log. The
-	// object name is required for this step: a path with no "." names a
-	// package, and returning the UPackage in place of the asset would be a
-	// worse answer than not looking.
-	if (AssetPath.Contains(TEXT(".")))
+	// object path is what this step needs: a path with no "." names a package,
+	// and returning the UPackage in place of the asset would be a worse answer
+	// than not looking, so the derived object path stands in for it.
+	if (UObject* Loaded = FindObject<UObject>(nullptr, *Forms.ObjectPath))
 	{
-		if (UObject* Loaded = FindObject<UObject>(nullptr, *AssetPath))
-		{
-			if (!Loaded->IsA<UPackage>()) return Loaded;
-		}
+		if (!Loaded->IsA<UPackage>()) return Loaded;
 	}
 
 	if (UObject* ViaEditorLibrary = UEditorAssetLibrary::LoadAsset(AssetPath))
 	{
 		return ViaEditorLibrary;
 	}
-	return LoadObject<UObject>(nullptr, *AssetPath);
+
+	// #957: the caller's own form is tried first so nothing that used to work
+	// stops working, and the derived object path second. A bare package path
+	// for an asset that is not loaded yet is the case that used to answer
+	// "Asset not found" for an asset asset(search) had just reported by that
+	// exact string, because the load stopped at a form the loader would not
+	// resolve on its own.
+	if (UObject* ViaInput = LoadObject<UObject>(nullptr, *AssetPath))
+	{
+		if (!ViaInput->IsA<UPackage>()) return ViaInput;
+	}
+	if (!Forms.bInputCarriedObjectName)
+	{
+		if (UObject* ViaObjectPath = LoadObject<UObject>(nullptr, *Forms.ObjectPath))
+		{
+			if (!ViaObjectPath->IsA<UPackage>()) return ViaObjectPath;
+		}
+	}
+	return nullptr;
+}
+
+/** Look an asset path up in the Asset Registry without loading anything.
+ *  Tries the exact object path first, then any asset the registry holds in
+ *  that package, which is what distinguishes "the package has an asset under
+ *  a different name" from "there is nothing there at all". */
+inline FAssetData MCPFindAssetDataForPath(const FMCPAssetPathForms& Forms)
+{
+	if (Forms.PackagePath.IsEmpty()) return FAssetData();
+
+	FAssetRegistryModule* Module = FModuleManager::GetModulePtr<FAssetRegistryModule>(TEXT("AssetRegistry"));
+	if (!Module) return FAssetData();
+	IAssetRegistry& Registry = Module->Get();
+
+	if (!Forms.ObjectPath.IsEmpty())
+	{
+		const FAssetData Exact = Registry.GetAssetByObjectPath(FSoftObjectPath(Forms.ObjectPath));
+		if (Exact.IsValid()) return Exact;
+	}
+
+	TArray<FAssetData> InPackage;
+	Registry.GetAssetsByPackageName(FName(*Forms.PackagePath), InPackage);
+	for (const FAssetData& Candidate : InPackage)
+	{
+		if (Candidate.IsValid()) return Candidate;
+	}
+	return FAssetData();
+}
+
+/** The answer for a path MCPLoadAssetObject could not resolve.
+ *
+ *  A bare "Asset not found" is the same sentence for a path that names nothing,
+ *  a path whose shape the loader rejects, and an asset whose package will not
+ *  open, and #957 and #913 were both reported as missing assets that were not
+ *  missing at all. This names the forms that were tried, says whether the
+ *  package is on disk, reports what the Asset Registry knows without loading
+ *  anything, and, when the registry holds the asset under a different object
+ *  path, names the form that would have worked. */
+inline TSharedPtr<FJsonValue> MCPAssetNotFoundError(const FString& AssetPath, const FString& Context = FString())
+{
+	const FMCPAssetPathForms Forms = MCPAssetPathForms(AssetPath);
+	const FAssetData Found = MCPFindAssetDataForPath(Forms);
+	const bool bPackageOnDisk = !Forms.PackagePath.IsEmpty()
+		&& FPackageName::IsValidLongPackageName(Forms.PackagePath)
+		&& FPackageName::DoesPackageExist(Forms.PackagePath);
+
+	// Context, when given, names what the path was supposed to be, so the
+	// sentence reads "Source asset not found: ..." rather than the generic form.
+	const FString Prefix = FString::Printf(
+		TEXT("%s not found: '%s'."), Context.IsEmpty() ? TEXT("Asset") : *Context, *AssetPath);
+
+	FString RegistryObjectPath;
+	FString RegistryClass;
+	if (Found.IsValid())
+	{
+		RegistryObjectPath = Found.GetSoftObjectPath().ToString();
+		RegistryClass = Found.AssetClassPath.GetAssetName().ToString();
+	}
+
+	FString Reason;
+	FString Suggestion;
+	FString Message;
+	if (Found.IsValid() && !RegistryObjectPath.Equals(Forms.ObjectPath, ESearchCase::IgnoreCase))
+	{
+		// The package holds an asset, just not under the name the path form
+		// implies. Naming it is the difference between a dead end and a fix.
+		Reason = TEXT("pathShape");
+		Suggestion = RegistryObjectPath;
+		Message = FString::Printf(
+			TEXT("%s The Asset Registry has '%s' (%s) in package '%s'. Pass that object path."),
+			*Prefix, *RegistryObjectPath, *RegistryClass, *Forms.PackagePath);
+	}
+	else if (Found.IsValid())
+	{
+		Reason = TEXT("loadFailed");
+		Message = FString::Printf(
+			TEXT("%s The Asset Registry lists '%s' (%s), so the asset exists but the package would not open. ")
+			TEXT("It may be corrupt, or reference a class the editor cannot resolve."),
+			*Prefix, *RegistryObjectPath, *RegistryClass);
+	}
+	else if (bPackageOnDisk)
+	{
+		Reason = TEXT("notIndexed");
+		Suggestion = Forms.ObjectPath;
+		Message = FString::Printf(
+			TEXT("%s A package file exists at '%s' but the Asset Registry holds no asset in it, ")
+			TEXT("so it may still be scanning. Tried '%s' and '%s'."),
+			*Prefix, *Forms.PackagePath, *AssetPath, *Forms.ObjectPath);
+	}
+	else
+	{
+		Reason = TEXT("missing");
+		Message = FString::Printf(
+			TEXT("%s No package exists at '%s' and the Asset Registry has no entry for it. ")
+			TEXT("Tried '%s' and '%s'."),
+			*Prefix, *Forms.PackagePath, *AssetPath, *Forms.ObjectPath);
+	}
+
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField(TEXT("success"), false);
+	Obj->SetStringField(TEXT("error"), Message);
+	Obj->SetStringField(TEXT("assetPath"), AssetPath);
+	Obj->SetStringField(TEXT("packagePath"), Forms.PackagePath);
+	Obj->SetStringField(TEXT("objectPath"), Forms.ObjectPath);
+	Obj->SetBoolField(TEXT("packageExistsOnDisk"), bPackageOnDisk);
+	Obj->SetBoolField(TEXT("registryMatched"), Found.IsValid());
+	Obj->SetStringField(TEXT("reason"), Reason);
+	if (Found.IsValid())
+	{
+		Obj->SetStringField(TEXT("registryObjectPath"), RegistryObjectPath);
+		Obj->SetStringField(TEXT("registryClass"), RegistryClass);
+	}
+	if (!Suggestion.IsEmpty())
+	{
+		Obj->SetStringField(TEXT("suggestedPath"), Suggestion);
+	}
+	return MakeShared<FJsonValueObject>(Obj);
+}
+
+/** Resolve an asset path or hand back the diagnostic error. Returns nullptr
+ *  with OutError set on a miss, so a handler reads as
+ *  `if (!Asset) return OutError;`. */
+inline UObject* MCPRequireAssetObject(
+	const FString& AssetPath,
+	TSharedPtr<FJsonValue>& OutError,
+	const FString& Context = FString())
+{
+	UObject* Asset = MCPLoadAssetObject(AssetPath);
+	if (!Asset)
+	{
+		OutError = MCPAssetNotFoundError(AssetPath, Context);
+	}
+	return Asset;
+}
+
+/** The answer for a path that resolved to something of the wrong type.
+ *  Distinct from a miss on purpose: "not a DataTable" used to be the sentence
+ *  a caller saw when the path resolved to nothing at all. */
+inline TSharedPtr<FJsonValue> MCPAssetWrongTypeError(
+	const FString& AssetPath,
+	const UObject* Found,
+	const TCHAR* ExpectedType)
+{
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField(TEXT("success"), false);
+	Obj->SetStringField(TEXT("error"), FString::Printf(
+		TEXT("Asset is not a %s: '%s' (found a %s)."),
+		ExpectedType, *AssetPath,
+		Found ? *Found->GetClass()->GetName() : TEXT("null")));
+	Obj->SetStringField(TEXT("assetPath"), AssetPath);
+	Obj->SetStringField(TEXT("expectedClass"), ExpectedType);
+	if (Found)
+	{
+		Obj->SetStringField(TEXT("foundClass"), Found->GetClass()->GetName());
+		Obj->SetStringField(TEXT("objectPath"), Found->GetPathName());
+	}
+	return MakeShared<FJsonValueObject>(Obj);
 }
 
 /** Protected mount guardrail. Engine-shipped content (/Engine/, /Script/,
@@ -1162,27 +1400,36 @@ inline UWorld* ResolveWorldFromParams(const TSharedPtr<FJsonObject>& Params, con
 	UWorld* WorldVar = GetEditorWorld(); \
 	if (!WorldVar) return MCPError(TEXT("Editor world not available"));
 
-/** Load an asset by path with fallback to ObjectPath format.  Returns nullptr if not found. */
+/** Load an asset of a known type by path. Returns nullptr when the path names
+ *  nothing, and also when it names something of another type.
+ *
+ *  #957/#913: this used to run its own two-step resolution, one step short of
+ *  the one asset(read) uses, so a short package path for an asset that was not
+ *  loaded yet answered nullptr here and resolved fine there. It now defers to
+ *  MCPLoadAssetObject so there is exactly one answer to "what does this path
+ *  name" in the whole plugin. */
 template <typename T>
 T* LoadAssetByPath(const FString& AssetPath)
 {
-	T* Asset = LoadObject<T>(nullptr, *AssetPath);
-	if (Asset) return Asset;
+	return Cast<T>(MCPLoadAssetObject(AssetPath));
+}
 
-	// Try ObjectPath format: "/Game/Foo/Bar" → "/Game/Foo/Bar.Bar"
-	if (!AssetPath.Contains(TEXT(".")))
+/** The answer for a typed load that came back empty: names the class that was
+ *  found when the path resolved to the wrong thing, and falls through to the
+ *  full path diagnostic when it resolved to nothing. */
+inline TSharedPtr<FJsonValue> MCPAssetLoadError(const FString& AssetPath, const TCHAR* ExpectedType)
+{
+	if (UObject* Found = MCPLoadAssetObject(AssetPath))
 	{
-		FString AssetName;
-		AssetPath.Split(TEXT("/"), nullptr, &AssetName, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
-		Asset = LoadObject<T>(nullptr, *(AssetPath + TEXT(".") + AssetName));
+		return MCPAssetWrongTypeError(AssetPath, Found, ExpectedType);
 	}
-	return Asset;
+	return MCPAssetNotFoundError(AssetPath);
 }
 
 /** Load an asset or return an error response.  Assigns to OutVar. */
 #define REQUIRE_ASSET(Type, OutVar, AssetPath) \
 	Type* OutVar = LoadAssetByPath<Type>(AssetPath); \
-	if (!OutVar) return MCPError(FString::Printf(TEXT("%s not found: %s"), TEXT(#Type), *AssetPath));
+	if (!OutVar) return MCPAssetLoadError(AssetPath, TEXT(#Type));
 
 /** Export a property's value as text, honouring C-style fixed arrays.
  *

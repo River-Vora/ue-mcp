@@ -14,6 +14,7 @@
 #include "Engine/Level.h"
 #include "Engine/LevelScriptBlueprint.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Editor.h"
 #include "FileHelpers.h"
@@ -151,6 +152,9 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("delete_asset"), &DeleteAsset);
 	Registry.RegisterHandler(TEXT("delete_asset_batch"), &DeleteAssetBatch);
 	Registry.RegisterHandler(TEXT("bulk_rename_assets"), &BulkRename);
+	// #908: bounded redirector clean-up after a move. Timeout raised because a
+	// fix-up loads and resaves every referencing package.
+	Registry.RegisterHandlerWithTimeout(TEXT("fixup_redirectors"), &FixupRedirectors, 300.0f);
 	Registry.RegisterHandler(TEXT("create_data_asset"), &CreateDataAsset);
 	// Bounded batch upsert plus its rollback inverse. A 500-item batch that
 	// preflights every item on a transient copy before touching a package can
@@ -161,6 +165,9 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// #726: generic create-any-concrete-UObject-class asset (physical materials,
 	// curves, settings objects) - not restricted to UDataAsset subclasses.
 	Registry.RegisterHandler(TEXT("create_asset_by_class"), &CreateAssetByClass);
+	// #975: a named subobject inside an existing asset package, which
+	// create_asset_by_class cannot make because it always creates a package.
+	Registry.RegisterHandler(TEXT("create_subobject"), &CreateSubobject);
 	Registry.RegisterHandler(TEXT("save_asset"), &SaveAsset);
 	Registry.RegisterHandler(TEXT("save_all_dirty"), &SaveAllDirty);
 	Registry.RegisterHandler(TEXT("list_textures"), &ListTextures);
@@ -242,6 +249,7 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("set_stringtable_entry"), &SetStringTableEntry);
 	Registry.RegisterHandler(TEXT("remove_stringtable_entry"), &RemoveStringTableEntry);
 	Registry.RegisterHandler(TEXT("import_stringtable"), &ImportStringTable);
+	Registry.RegisterHandler(TEXT("import_stringtable_csv"), &ImportStringTableCsv);
 
 	// v0.7.8 stubs - FTS5-backed asset search
 	Registry.RegisterHandler(TEXT("search_assets_fts"), &SearchAssetsFTS);
@@ -691,14 +699,21 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReadAsset(const TSharedPtr<FJsonObject>& 
 // own properties (ParentClass, etc.) are rarely what a caller wants. Resolve to
 // the generated-class CDO so asset property reads/writes hit the real defaults
 // and can author Instanced sub-object arrays. Non-Blueprint assets pass through.
-static UObject* MCPResolveAssetToCDO(UObject* Asset)
+//
+// OutBlueprint carries the wrapper back out, because a write to the CDO has
+// bookkeeping the CDO alone cannot do: the package to save is the Blueprint's,
+// and the compiler's own record of the variable's default has to be reconciled
+// with the value just written (#931).
+static UObject* MCPResolveAssetToCDO(UObject* Asset, UBlueprint** OutBlueprint = nullptr)
 {
+	if (OutBlueprint) *OutBlueprint = nullptr;
 	if (UBlueprint* BP = Cast<UBlueprint>(Asset))
 	{
 		if (UClass* GenClass = BP->GeneratedClass)
 		{
 			if (UObject* CDO = GenClass->GetDefaultObject())
 			{
+				if (OutBlueprint) *OutBlueprint = BP;
 				return CDO;
 			}
 		}
@@ -706,16 +721,146 @@ static UObject* MCPResolveAssetToCDO(UObject* Asset)
 	return Asset;
 }
 
+// #931: a property write marked the package dirty and stopped there, so it read
+// back correctly, survived until the editor closed, and was gone on the next
+// start. A GameplayAbility whose default reverted computed correct values and
+// applied no effect, with nothing pointing at the cause. A write now either
+// reaches the package on disk or says why it did not, and never reports plain
+// success for a change that only exists in memory.
+//
+// Returns true when the package was written. On false, OutReason carries the
+// sentence to hand back to the caller.
+static bool MCPPersistAssetWrite(UObject* Asset, UBlueprint* OwningBlueprint, bool bSave, FString& OutReason)
+{
+	OutReason.Reset();
+	UPackage* Package = Asset ? Asset->GetOutermost() : nullptr;
+	if (!Package)
+	{
+		OutReason = TEXT("The asset has no package, so there is nothing to write.");
+		return false;
+	}
+
+	const FString PackageName = Package->GetName();
+	if (!bSave)
+	{
+		OutReason = FString::Printf(
+			TEXT("save=false was requested, so '%s' is dirty in memory only and the change is lost when the editor closes. ")
+			TEXT("Call asset(save) for it, or repeat the write with save=true."),
+			*PackageName);
+		return false;
+	}
+	if (MCPIsProtectedAssetPath(PackageName))
+	{
+		OutReason = FString::Printf(
+			TEXT("'%s' is on a protected mount, which the bridge never writes to. The change is in memory only."),
+			*PackageName);
+		return false;
+	}
+
+	// A read-only package file is a real and common failure, and asking the
+	// engine to write a file it cannot open is the case #932 reported as a
+	// crash elsewhere. Answer it before the save rather than after.
+	FString PackageFileName;
+	if (FPackageName::DoesPackageExist(PackageName, &PackageFileName)
+		&& IFileManager::Get().IsReadOnly(*PackageFileName))
+	{
+		OutReason = FString::Printf(
+			TEXT("'%s' is read-only on disk. Check it out of source control or clear the read-only flag, then save."),
+			*PackageFileName);
+		return false;
+	}
+
+	// For a Blueprint the package's asset is the UBlueprint; the CDO is one of
+	// its exports and rides along.
+	if (SaveAssetPackage(OwningBlueprint ? static_cast<UObject*>(OwningBlueprint) : Asset))
+	{
+		return true;
+	}
+	OutReason = FString::Printf(
+		TEXT("The editor refused to write '%s'. The output log carries the reason."), *PackageName);
+	return false;
+}
+
+// A CDO write is a genuine package export and survives both the save and a
+// later recompile, but two pieces of editor bookkeeping do not happen on their
+// own, and both read as "my write did not take" (#931).
+//
+// UBlueprintGeneratedClass keeps a post-construct property list that newly
+// spawned instances initialise from, and only MarkBlueprintAsModified rebuilds
+// it. And FBPVariableDescription::DefaultValue, when it is not empty, is
+// replayed onto the CDO by the next full compile AFTER the old CDO's values are
+// copied forward, so a stale string default silently overwrites the value that
+// was just written. Clearing it makes the CDO the single record of the default,
+// which is what the Blueprint editor's own Class Defaults panel does.
+static void MCPNoteBlueprintCDOWrite(UBlueprint* Blueprint, const FString& PropertyPath)
+{
+	if (!Blueprint) return;
+
+	// The root segment is the variable the compiler knows by name. A dotted or
+	// indexed path lands inside that variable's value, and the string default
+	// it would replay covers the whole variable either way.
+	FString RootName = PropertyPath;
+	int32 Cut = INDEX_NONE;
+	if (RootName.FindChar(TEXT('.'), Cut)) RootName = RootName.Left(Cut);
+	if (RootName.FindChar(TEXT('['), Cut)) RootName = RootName.Left(Cut);
+	const FName RootVarName(*RootName);
+
+	FProperty* ChangedProperty = nullptr;
+	if (UClass* GenClass = Blueprint->GeneratedClass)
+	{
+		ChangedProperty = GenClass->FindPropertyByName(RootVarName);
+	}
+
+	for (FBPVariableDescription& Variable : Blueprint->NewVariables)
+	{
+		if (Variable.VarName == RootVarName)
+		{
+			Variable.DefaultValue.Empty();
+			break;
+		}
+	}
+
+	FPropertyChangedEvent ChangeEvent(ChangedProperty, EPropertyChangeType::ValueSet);
+	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint, ChangeEvent);
+}
+
+/** Report where a property write ended up: the package, whether it reached
+ *  disk, and the reason when it did not. A write the caller asked to persist
+ *  and that did not persist is a failure, not a success with a footnote. */
+static void MCPDescribePropertyWritePersistence(
+	TSharedPtr<FJsonObject>& Result,
+	UObject* Asset,
+	const FString& PropertyName,
+	bool bSaveRequested,
+	bool bPersisted,
+	const FString& PersistReason)
+{
+	if (UPackage* Package = Asset ? Asset->GetOutermost() : nullptr)
+	{
+		Result->SetStringField(TEXT("packageName"), Package->GetName());
+		Result->SetBoolField(TEXT("packageDirty"), Package->IsDirty());
+	}
+	Result->SetBoolField(TEXT("persisted"), bPersisted);
+	Result->SetBoolField(TEXT("saved"), bPersisted);
+	if (bPersisted) return;
+
+	Result->SetStringField(TEXT("persistError"), PersistReason);
+	if (bSaveRequested)
+	{
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), FString::Printf(
+			TEXT("Set '%s' in memory but could not persist it: %s"), *PropertyName, *PersistReason));
+	}
+}
+
 TSharedPtr<FJsonValue> FAssetHandlers::ReadAssetProperties(const TSharedPtr<FJsonObject>& Params)
 {
 	FString AssetPath;
 	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
 
-	UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
-	}
+	TSharedPtr<FJsonValue> LoadError;
+	UObject* Asset = MCPRequireAssetObject(AssetPath, LoadError);
+	if (!Asset) return LoadError;
 	Asset = MCPResolveAssetToCDO(Asset); // #568
 
 	FString ValueFormat;
@@ -976,17 +1121,11 @@ TSharedPtr<FJsonValue> FAssetHandlers::DuplicateAsset(const TSharedPtr<FJsonObje
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
 	// #441: DoesAssetExist returns false for some Blueprints in 5.7 even when
-	// the registry/loader can resolve them. Confirm via load-or-load_blueprint
+	// the registry/loader can resolve them. Confirm via the shared resolver
 	// before erroring out so duplicate doesn't bounce off valid paths.
-	UObject* SourceObj = UEditorAssetLibrary::LoadAsset(SourcePath);
-	if (!SourceObj)
-	{
-		SourceObj = LoadObject<UObject>(nullptr, *SourcePath);
-	}
-	if (!SourceObj)
-	{
-		return MCPError(FString::Printf(TEXT("Source asset not found: %s"), *SourcePath));
-	}
+	TSharedPtr<FJsonValue> SourceLoadError;
+	UObject* SourceObj = MCPRequireAssetObject(SourcePath, SourceLoadError, TEXT("Source asset"));
+	if (!SourceObj) return SourceLoadError;
 
 	// Idempotency: if the destination already exists, short-circuit.
 	if (UEditorAssetLibrary::DoesAssetExist(DestPath))
@@ -1148,7 +1287,7 @@ static TSharedPtr<FJsonValue> RenameWorldWithExternals(const FString& SourceAsse
 	Gather(ExtActorsSrc, SrcActors);
 	Gather(ExtObjectsSrc, SrcObjects);
 
-	UObject* World = UEditorAssetLibrary::LoadAsset(SourceAssetPath);
+	UObject* World = MCPLoadAssetObject(SourceAssetPath);
 	if (!World)
 	{
 		return MCPError(FString::Printf(TEXT("Failed to load World asset: %s. No changes made."), *SourceAssetPath));
@@ -1559,7 +1698,7 @@ namespace
 		UAssetEditorSubsystem* AES = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
 		if (!AES) return false;
 
-		UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
+		UObject* Asset = MCPLoadAssetObject(AssetPath);
 		if (!Asset) return false;
 
 		const TArray<IAssetEditorInstance*> Editors = AES->FindEditorsForAsset(Asset);
@@ -1579,7 +1718,7 @@ namespace
 		{
 			if (UAssetEditorSubsystem* AES = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>())
 			{
-				if (UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath))
+				if (UObject* Asset = MCPLoadAssetObject(AssetPath))
 				{
 					Diag.bOpenInEditor = AES->FindEditorsForAsset(Asset).Num() > 0;
 				}
@@ -1602,7 +1741,7 @@ namespace
 		// #601: when there are no editors/on-disk referencers the delete still
 		// fails for non-obvious reasons. Gather the common culprits so callers
 		// get something actionable instead of a bare "unknown".
-		if (UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath))
+		if (UObject* Asset = MCPLoadAssetObject(AssetPath))
 		{
 			// Live (in-memory) references beyond the asset's own package.
 			FReferencerInformationList RefInfo;
@@ -1889,7 +2028,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::BulkRename(const TSharedPtr<FJsonObject>&
 			continue;
 		}
 
-		UObject* Asset = UEditorAssetLibrary::LoadAsset(SourcePath);
+		UObject* Asset = MCPLoadAssetObject(SourcePath);
 		if (!Asset)
 		{
 			Record->SetStringField(TEXT("status"), TEXT("not_found"));
@@ -1946,6 +2085,48 @@ TSharedPtr<FJsonValue> FAssetHandlers::BulkRename(const TSharedPtr<FJsonObject>&
 		}
 	}
 
+	// #908: RenameAssets runs one redirector fix-up pass, and a referencer that
+	// is not loaded is invisible to it, so a stub is left at the old path with
+	// nothing in the response saying so. 29 renames left 19 of them, and the
+	// first sign of it was a later search finding redirectors nobody expected.
+	IAssetRegistry& RenameRegistry =
+		FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+	int32 RedirectorsLeft = 0;
+	TArray<TSharedPtr<FJsonValue>> RedirectorPackages;
+	for (const TSharedPtr<FJsonValue>& Value : PerItem)
+	{
+		TSharedPtr<FJsonObject> Rec = Value.IsValid() ? Value->AsObject() : nullptr;
+		if (!Rec.IsValid()) continue;
+		FString Status;
+		Rec->TryGetStringField(TEXT("status"), Status);
+		if (Status != TEXT("renamed")) continue;
+
+		FString SourcePath;
+		Rec->TryGetStringField(TEXT("sourcePath"), SourcePath);
+		const FMCPAssetPathForms SourceForms = MCPAssetPathForms(SourcePath);
+
+		bool bRedirectorLeft = false;
+		TArray<FAssetData> AtOldPath;
+		RenameRegistry.GetAssetsByPackageName(FName(*SourceForms.PackagePath), AtOldPath);
+		for (const FAssetData& Data : AtOldPath)
+		{
+			if (Data.IsRedirector()) { bRedirectorLeft = true; break; }
+		}
+		// The registry can lag a rename that just happened, so an in-memory
+		// redirector counts too rather than reading as a clean result.
+		if (!bRedirectorLeft && FindObject<UObjectRedirector>(nullptr, *SourceForms.ObjectPath))
+		{
+			bRedirectorLeft = true;
+		}
+
+		Rec->SetBoolField(TEXT("redirectorLeft"), bRedirectorLeft);
+		if (bRedirectorLeft)
+		{
+			++RedirectorsLeft;
+			RedirectorPackages.Add(MakeShared<FJsonValueString>(SourceForms.PackagePath));
+		}
+	}
+
 	auto Result = MCPSuccess();
 	if (Succeeded > 0) MCPSetUpdated(Result);
 	Result->SetBoolField(TEXT("success"), bOk);
@@ -1954,6 +2135,16 @@ TSharedPtr<FJsonValue> FAssetHandlers::BulkRename(const TSharedPtr<FJsonObject>&
 	Result->SetNumberField(TEXT("skipped"), Skipped);
 	Result->SetNumberField(TEXT("total"), PerItem.Num());
 	Result->SetArrayField(TEXT("results"), PerItem);
+	Result->SetNumberField(TEXT("redirectorsLeft"), RedirectorsLeft);
+	Result->SetNumberField(TEXT("redirectorsRemoved"), FMath::Max(0, Succeeded - RedirectorsLeft));
+	Result->SetArrayField(TEXT("redirectorPackages"), RedirectorPackages);
+	if (RedirectorsLeft > 0)
+	{
+		Result->SetStringField(TEXT("note"), FString::Printf(
+			TEXT("%d of %d renamed assets left an ObjectRedirector at the old path, still pointed at by packages this rename did not load. ")
+			TEXT("Pass redirectorPackages to asset(fixup_redirectors) to load exactly those referencers, rewrite them, and delete the stubs that come out unreferenced."),
+			RedirectorsLeft, Succeeded));
+	}
 	return MCPResult(Result);
 }
 
@@ -2158,7 +2349,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::SaveAsset(const TSharedPtr<FJsonObject>& 
 			UObject* Asset = LoadAssetByPath<UObject>(AssetPath);
 			if (!Asset)
 			{
-				return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
+				return MCPAssetNotFoundError(AssetPath);
 			}
 			UPackage* Package = Asset->GetOutermost();
 			if (!Package)
@@ -2173,7 +2364,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::SaveAsset(const TSharedPtr<FJsonObject>& 
 		else
 		{
 			bSuccess = UEditorAssetLibrary::SaveAsset(AssetPath);
-			if (UObject* Asset = FindObject<UObject>(nullptr, *AssetPath))
+			if (UObject* Asset = MCPLoadAssetObject(AssetPath))
 			{
 				if (UPackage* Package = Asset->GetOutermost())
 				{
@@ -2285,11 +2476,9 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReloadPackage(const TSharedPtr<FJsonObjec
 	FString AssetPath;
 	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
 
-	UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
-	}
+	TSharedPtr<FJsonValue> LoadError;
+	UObject* Asset = MCPRequireAssetObject(AssetPath, LoadError);
+	if (!Asset) return LoadError;
 
 	UPackage* Package = Asset->GetOutermost();
 	if (!Package)
@@ -2310,7 +2499,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReloadPackage(const TSharedPtr<FJsonObjec
 		CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
 
 		// Reload
-		UObject* Reloaded = UEditorAssetLibrary::LoadAsset(AssetPath);
+		UObject* Reloaded = MCPLoadAssetObject(AssetPath);
 		bSuccess = (Reloaded != nullptr);
 	}
 
@@ -2807,7 +2996,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::HealthCheck(const TSharedPtr<FJsonObject>
 	bool bCanLoad = bIsLoaded;
 	if (!bIsLoaded)
 	{
-		UObject* Probe = UEditorAssetLibrary::LoadAsset(AssetPath);
+		UObject* Probe = MCPLoadAssetObject(AssetPath);
 		bCanLoad = Probe != nullptr;
 		if (Probe) InMemory = Probe;
 	}
@@ -2836,7 +3025,8 @@ TSharedPtr<FJsonValue> FAssetHandlers::ForceReload(const TSharedPtr<FJsonObject>
 	FString AssetPath;
 	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
 
-	const FString PackageName = FPackageName::ObjectPathToPackageName(AssetPath);
+	const FMCPAssetPathForms Forms = MCPAssetPathForms(AssetPath);
+	const FString PackageName = Forms.PackagePath;
 	FString PackageFileName;
 	if (!FPackageName::DoesPackageExist(PackageName, &PackageFileName))
 	{
@@ -2849,7 +3039,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::ForceReload(const TSharedPtr<FJsonObject>
 	{
 		if (UAssetEditorSubsystem* AES = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>())
 		{
-			if (UObject* Existing = StaticFindObject(UObject::StaticClass(), nullptr, *AssetPath))
+			if (UObject* Existing = StaticFindObject(UObject::StaticClass(), nullptr, *Forms.ObjectPath))
 			{
 				if (AES->FindEditorsForAsset(Existing).Num() > 0)
 				{
@@ -2867,7 +3057,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::ForceReload(const TSharedPtr<FJsonObject>
 	// package, recompiles the Blueprint and reinstances against the new class.
 	// A package the editor refuses to release is reported, not papered over.
 	UPackage* ExistingPkg = FindPackage(nullptr, *PackageName);
-	UObject* PreviousObject = StaticFindObject(UObject::StaticClass(), nullptr, *AssetPath);
+	UObject* PreviousObject = StaticFindObject(UObject::StaticClass(), nullptr, *Forms.ObjectPath);
 	const TWeakObjectPtr<UObject> PreviousWeak(PreviousObject);
 	const bool bWasDirty = ExistingPkg != nullptr && ExistingPkg->IsDirty();
 	const bool bDiscardUnsaved = OptionalBool(Params, TEXT("discardUnsaved"), false);
@@ -2911,7 +3101,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::ForceReload(const TSharedPtr<FJsonObject>
 		CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
 	}
 
-	UObject* Reloaded = LoadObject<UObject>(nullptr, *AssetPath, nullptr, LOAD_None);
+	UObject* Reloaded = LoadObject<UObject>(nullptr, *Forms.ObjectPath, nullptr, LOAD_None);
 	const bool bSuccess = Reloaded != nullptr;
 	// A package that was already in memory must come back as a new object for
 	// the read to be trustworthy. Same pointer means the editor kept its copy.
@@ -2966,12 +3156,15 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetAssetProperty(const TSharedPtr<FJsonOb
 		return MCPError(TEXT("Missing 'value' parameter"));
 	}
 
-	UObject* Asset = LoadObject<UObject>(nullptr, *AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("Could not load asset '%s'"), *AssetPath));
-	}
-	Asset = MCPResolveAssetToCDO(Asset); // #568 - author the generated-class CDO for Blueprint paths
+	// #931: default to persisting. A write that only marked the package dirty
+	// was the whole defect, so opting out has to be deliberate.
+	const bool bSave = OptionalBool(Params, TEXT("save"), true);
+
+	TSharedPtr<FJsonValue> LoadError;
+	UObject* Asset = MCPRequireAssetObject(AssetPath, LoadError);
+	if (!Asset) return LoadError;
+	UBlueprint* OwningBlueprint = nullptr;
+	Asset = MCPResolveAssetToCDO(Asset, &OwningBlueprint); // #568 - author the generated-class CDO for Blueprint paths
 
 	// Resolve the (possibly indexed, possibly subobject-descending) path.
 	// Supports "Config.Traits[1].Params.RepresentationActorManagementClass"
@@ -3008,9 +3201,13 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetAssetProperty(const TSharedPtr<FJsonOb
 	if (LeafOwner) LeafOwner->PostEditChange();
 	Asset->PostEditChange();
 	Asset->MarkPackageDirty();
+	MCPNoteBlueprintCDOWrite(OwningBlueprint, PropertyName);
 
 	FString NewValue;
 	FinalProp->ExportText_Direct(NewValue, ValuePtr, ValuePtr, nullptr, PPF_None);
+
+	FString PersistReason;
+	const bool bPersisted = MCPPersistAssetWrite(Asset, OwningBlueprint, bSave, PersistReason);
 
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
@@ -3018,6 +3215,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetAssetProperty(const TSharedPtr<FJsonOb
 	Result->SetStringField(TEXT("propertyName"), PropertyName);
 	Result->SetStringField(TEXT("previousValue"), PrevValue);
 	Result->SetStringField(TEXT("value"), NewValue);
+	MCPDescribePropertyWritePersistence(Result, Asset, PropertyName, bSave, bPersisted, PersistReason);
 	if (bMapBearing)
 	{
 		Result->SetNumberField(TEXT("mapPairCount"), MCPPropertyText::CountMapPairs(FinalProp, ValuePtr));
@@ -3059,12 +3257,13 @@ TSharedPtr<FJsonValue> FAssetHandlers::AppendAssetArrayElements(const TSharedPtr
 		return MCPError(TEXT("'elements' must contain at least one value"));
 	}
 
-	UObject* Asset = LoadObject<UObject>(nullptr, *AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("Could not load asset '%s'"), *AssetPath));
-	}
-	Asset = MCPResolveAssetToCDO(Asset);
+	const bool bSave = OptionalBool(Params, TEXT("save"), true);
+
+	TSharedPtr<FJsonValue> LoadError;
+	UObject* Asset = MCPRequireAssetObject(AssetPath, LoadError);
+	if (!Asset) return LoadError;
+	UBlueprint* OwningBlueprint = nullptr;
+	Asset = MCPResolveAssetToCDO(Asset, &OwningBlueprint);
 
 	FProperty* FinalProp = nullptr;
 	void* ValuePtr = nullptr;
@@ -3137,6 +3336,10 @@ TSharedPtr<FJsonValue> FAssetHandlers::AppendAssetArrayElements(const TSharedPtr
 	if (LeafOwner && LeafOwner != Asset) LeafOwner->PostEditChange();
 	Asset->PostEditChange();
 	Asset->MarkPackageDirty();
+	MCPNoteBlueprintCDOWrite(OwningBlueprint, PropertyName);
+
+	FString PersistReason;
+	const bool bPersisted = MCPPersistAssetWrite(Asset, OwningBlueprint, bSave, PersistReason);
 
 	TArray<TSharedPtr<FJsonValue>> AppendedIndices;
 	AppendedIndices.Reserve(AppendedCount);
@@ -3155,7 +3358,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::AppendAssetArrayElements(const TSharedPtr
 	Result->SetNumberField(TEXT("newNum"), PreviousNum + AppendedCount);
 	Result->SetArrayField(TEXT("appendedIndices"), AppendedIndices);
 	Result->SetField(TEXT("previousValue"), PreviousValue);
-	Result->SetBoolField(TEXT("saved"), false);
+	MCPDescribePropertyWritePersistence(Result, Asset, PropertyName, bSave, bPersisted, PersistReason);
 
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("assetPath"), AssetPath);
@@ -3219,7 +3422,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetTextureSettingsByType(const TSharedPtr
 		{
 			FString TexPath;
 			if (!V->TryGetString(TexPath)) continue;
-			UTexture2D* Tex = LoadObject<UTexture2D>(nullptr, *TexPath);
+			UTexture2D* Tex = LoadAssetByPath<UTexture2D>(TexPath);
 			if (!Tex)
 			{
 				TSharedPtr<FJsonObject> F = MakeShared<FJsonObject>();
@@ -3451,11 +3654,9 @@ TSharedPtr<FJsonValue> FAssetHandlers::MigrateAssets(const TSharedPtr<FJsonObjec
 	TArray<TSharedPtr<FJsonValue>> Resolved;
 	for (const FString& Path : AssetPaths)
 	{
-		UObject* Asset = UEditorAssetLibrary::LoadAsset(Path);
-		if (!Asset)
-		{
-			return MCPError(FString::Printf(TEXT("Asset not found: %s"), *Path));
-		}
+		TSharedPtr<FJsonValue> LoadError;
+		UObject* Asset = MCPRequireAssetObject(Path, LoadError);
+		if (!Asset) return LoadError;
 		UPackage* Package = Asset->GetOutermost();
 		const FName PackageName(*Package->GetName());
 
