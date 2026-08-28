@@ -880,12 +880,36 @@ namespace MCPJsonProperty
 
 			if (Index != INDEX_NONE)
 			{
-				FArrayProperty* ArrProp = CastField<FArrayProperty>(Prop);
-				if (!ArrProp) { OutError = FString::Printf(TEXT("'%s' is not an array but was indexed [%d]"), *Token, Index); return false; }
-				FScriptArrayHelper H(ArrProp, ValueAddr);
-				if (Index < 0 || Index >= H.Num()) { OutError = FString::Printf(TEXT("index %d out of range on '%s' (num=%d)"), Index, *Token, H.Num()); return false; }
-				Prop = ArrProp->Inner;
-				ValueAddr = H.GetRawPtr(Index);
+				if (FArrayProperty* ArrProp = CastField<FArrayProperty>(Prop))
+				{
+					FScriptArrayHelper H(ArrProp, ValueAddr);
+					if (Index < 0 || Index >= H.Num()) { OutError = FString::Printf(TEXT("index %d out of range on '%s' (num=%d)"), Index, *Token, H.Num()); return false; }
+					Prop = ArrProp->Inner;
+					ValueAddr = H.GetRawPtr(Index);
+				}
+				// #927: a UPROPERTY declared as a C-style fixed array, e.g.
+				// `int32 Foo[3]`, is ONE FProperty with ArrayDim == 3 rather than
+				// an FArrayProperty. Without this branch every indexed write to
+				// one landed on element 0, or was refused as "not an array",
+				// which is how RecastNavMesh's three navmesh generation tiers
+				// became unreachable: only the Low tier could be read or written
+				// while the engine generated from Default and High.
+				else if (Prop->ArrayDim > 1)
+				{
+					if (Index < 0 || Index >= Prop->ArrayDim)
+					{
+						OutError = FString::Printf(TEXT("index %d out of range on fixed array '%s' (ArrayDim=%d)"), Index, *Token, Prop->ArrayDim);
+						return false;
+					}
+					// Re-address from the container so the element offset is the
+					// engine's own, rather than adding a hand-computed stride.
+					ValueAddr = Prop->ContainerPtrToValuePtr<void>(Container, Index);
+				}
+				else
+				{
+					OutError = FString::Printf(TEXT("'%s' is not an array but was indexed [%d]"), *Token, Index);
+					return false;
+				}
 			}
 
 			if (i == Parts.Num() - 1)
