@@ -1339,6 +1339,12 @@
             "description": "add_sequence_evaluator: bTeleportToExplicitTime (default false so time advances / root motion extracts)",
             "type": "boolean"
           },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
+          },
           "toState": {
             "type": "string"
           },
@@ -2370,6 +2376,12 @@
             "description": "CurveTable key time",
             "type": "number"
           },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
+          },
           "ttlSeconds": {
             "description": "lock: seconds before the lock auto-expires (default 300)",
             "type": "number"
@@ -2859,6 +2871,12 @@
           },
           "submixPath": {
             "type": "string"
+          },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
           },
           "toInput": {
             "type": "string"
@@ -3383,6 +3401,12 @@
             "description": "Timeline name for add_timeline_track (#457)",
             "type": "string"
           },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
+          },
           "titleFilter": {
             "description": "read_graph/read_graph_summary: case-insensitive substring match on node title (#560)",
             "type": "string"
@@ -3547,6 +3571,12 @@
             "description": "ChooserTable asset path, e.g. /Game/Path/CT_Locomotion",
             "type": "string"
           },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
+          },
           "to": {
             "description": "remap_object_references: replacement object path (#754)",
             "type": "string"
@@ -3590,6 +3620,12 @@
           "inputJson": {
             "description": "Epic tool arguments as a raw JSON string (alternative to input)",
             "type": "string"
+          },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
           }
         },
         "required": [
@@ -3641,6 +3677,12 @@
           "inputJson": {
             "description": "Epic tool arguments as a raw JSON string (alternative to input)",
             "type": "string"
+          },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
           }
         },
         "required": [
@@ -3669,6 +3711,12 @@
           "stepIndex": {
             "description": "Step index to execute. Omit for step list.",
             "type": "number"
+          },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
           }
         },
         "required": [
@@ -4483,6 +4531,12 @@
             "description": "start_editor: seconds to wait for the bridge (default 120) (#758)",
             "type": "number"
           },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
+          },
           "trackType": {
             "type": "string"
           },
@@ -4587,6 +4641,12 @@
             "description": "list_toolsets: case-sensitive substring filter on the qualified toolset name",
             "type": "string"
           },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
+          },
           "tool": {
             "description": "Qualified tool name, e.g. 'GASToolsets.AttributeSetToolset.ListAttributeSets'",
             "type": "string"
@@ -4634,6 +4694,12 @@
           "source": {
             "description": "import_file: absolute path to the source file on disk",
             "type": "string"
+          },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
           }
         },
         "required": [
@@ -4680,6 +4746,12 @@
           "summary": {
             "description": "What the user was trying to accomplish and why the native tool couldn't handle it.",
             "type": "string"
+          },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
           },
           "title": {
             "description": "Short title describing the tool gap (do not include project-specific details).",
@@ -4802,6 +4874,12 @@
           "settings": {
             "additionalProperties": {},
             "type": "object"
+          },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
           }
         },
         "required": [
@@ -5210,6 +5288,12 @@
             "items": {},
             "type": "array"
           },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
+          },
           "triggers": {
             "description": "Array of trigger objects: {type, ...props}",
             "items": {
@@ -5393,6 +5477,12 @@
             "description": "apply_effect: SetByCaller magnitudes keyed by gameplay tag or name",
             "type": "object"
           },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
+          },
           "value": {
             "description": "set_attribute: new base value",
             "type": "number"
@@ -5542,6 +5632,12 @@
           },
           "subsectionSizeQuads": {
             "type": "number"
+          },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
           },
           "worldX": {
             "description": "find_proxy_at: world-space X (#733)",
@@ -6252,6 +6348,12 @@
           "templateLevel": {
             "type": "string"
           },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
+          },
           "topN": {
             "description": "Limit for count_actors_by_class result",
             "type": "number"
@@ -6668,6 +6770,12 @@
           "texturePath": {
             "type": "string"
           },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
+          },
           "usage": {
             "description": "set_usage: single MATUSAGE flag name",
             "type": "string"
@@ -6765,6 +6873,12 @@
           "replicationType": {
             "description": "set_property_replicated: None | Replicated | RepNotify (#768)",
             "type": "string"
+          },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
           },
           "variableName": {
             "description": "set_property_replicated: Blueprint variable name (propertyName is accepted too) (#768)",
@@ -7051,6 +7165,12 @@
             "description": "create_emitter: emitter asset to copy as a starting point",
             "type": "string"
           },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
+          },
           "value": {}
         },
         "required": [
@@ -7232,6 +7352,12 @@
           },
           "targetPin": {
             "type": "string"
+          },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
           }
         },
         "required": [
@@ -7291,6 +7417,12 @@
           "name": {
             "description": "Plugin npm package name (describe action)",
             "type": "string"
+          },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
           }
         },
         "required": [
@@ -7535,6 +7667,12 @@
             "description": "For add_editor with start: seconds to wait for readiness (default 300)",
             "type": "number"
           },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
+          },
           "tree": {
             "description": "For search_engine_cpp: Runtime|Editor|Developer|Plugins|all (default Runtime)",
             "type": "string"
@@ -7680,6 +7818,12 @@
           },
           "tag": {
             "type": "string"
+          },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
           },
           "userIndex": {
             "description": "inspect_save_game: platform user index (default 0)",
@@ -7900,6 +8044,12 @@
           "taskIndex": {
             "description": "Task index within the state for remove/set operations",
             "type": "number"
+          },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
           },
           "transitionIndex": {
             "description": "Transition index for remove/condition operations",
@@ -8158,6 +8308,12 @@
           "sourceWidgetName": {
             "description": "extract_subtree: widget in the source that becomes the extracted root",
             "type": "string"
+          },
+          "timeoutMs": {
+            "description": "How long to wait for this call, in milliseconds. Omitted, the wait is 30s, or longer for the actions the editor itself allows longer. Raise it for a large batch or an editor busy compiling shaders. A timeout never means the call did not happen: read the state back before retrying.",
+            "exclusiveMinimum": 0,
+            "maximum": 3600000,
+            "type": "integer"
           },
           "value": {},
           "viewportOnly": {
