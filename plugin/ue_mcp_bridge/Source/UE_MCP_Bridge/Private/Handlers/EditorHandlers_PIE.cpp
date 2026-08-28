@@ -1261,6 +1261,52 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 	// ProcessEvent can run arbitrary game code, including code that tears down
 	// the world and collects garbage, and CallTarget is read again below.
 	FGCObjectScopeGuard CallTargetGuard(CallTarget);
+
+	// #973: read the callspace BEFORE the guard opens. That is the only moment
+	// it is observable: inside the guard GAllowActorScriptExecutionInEditor
+	// makes AActor::GetFunctionCallspace answer Local in its first branch, so a
+	// UFUNCTION(Server) runs its implementation on this copy instead of being
+	// sent, and the result used to say nothing about it.
+	FString NaturalCallspace;
+	const bool bCallspaceForcedLocal =
+		MCPFunctionCall::WouldForceNetCallspaceLocal(CallTarget, Func, NaturalCallspace);
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	// #806: report the instance that ran the call. The reported defect was a
+	// call that looked successful while answering from somewhere other than the
+	// placed actor, and there was nothing in the response to see that with.
+	Result->SetStringField(TEXT("resolvedActorLabel"), ResolvedActorLabel);
+	Result->SetStringField(TEXT("resolvedActorPath"), ResolvedActorPath);
+	Result->SetStringField(TEXT("world"), WorldLabel);
+	if (!ComponentName.IsEmpty()) Result->SetStringField(TEXT("component"), ComponentName);
+	Result->SetStringField(TEXT("functionName"), FunctionName);
+
+	// #973: the opt-in escape from the override above. Queued for the next
+	// engine tick, the send happens after the guard's scope has ended and the
+	// call routes the way it would from game code.
+	if (OptionalBool(Params, TEXT("deferToNextTick"), false))
+	{
+		Result->SetBoolField(TEXT("deferred"), true);
+		if (!NaturalCallspace.IsEmpty())
+		{
+			Result->SetStringField(TEXT("netCallspace"), NaturalCallspace);
+		}
+		Result->SetStringField(TEXT("note"), TEXT(
+			"Queued for the next engine tick, outside the editor script-execution guard, so a replicated function "
+			"routes through GetFunctionCallspace normally instead of being forced to Local. Return and out parameters "
+			"are not reported: the response is written before the call runs. Read the effect back afterwards with "
+			"editor(get_runtime_values) or editor(get_object_properties)."));
+		if (WorldLabel == TEXT("editor"))
+		{
+			Result->SetStringField(TEXT("warning"), TEXT(
+				"The target is in the editor world, whose actors were never initialised for play. Outside the guard "
+				"AActor::ProcessEvent will skip the call entirely. deferToNextTick is for a live PIE session."));
+		}
+		MCPFunctionCall::DeferProcessEventToNextTick(CallTarget, Func, MoveTemp(ParamBuf));
+		return MCPResult(Result);
+	}
+
 	// #806: AActor::ProcessEvent refuses to run script in a world whose actors
 	// were never initialised for play, which is every editor world, unless the
 	// function is marked CallInEditor. The refusal is silent: the parameter
@@ -1274,16 +1320,13 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 		CallTarget->ProcessEvent(Func, ParamBuf.GetData());
 	}
 
-	auto Result = MCPSuccess();
-	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
-	// #806: report the instance that ran the call. The reported defect was a
-	// call that looked successful while answering from somewhere other than the
-	// placed actor, and there was nothing in the response to see that with.
-	Result->SetStringField(TEXT("resolvedActorLabel"), ResolvedActorLabel);
-	Result->SetStringField(TEXT("resolvedActorPath"), ResolvedActorPath);
-	Result->SetStringField(TEXT("world"), WorldLabel);
-	if (!ComponentName.IsEmpty()) Result->SetStringField(TEXT("component"), ComponentName);
-	Result->SetStringField(TEXT("functionName"), FunctionName);
+	if (bCallspaceForcedLocal)
+	{
+		Result->SetStringField(TEXT("netCallspace"), NaturalCallspace);
+		Result->SetBoolField(TEXT("callspaceForcedLocal"), true);
+		Result->SetStringField(TEXT("warning"),
+			MCPFunctionCall::DescribeForcedLocalCallspace(FunctionName, NaturalCallspace));
+	}
 
 	// #885: containers come back as real JSON. Export text renders a
 	// TArray<FString> return as an empty string, which made every

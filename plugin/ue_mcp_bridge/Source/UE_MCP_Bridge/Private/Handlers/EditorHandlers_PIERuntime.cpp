@@ -279,6 +279,37 @@ namespace
 		// down the world and collects garbage, and CallTarget is read again
 		// below to export out params.
 		FGCObjectScopeGuard TargetGuard(CallTarget);
+
+		// #973: read the callspace BEFORE the guard opens. That is the only
+		// moment it is observable: inside the guard
+		// GAllowActorScriptExecutionInEditor makes AActor::GetFunctionCallspace
+		// answer Local in its first branch, so a UFUNCTION(Server) runs its
+		// implementation on this copy instead of being sent.
+		FString NaturalCallspace;
+		const bool bCallspaceForcedLocal =
+			MCPFunctionCall::WouldForceNetCallspaceLocal(CallTarget, Func, NaturalCallspace);
+
+		// The opt-in escape from that override: queued for the next engine tick,
+		// the send happens after the guard's scope has ended and the call routes
+		// the way it would from game code. Nothing can be read back, because the
+		// response is written before the call runs.
+		if (OptionalBool(Params, TEXT("deferToNextTick"), false))
+		{
+			Result->SetStringField(TEXT("functionName"), FunctionName);
+			Result->SetBoolField(TEXT("deferred"), true);
+			if (!NaturalCallspace.IsEmpty())
+			{
+				Result->SetStringField(TEXT("netCallspace"), NaturalCallspace);
+			}
+			Result->SetStringField(TEXT("note"), TEXT(
+				"Queued for the next engine tick, outside the editor script-execution guard, so a replicated function "
+				"routes through GetFunctionCallspace normally instead of being forced to Local. Return and out "
+				"parameters are not reported: the response is written before the call runs. Read the effect back "
+				"afterwards with editor(get_object_properties) or editor(get_runtime_values)."));
+			MCPFunctionCall::DeferProcessEventToNextTick(CallTarget, Func, MoveTemp(ParamBuf));
+			return MCPResult(Result);
+		}
+
 		// #806: an actor whose world never initialised for play (every editor
 		// world) silently skips ProcessEvent unless the function is marked
 		// CallInEditor, leaving the zeroed frame to be exported as the result.
@@ -286,6 +317,14 @@ namespace
 		{
 			FEditorScriptExecutionGuard ScriptGuard;
 			CallTarget->ProcessEvent(Func, ParamBuf.GetData());
+		}
+
+		if (bCallspaceForcedLocal)
+		{
+			Result->SetStringField(TEXT("netCallspace"), NaturalCallspace);
+			Result->SetBoolField(TEXT("callspaceForcedLocal"), true);
+			Result->SetStringField(TEXT("warning"),
+				MCPFunctionCall::DescribeForcedLocalCallspace(FunctionName, NaturalCallspace));
 		}
 		// NOTE: UObject* out-params live in ParamBuf, which is raw bytes and
 		// invisible to GC. Guarding them after the fact cannot help - by then a
