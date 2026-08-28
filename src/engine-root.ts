@@ -227,7 +227,9 @@ function splitDenyList(value: string): string[] {
  *  platform is doing the parsing. A deny list written on one machine is often
  *  read on another. */
 function isAbsoluteAnyPlatform(entry: string): boolean {
-  return path.isAbsolute(entry) || /^[A-Za-z]:[\/]/.test(entry) || /^\\/.test(entry);
+  const driveRooted = /^[A-Za-z]:[\\/]/.test(entry);
+  const uncRooted = /^\\\\/.test(entry);
+  return path.isAbsolute(entry) || driveRooted || uncRooted;
 }
 
 export function protectedEngineRoots(env: NodeJS.ProcessEnv = process.env): string[] {

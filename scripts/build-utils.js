@@ -210,7 +210,9 @@ function splitDenyList(value) {
 /** Absolute in the POSIX sense, or a Windows drive-letter or UNC root,
  *  whatever platform is doing the parsing. */
 function isAbsoluteAnyPlatform(entry) {
-  return path.isAbsolute(entry) || /^[A-Za-z]:[\/]/.test(entry) || /^\\/.test(entry);
+  const driveRooted = /^[A-Za-z]:[\\/]/.test(entry);
+  const uncRooted = /^\\\\/.test(entry);
+  return path.isAbsolute(entry) || driveRooted || uncRooted;
 }
 
 function protectedEngineRoots(env = process.env) {
