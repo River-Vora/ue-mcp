@@ -1798,40 +1798,20 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetDataTableRow(const TSharedPtr<FJsonObj
 	}
 
 	const FName RowKey(*RowName);
-	const TMap<FName, uint8*>& RowMap = DataTable->GetRowMap();
-	const bool bExisted = RowMap.Contains(RowKey);
+	uint8* const* ExistingRow = DataTable->GetRowMap().Find(RowKey);
+	const bool bExisted = ExistingRow != nullptr && *ExistingRow != nullptr;
 
-	// Snapshot the prior row (if any) for rollback / idempotency.
-	FString PrevExport;
-	if (bExisted)
-	{
-		uint8* PrevPtr = *RowMap.Find(RowKey);
-		RowStruct->ExportText(PrevExport, PrevPtr, PrevPtr, nullptr, PPF_None, nullptr);
-	}
-
-	// Allocate a row buffer and apply fields via MCPJsonProperty so dicts/
-	// arrays/asset paths/gameplay tags all work.
-	const int32 StructSize = RowStruct->GetStructureSize();
-	const int32 MinAlign = RowStruct->GetMinAlignment();
-	uint8* NewRow = (uint8*)FMemory::Malloc(StructSize, MinAlign);
-	RowStruct->InitializeStruct(NewRow);
-
-	// Seed from the prior row so partial JSON only updates the named fields.
-	if (bExisted)
-	{
-		uint8* PrevPtr = *RowMap.Find(RowKey);
-		RowStruct->CopyScriptStruct(NewRow, PrevPtr);
-	}
-
-	FString SetErr;
-	bool bOk = true;
+	// Resolve every named field before a single byte is written. An unknown
+	// field name used to be discovered half way through the loop, after
+	// earlier fields had already been applied.
+	TArray<TPair<FProperty*, TSharedPtr<FJsonValue>>> Writes;
+	Writes.Reserve((*RowObj)->Values.Num());
 	for (const auto& Pair : (*RowObj)->Values)
 	{
-		const FString FieldName(*Pair.Key);
 		FProperty* FieldProp = nullptr;
 		for (TFieldIterator<FProperty> It(RowStruct); It; ++It)
 		{
-			if (It->GetName() == FieldName || It->GetAuthoredName() == FieldName)
+			if (It->GetName() == Pair.Key || It->GetAuthoredName() == Pair.Key)
 			{
 				FieldProp = *It;
 				break;
@@ -1839,31 +1819,99 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetDataTableRow(const TSharedPtr<FJsonObj
 		}
 		if (!FieldProp)
 		{
-			SetErr = FString::Printf(TEXT("row struct '%s' has no field '%s'"), *RowStruct->GetName(), *FieldName);
-			bOk = false;
-			break;
+			return MCPError(FString::Printf(
+				TEXT("row struct '%s' has no field '%s'"), *RowStruct->GetName(), *Pair.Key));
 		}
-		void* FieldAddr = FieldProp->ContainerPtrToValuePtr<void>(NewRow);
+		Writes.Emplace(FieldProp, Pair.Value);
+	}
+
+	const int32 StructSize = RowStruct->GetStructureSize();
+	const int32 MinAlign = RowStruct->GetMinAlignment();
+
+	// Snapshot the prior row: it is both the rollback record handed back to
+	// the caller and the copy this handler restores if a field write fails
+	// part way through.
+	//
+	// Defaults must be null in the export. Exporting a value against itself
+	// makes every field compare equal to its own "default" and the snapshot
+	// comes out as "()", which is a record that would blank the row rather
+	// than restore it.
+	FString PrevExport;
+	uint8* Backup = nullptr;
+	if (bExisted)
+	{
+		Backup = (uint8*)FMemory::Malloc(StructSize, MinAlign);
+		RowStruct->InitializeStruct(Backup);
+		RowStruct->CopyScriptStruct(Backup, *ExistingRow);
+		RowStruct->ExportText(PrevExport, Backup, nullptr, nullptr, PPF_None, nullptr);
+	}
+
+	// #929: an existing row is edited in the memory the table already owns.
+	// Only the named fields are touched, so every other field keeps the exact
+	// bytes it had, whether or not its UPROPERTY declares a default.
+	//
+	// The previous shape reallocated the row (RemoveRow followed by AddRow)
+	// and relied on a CopyScriptStruct seed to carry the untouched fields
+	// across. That seed is one line away from being lost, it moved the row to
+	// the end of the row map on every edit, and UDataTable::RemoveRow closes
+	// an FScopedDataTableChange whose destructor calls
+	// HandleDataTableChanged(NAME_None), which runs
+	// FTableRowBase::OnDataTableChanged against *every* row in the table
+	// rather than the one being edited. A single-cell write should not reach
+	// the other rows at all.
+	uint8* RowData = bExisted ? *ExistingRow : (uint8*)FMemory::Malloc(StructSize, MinAlign);
+	if (!bExisted)
+	{
+		RowStruct->InitializeStruct(RowData);
+	}
+
+	FString SetErr;
+	bool bOk = true;
+	for (const TPair<FProperty*, TSharedPtr<FJsonValue>>& Write : Writes)
+	{
+		void* FieldAddr = Write.Key->ContainerPtrToValuePtr<void>(RowData);
 		FString E;
-		if (!MCPJsonProperty::SetJsonOnProperty(FieldProp, FieldAddr, Pair.Value, E))
+		if (!MCPJsonProperty::SetJsonOnProperty(Write.Key, FieldAddr, Write.Value, E))
 		{
-			SetErr = FString::Printf(TEXT("%s: %s"), *FieldName, *E);
+			SetErr = FString::Printf(TEXT("%s: %s"), *Write.Key->GetAuthoredName(), *E);
 			bOk = false;
 			break;
 		}
 	}
 	if (!bOk)
 	{
-		RowStruct->DestroyStruct(NewRow);
-		FMemory::Free(NewRow);
+		if (bExisted)
+		{
+			// Put the row back exactly as it was found.
+			RowStruct->CopyScriptStruct(RowData, Backup);
+			RowStruct->DestroyStruct(Backup);
+			FMemory::Free(Backup);
+		}
+		else
+		{
+			RowStruct->DestroyStruct(RowData);
+			FMemory::Free(RowData);
+		}
 		return MCPError(SetErr);
 	}
 
-	// AddRow takes the struct buffer ownership (copies, manages lifetime).
-	DataTable->RemoveRow(RowKey);
-	DataTable->AddRow(RowKey, *reinterpret_cast<FTableRowBase*>(NewRow));
-	RowStruct->DestroyStruct(NewRow);
-	FMemory::Free(NewRow);
+	if (bExisted)
+	{
+		RowStruct->DestroyStruct(Backup);
+		FMemory::Free(Backup);
+		Backup = nullptr;
+		// The table's own row memory was edited, so name the row that changed
+		// and only its hook runs.
+		DataTable->HandleDataTableChanged(RowKey);
+	}
+	else
+	{
+		// AddRow copies the buffer and owns the copy from here on.
+		DataTable->AddRow(RowKey, *reinterpret_cast<FTableRowBase*>(RowData));
+		RowStruct->DestroyStruct(RowData);
+		FMemory::Free(RowData);
+		RowData = nullptr;
+	}
 
 	DataTable->MarkPackageDirty();
 	UEditorAssetLibrary::SaveLoadedAsset(DataTable, /*bOnlyIfIsDirty*/ true);
