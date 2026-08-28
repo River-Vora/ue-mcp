@@ -153,6 +153,14 @@ const OVERRIDES: Readonly<Record<string, ActionClass>> = {
   // engine surface uses it as one (mirror_selected_controls), and a mutate verb
   // anywhere in the name wins, which is wrong for exactly this action.
   "animation.read_mirror_data_table": "read",
+  // ── Level refresh and inspect actions the verb lexicon cannot read ──
+  // "rerun" is not "run" and "recreate" is not "create", so neither reaches
+  // the lexicon. Both destroy and rebuild engine state on placed actors.
+  "level.rerun_construction": "mutate",
+  "level.recreate_physics_state": "mutate",
+  // Compares two components' bounds and transforms. "test" is not a verb the
+  // lexicon knows, and this one only measures.
+  "level.test_component_overlap": "read",
   // Reads a property off many assets at once. "bulk" is a mutate verb because
   // every batch action before this one wrote, but the shape word is not the
   // verb: the read verb after it is.

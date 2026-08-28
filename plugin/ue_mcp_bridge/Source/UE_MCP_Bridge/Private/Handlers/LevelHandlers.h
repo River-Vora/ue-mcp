@@ -139,4 +139,13 @@ private:
 	static TSharedPtr<FJsonValue> BulkSetComponentProperty(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> RemoveComponentsByClass(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SpawnActorsBatch(const TSharedPtr<FJsonObject>& Params);
+	// #944: rerun construction on PLACED instances. blueprint(run_construction_script)
+	// only touches a temporary actor, and the Python wrapper has no equivalent.
+	static TSharedPtr<FJsonValue> RerunConstruction(const TSharedPtr<FJsonObject>& Params);
+	// #915: rebuild collision after mesh data changed under it. Stale collision
+	// makes line_trace report a miss through solid geometry.
+	static TSharedPtr<FJsonValue> RecreatePhysicsState(const TSharedPtr<FJsonObject>& Params);
+	// #914: geometric overlap between two components, with the unscaled local
+	// bounds a caller needs to reason about the answer.
+	static TSharedPtr<FJsonValue> TestComponentOverlap(const TSharedPtr<FJsonObject>& Params);
 };

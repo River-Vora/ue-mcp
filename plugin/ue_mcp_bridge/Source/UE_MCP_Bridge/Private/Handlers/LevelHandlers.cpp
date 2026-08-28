@@ -183,6 +183,11 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandlerWithTimeout(TEXT("bulk_set_component_property"), &BulkSetComponentProperty, 300.0f);
 	Registry.RegisterHandlerWithTimeout(TEXT("remove_components_by_class"), &RemoveComponentsByClass, 300.0f);
 	Registry.RegisterHandlerWithTimeout(TEXT("spawn_actors_batch"), &SpawnActorsBatch, 300.0f);
+	// #944/#915/#914: refresh state the editor is caching, and read the bounds
+	// a caller needs to check the result.
+	Registry.RegisterHandlerWithTimeout(TEXT("rerun_construction_scripts"), &RerunConstruction, 300.0f);
+	Registry.RegisterHandlerWithTimeout(TEXT("recreate_physics_state"), &RecreatePhysicsState, 300.0f);
+	Registry.RegisterHandler(TEXT("test_component_overlap"), &TestComponentOverlap);
 }
 
 TSharedPtr<FJsonValue> FLevelHandlers::GetOutliner(const TSharedPtr<FJsonObject>& Params)
