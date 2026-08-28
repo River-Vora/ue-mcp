@@ -184,6 +184,10 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AddNode(const TSharedPtr<FJsonObject>
 	else if (NodeClass == TEXT("SwitchEnum"))   ResolvedClass = TEXT("K2Node_SwitchEnum");
 	else if (NodeClass == TEXT("SwitchString")) ResolvedClass = TEXT("K2Node_SwitchString");
 	else if (NodeClass == TEXT("MakeStruct"))   ResolvedClass = TEXT("K2Node_MakeStruct");
+	// #981: UMG "Create Widget". The literal K2Node_CreateWidget already
+	// resolved through the UEdGraphNode lookup below; this is the short form
+	// callers reach for first, matching every other alias here.
+	else if (NodeClass == TEXT("CreateWidget")) ResolvedClass = TEXT("K2Node_CreateWidget");
 	else if (NodeClass == TEXT("BreakStruct"))  ResolvedClass = TEXT("K2Node_BreakStruct");
 	else if (NodeClass == TEXT("MakeArray"))    ResolvedClass = TEXT("K2Node_MakeArray");
 	else if (NodeClass == TEXT("Return") || NodeClass == TEXT("FunctionResult")) ResolvedClass = TEXT("K2Node_FunctionResult");
