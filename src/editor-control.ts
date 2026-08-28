@@ -509,6 +509,16 @@ export async function startEditor(
   project: ProjectContext,
   timeoutSeconds = 300,
   onProgress?: ProgressFn,
+  opts: {
+    /**
+     * #968: `pattern=response;...`, handed to the editor as
+     * UE_MCP_DIALOG_POLICY so the plugin can answer a prompt raised during
+     * startup. The bridge is not listening yet at that point, so a policy set
+     * over the socket afterwards is always too late for the modal that stalled
+     * the launch in the first place.
+     */
+    dialogPolicy?: string;
+  } = {},
 ): Promise<{ success: boolean; message: string; state?: EngineState; timeline?: ReadyPhase[]; elapsedSeconds?: number }> {
   // Every check below is about ONE editor: the one holding this project. Know
   // which project that is before looking at anything, because without it the
@@ -562,6 +572,9 @@ export async function startEditor(
     const editorProcess = spawn(editorExe, [project.projectPath], {
       stdio: "ignore",
       detached: true,
+      env: opts.dialogPolicy
+        ? { ...process.env, UE_MCP_DIALOG_POLICY: opts.dialogPolicy }
+        : process.env,
     });
 
     editorProcess.unref();
