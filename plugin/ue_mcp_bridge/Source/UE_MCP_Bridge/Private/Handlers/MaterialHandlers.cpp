@@ -341,6 +341,170 @@ namespace
 		Result->SetObjectField(TEXT("overrideCounts"), MaterialInstanceOverrideCounts(Instance));
 		Result->SetNumberField(TEXT("overrideCount"), CountTotalMaterialInstanceOverrides(Instance));
 	}
+
+	// #952: `read` and `list_parameters` used to insist on a base UMaterial, so
+	// the asset an agent actually edits - the instance - could be written to and
+	// never read back, and verifying a write meant dropping to python. Report
+	// what the instance resolves to now, what its parent would give it, and
+	// which of the two the instance is actually overriding.
+	void AddMaterialInterfaceParameters(TSharedPtr<FJsonObject> Result, UMaterialInterface* Material)
+	{
+		if (!Result.IsValid() || !Material)
+		{
+			return;
+		}
+
+		UMaterialInstance* Instance = Cast<UMaterialInstance>(Material);
+		UMaterialInterface* Parent = nullptr;
+		if (Instance)
+		{
+			Parent = Instance->Parent;
+		}
+
+		{
+			TArray<FMaterialParameterInfo> Infos;
+			TArray<FGuid> Guids;
+			Material->GetAllScalarParameterInfo(Infos, Guids);
+			TArray<TSharedPtr<FJsonValue>> Entries;
+			for (int32 Index = 0; Index < Infos.Num(); ++Index)
+			{
+				const FMaterialParameterInfo& Info = Infos[Index];
+				TSharedPtr<FJsonObject> Obj = MaterialParameterInfoToJson(Info);
+
+				float Value = 0.0f;
+				if (Material->GetScalarParameterValue(Info, Value))
+				{
+					Obj->SetNumberField(TEXT("value"), Value);
+				}
+				float Default = 0.0f;
+				if (Parent && Parent->GetScalarParameterValue(Info, Default))
+				{
+					Obj->SetNumberField(TEXT("defaultValue"), Default);
+				}
+
+				bool bOverridden = false;
+				if (Instance)
+				{
+					for (const FScalarParameterValue& Override : Instance->ScalarParameterValues)
+					{
+						if (Override.ParameterInfo == Info) { bOverridden = true; break; }
+					}
+				}
+				Obj->SetBoolField(TEXT("overridden"), bOverridden);
+				if (Guids.IsValidIndex(Index))
+				{
+					Obj->SetStringField(TEXT("expressionGuid"), Guids[Index].ToString(EGuidFormats::DigitsWithHyphens));
+				}
+				Entries.Add(MakeShared<FJsonValueObject>(Obj));
+			}
+			Result->SetArrayField(TEXT("scalarParameters"), Entries);
+		}
+
+		{
+			TArray<FMaterialParameterInfo> Infos;
+			TArray<FGuid> Guids;
+			Material->GetAllVectorParameterInfo(Infos, Guids);
+			TArray<TSharedPtr<FJsonValue>> Entries;
+			for (int32 Index = 0; Index < Infos.Num(); ++Index)
+			{
+				const FMaterialParameterInfo& Info = Infos[Index];
+				TSharedPtr<FJsonObject> Obj = MaterialParameterInfoToJson(Info);
+
+				FLinearColor Value;
+				if (Material->GetVectorParameterValue(Info, Value))
+				{
+					Obj->SetObjectField(TEXT("value"), LinearColorToJson(Value));
+				}
+				FLinearColor Default;
+				if (Parent && Parent->GetVectorParameterValue(Info, Default))
+				{
+					Obj->SetObjectField(TEXT("defaultValue"), LinearColorToJson(Default));
+				}
+
+				bool bOverridden = false;
+				if (Instance)
+				{
+					for (const FVectorParameterValue& Override : Instance->VectorParameterValues)
+					{
+						if (Override.ParameterInfo == Info) { bOverridden = true; break; }
+					}
+				}
+				Obj->SetBoolField(TEXT("overridden"), bOverridden);
+				if (Guids.IsValidIndex(Index))
+				{
+					Obj->SetStringField(TEXT("expressionGuid"), Guids[Index].ToString(EGuidFormats::DigitsWithHyphens));
+				}
+				Entries.Add(MakeShared<FJsonValueObject>(Obj));
+			}
+			Result->SetArrayField(TEXT("vectorParameters"), Entries);
+		}
+
+		{
+			TArray<FMaterialParameterInfo> Infos;
+			TArray<FGuid> Guids;
+			Material->GetAllTextureParameterInfo(Infos, Guids);
+			TArray<TSharedPtr<FJsonValue>> Entries;
+			for (int32 Index = 0; Index < Infos.Num(); ++Index)
+			{
+				const FMaterialParameterInfo& Info = Infos[Index];
+				TSharedPtr<FJsonObject> Obj = MaterialParameterInfoToJson(Info);
+
+				UTexture* Value = nullptr;
+				if (Material->GetTextureParameterValue(Info, Value) && Value)
+				{
+					Obj->SetStringField(TEXT("value"), Value->GetPathName());
+				}
+				UTexture* Default = nullptr;
+				if (Parent && Parent->GetTextureParameterValue(Info, Default) && Default)
+				{
+					Obj->SetStringField(TEXT("defaultValue"), Default->GetPathName());
+				}
+
+				bool bOverridden = false;
+				if (Instance)
+				{
+					for (const FTextureParameterValue& Override : Instance->TextureParameterValues)
+					{
+						if (Override.ParameterInfo == Info) { bOverridden = true; break; }
+					}
+				}
+				Obj->SetBoolField(TEXT("overridden"), bOverridden);
+				if (Guids.IsValidIndex(Index))
+				{
+					Obj->SetStringField(TEXT("expressionGuid"), Guids[Index].ToString(EGuidFormats::DigitsWithHyphens));
+				}
+				Entries.Add(MakeShared<FJsonValueObject>(Obj));
+			}
+			Result->SetArrayField(TEXT("textureParameters"), Entries);
+		}
+	}
+
+	// Identity + shading summary shared by `read` and `list_parameters` when the
+	// asset is not a base UMaterial.
+	void SetMaterialInterfaceIdentityFields(TSharedPtr<FJsonObject> Result, UMaterialInterface* Material)
+	{
+		if (!Result.IsValid() || !Material)
+		{
+			return;
+		}
+
+		Result->SetStringField(TEXT("name"), Material->GetName());
+		Result->SetStringField(TEXT("path"), Material->GetPathName());
+		Result->SetStringField(TEXT("assetType"), Material->GetClass()->GetName());
+		if (UMaterialInstance* Instance = Cast<UMaterialInstance>(Material))
+		{
+			Result->SetStringField(TEXT("parentPath"), Instance->Parent ? Instance->Parent->GetPathName() : FString());
+		}
+		if (UMaterial* Base = Material->GetMaterial())
+		{
+			Result->SetStringField(TEXT("baseMaterialPath"), Base->GetPathName());
+		}
+		if (UMaterialInstanceConstant* Constant = Cast<UMaterialInstanceConstant>(Material))
+		{
+			Result->SetObjectField(TEXT("overrideCounts"), MaterialInstanceOverrideCounts(Constant));
+			Result->SetNumberField(TEXT("overrideCount"), CountTotalMaterialInstanceOverrides(Constant));
+		}
+	}
 }
 
 EMaterialShadingModel FMaterialHandlers::ParseShadingModel(const FString& ShadingModelStr)
@@ -526,12 +690,34 @@ TSharedPtr<FJsonValue> FMaterialHandlers::ReadMaterial(const TSharedPtr<FJsonObj
 	UMaterial* Material = LoadMaterialFromPath(AssetPath);
 	if (!Material)
 	{
-		return MCPError(FString::Printf(TEXT("Failed to load material at '%s'"), *AssetPath));
+		// #952: a MaterialInstance is a material as far as a caller is concerned.
+		// It has no expression graph of its own, so answer with what it does
+		// have: its lineage, its shading setup, and every parameter it resolves,
+		// with the ones it overrides marked.
+		UMaterialInterface* Interface = LoadAssetByPath<UMaterialInterface>(AssetPath);
+		if (!Interface)
+		{
+			return MCPError(FString::Printf(TEXT("Failed to load material or material instance at '%s'"), *AssetPath));
+		}
+
+		auto InstanceResult = MCPSuccess();
+		SetMaterialInterfaceIdentityFields(InstanceResult, Interface);
+		InstanceResult->SetStringField(TEXT("shadingModel"), ShadingModelToString(Interface->GetShadingModels().GetFirstShadingModel()));
+		InstanceResult->SetStringField(TEXT("blendMode"), StaticEnum<EBlendMode>()->GetNameStringByValue((int64)Interface->GetBlendMode()));
+		InstanceResult->SetBoolField(TEXT("twoSided"), Interface->IsTwoSided());
+		AddMaterialInterfaceParameters(InstanceResult, Interface);
+		InstanceResult->SetArrayField(TEXT("staticSwitches"), MaterialStaticSwitchesToJson(Interface));
+		// The graph lives on the base material; say so rather than returning an
+		// empty expression list that reads like a material with no nodes.
+		InstanceResult->SetStringField(TEXT("expressionsNote"),
+			TEXT("A MaterialInstance has no expression graph. Read baseMaterialPath for the graph."));
+		return MCPResult(InstanceResult);
 	}
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("name"), Material->GetName());
 	Result->SetStringField(TEXT("path"), Material->GetPathName());
+	Result->SetStringField(TEXT("assetType"), Material->GetClass()->GetName());
 	Result->SetStringField(TEXT("shadingModel"), ShadingModelToString(Material->GetShadingModels().GetFirstShadingModel()));
 	Result->SetStringField(TEXT("blendMode"), StaticEnum<EBlendMode>()->GetNameStringByValue((int64)Material->BlendMode));
 	Result->SetBoolField(TEXT("twoSided"), Material->IsTwoSided());
@@ -1254,7 +1440,20 @@ TSharedPtr<FJsonValue> FMaterialHandlers::ListMaterialParameters(const TSharedPt
 	UMaterial* Material = LoadMaterialFromPath(AssetPath);
 	if (!Material)
 	{
-		return MCPError(FString::Printf(TEXT("Failed to load material at '%s'"), *AssetPath));
+		// #952: on a MaterialInstance report the resolved value of every
+		// parameter, the parent's value, and which ones this instance overrides,
+		// so a write can be verified without an execute_python round trip.
+		UMaterialInterface* Interface = LoadAssetByPath<UMaterialInterface>(AssetPath);
+		if (!Interface)
+		{
+			return MCPError(FString::Printf(TEXT("Failed to load material or material instance at '%s'"), *AssetPath));
+		}
+
+		auto InstanceResult = MCPSuccess();
+		SetMaterialInterfaceIdentityFields(InstanceResult, Interface);
+		AddMaterialInterfaceParameters(InstanceResult, Interface);
+		InstanceResult->SetArrayField(TEXT("staticSwitches"), MaterialStaticSwitchesToJson(Interface));
+		return MCPResult(InstanceResult);
 	}
 
 	TArray<TSharedPtr<FJsonValue>> ScalarParams;
@@ -1303,6 +1502,7 @@ TSharedPtr<FJsonValue> FMaterialHandlers::ListMaterialParameters(const TSharedPt
 	Result->SetArrayField(TEXT("vectorParameters"), VectorParams);
 	Result->SetArrayField(TEXT("textureParameters"), TextureParams);
 	Result->SetStringField(TEXT("path"), Material->GetPathName());
+	Result->SetStringField(TEXT("assetType"), Material->GetClass()->GetName());
 
 	return MCPResult(Result);
 }

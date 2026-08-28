@@ -6,8 +6,8 @@ export const materialTool: ToolDef = categoryTool(
   "material",
   "Materials: create, read, parameters, shading, textures, and graph authoring (expression nodes, connections).",
   {
-    read:              bp("Read material structure. Params: assetPath", "read_material", (p) => ({ assetPath: p.assetPath })),
-    list_parameters:   bp("List overridable parameters. Params: assetPath", "list_material_parameters", (p) => ({ assetPath: p.assetPath })),
+    read:              bp("Read material structure. Accepts a Material or a MaterialInstance; an instance answers with its lineage, shading setup and resolved parameters instead of a graph (#952). Params: assetPath", "read_material", (p) => ({ assetPath: p.assetPath ?? p.materialPath })),
+    list_parameters:   bp("List parameters. On a MaterialInstance each entry carries the resolved value, the parent's defaultValue and whether this instance overrides it (#952). Params: assetPath", "list_material_parameters", (p) => ({ assetPath: p.assetPath ?? p.materialPath })),
     set_parameter:     bp("Set parameter on MaterialInstance. Params: assetPath, parameterName, parameterType? (scalar|vector|texture, auto-detected when omitted), value, association?. A vector/colour value may be passed as value OR color, shaped {r,g,b,a}, [r,g,b,a] or '(R=..,G=..,B=..,A=..)'. Saves the instance and returns readBack + saved so a set/verify round trip needs no second call (#952)", "set_material_parameter"),
     read_instance:     bp("Read a MaterialInstanceConstant parent and override summary. Params: assetPath", "read_material_instance", (p) => ({ assetPath: p.assetPath ?? p.materialPath })),
     set_instance_parent: bp("Set a MaterialInstanceConstant parent. Params: assetPath, newParentPath (or parentPath)", "set_material_instance_parent", (p) => ({ assetPath: p.assetPath ?? p.materialPath, newParentPath: p.newParentPath ?? p.parentPath })),
