@@ -387,6 +387,12 @@ TSharedPtr<FJsonValue> FEditorHandlers::PieGetRuntimeValue(const TSharedPtr<FJso
 		return MCPError(TEXT("PIE is not active. Start a PIE session first."));
 	}
 
+	// This action shipped before #983 with 'actorPath' as a label|name|path
+	// token, not a strict path, and with 'actorLabel' as its fallback spelling.
+	// The shared resolver treats a path as precise, so the loose reading is
+	// kept here explicitly rather than silently dropped: a caller who has been
+	// passing a label in 'actorPath' for two releases must not start getting
+	// "no actor at that path".
 	FString ActorPath;
 	if (!Params->TryGetStringField(TEXT("actorPath"), ActorPath))
 	{
@@ -402,8 +408,25 @@ TSharedPtr<FJsonValue> FEditorHandlers::PieGetRuntimeValue(const TSharedPtr<FJso
 
 	// Search for the actor in the PIE world (accept label, name, or full path).
 	// #778: honour pieInstance so a client world is reachable.
+	// #983: through the shared resolver, so actorPath wins over actorLabel and
+	// a duplicated label is refused rather than read off one of the copies.
 	UWorld* PIEWorld = ResolveWorldFromParams(Params, TEXT("pie"));
-	AActor* TargetActor = FindActorByLabelNameOrPath(PIEWorld, ActorPath);
+	FMCPActorSelector PieSel;
+	PieSel.Match = EMCPActorMatch::LabelNameOrPath;
+	PieSel.WorldLabel = TEXT("PIE");
+	TSharedPtr<FJsonValue> PieActorErr;
+	AActor* TargetActor = MCPResolveActor(PIEWorld, Params, PieActorErr, PieSel);
+	if (!TargetActor && MCPIsAmbiguousActorError(PieActorErr)) return PieActorErr;
+
+	// The legacy tolerance: retry the value of 'actorPath' as a label / name
+	// token. Ambiguity is still refused, so the loose reading cannot bring the
+	// silent wrong pick back with it.
+	if (!TargetActor && !ActorPath.IsEmpty())
+	{
+		TSharedPtr<FJsonValue> LegacyErr;
+		TargetActor = MCPResolveActorToken(PIEWorld, ActorPath, LegacyErr, PieSel);
+		if (!TargetActor && MCPIsAmbiguousActorError(LegacyErr)) return LegacyErr;
+	}
 
 	if (!TargetActor)
 	{
@@ -1075,7 +1098,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 	FString FunctionName;
 	if (auto Err = RequireString(Params, TEXT("functionName"), FunctionName)) return Err;
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
 	// #778: this used GEditor->GetPIEWorldContext(), which is always the
 	// primary (server) context, so 'pieInstance' could never reach it and a
@@ -1100,11 +1123,14 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 	// fixed label -> name -> path order, and a miss is an error. There is no
 	// class-default fallback here and there must never be one: a default object
 	// answers every call with default state, which reads as success.
-	AActor* Target = FindActorByLabelNameOrPath(World, ActorLabel);
-	if (!Target)
-	{
-		return MCPError(MCPDescribeActorLookupMiss(World, ActorLabel, WorldLabel));
-	}
+	// #983: actorPath wins when given, and a label that names more than one
+	// actor is refused rather than invoked on whichever came first.
+	FMCPActorSelector TargetSel;
+	TargetSel.Match = EMCPActorMatch::LabelNameOrPath;
+	TargetSel.WorldLabel = *WorldLabel;
+	TSharedPtr<FJsonValue> TargetErr;
+	AActor* Target = MCPResolveActor(World, Params, TargetErr, TargetSel);
+	if (!Target) return TargetErr;
 	// Defensive: the lookup iterates placed actors, so neither of these can fire
 	// today. They exist so that a future change which lets an archetype or an
 	// actor from another world through fails loudly instead of quietly
@@ -1217,7 +1243,22 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeFunction(const TSharedPtr<FJsonObj
 				continue;
 			}
 
-			AActor* RefActor = FindActorByLabel(World, ActorArgLabel);
+			// #983: an actor argument is an actor selector like any other, so a
+			// duplicated label is refused rather than passed as whichever copy
+			// the iterator reached first.
+			TArray<AActor*> ArgMatches;
+			MCPCollectActorsByToken(World, ActorArgLabel, EMCPActorMatch::LabelNameOrPath, ArgMatches);
+			if (ArgMatches.Num() > 1)
+			{
+				for (TFieldIterator<FProperty> CleanupIt(Func); CleanupIt && (CleanupIt->PropertyFlags & CPF_Parm); ++CleanupIt)
+				{
+					CleanupIt->DestroyValue_InContainer(ParamBuf.GetData());
+				}
+				return MCPAmbiguousActorError(
+					ActorArgLabel, TEXT("actorArgs"), TEXT("actorPath"),
+					MCPDescribeActorMatchTier(ActorArgLabel, ArgMatches[0]), ArgMatches);
+			}
+			AActor* RefActor = ArgMatches.Num() == 1 ? ArgMatches[0] : nullptr;
 			if (!RefActor)
 			{
 				for (TFieldIterator<FProperty> CleanupIt(Func); CleanupIt && (CleanupIt->PropertyFlags & CPF_Parm); ++CleanupIt)
@@ -1450,7 +1491,18 @@ TSharedPtr<FJsonValue> FEditorHandlers::InvokeStaticFunction(const TSharedPtr<FJ
 			if (!OP) continue;
 			FString ActorArgLabel;
 			if (!(*ActorArgObj)->TryGetStringField(P->GetName(), ActorArgLabel) || ActorArgLabel.IsEmpty()) continue;
-			AActor* RefActor = FindActorByLabel(World, ActorArgLabel);
+			// #983: refuse a duplicated label rather than passing whichever
+			// copy the actor iterator reached first.
+			TArray<AActor*> ArgMatches;
+			MCPCollectActorsByToken(World, ActorArgLabel, EMCPActorMatch::LabelNameOrPath, ArgMatches);
+			if (ArgMatches.Num() > 1)
+			{
+				Cleanup();
+				return MCPAmbiguousActorError(
+					ActorArgLabel, TEXT("actorArgs"), TEXT("actorPath"),
+					MCPDescribeActorMatchTier(ActorArgLabel, ArgMatches[0]), ArgMatches);
+			}
+			AActor* RefActor = ArgMatches.Num() == 1 ? ArgMatches[0] : nullptr;
 			if (!RefActor)
 			{
 				Cleanup();

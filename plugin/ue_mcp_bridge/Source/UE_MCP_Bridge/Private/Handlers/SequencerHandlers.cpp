@@ -70,13 +70,16 @@ namespace
 		return Seq;
 	}
 
-	// Resolve (creating if needed) the actor's possessable binding GUID.
-	bool ResolveActorBinding(ULevelSequence* Sequence, UMovieScene* MovieScene, const FString& ActorLabel, FGuid& OutGuid, FString& OutError)
+	// Resolve (creating if needed) the possessable binding GUID for an actor the
+	// caller already selected. #983: the selection happens through
+	// MCPResolveActor at the call site, so a duplicated label is refused before
+	// a binding is created against the wrong actor.
+	bool ResolveActorBinding(ULevelSequence* Sequence, UMovieScene* MovieScene, AActor* TargetActor, FGuid& OutGuid, FString& OutError)
 	{
 		UWorld* World = GetEditorWorld();
 		if (!World) { OutError = TEXT("No editor world available"); return false; }
-		AActor* TargetActor = FindActorByLabel(World, ActorLabel);
-		if (!TargetActor) { OutError = FString::Printf(TEXT("Actor not found: %s"), *ActorLabel); return false; }
+		if (!TargetActor) { OutError = TEXT("Target actor is null"); return false; }
+		const FString ActorLabel = TargetActor->GetActorLabel();
 
 		for (int32 i = 0; i < MovieScene->GetPossessableCount(); ++i)
 		{
@@ -535,18 +538,18 @@ TSharedPtr<FJsonValue> FSequencerHandlers::AddTrack(const TSharedPtr<FJsonObject
 
 	// Check if we should add to an actor binding or as a master track
 	FString ActorLabel = OptionalString(Params, TEXT("actorLabel"));
+	const FString ActorPath = OptionalString(Params, TEXT("actorPath"));
 	auto Result = MCPSuccess();
 
-	if (!ActorLabel.IsEmpty())
+	if (!ActorLabel.IsEmpty() || !ActorPath.IsEmpty())
 	{
 		// Find the binding for this actor
 		REQUIRE_EDITOR_WORLD(World);
 
-		AActor* TargetActor = FindActorByLabel(World, ActorLabel);
-		if (!TargetActor)
-		{
-			return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-		}
+		TSharedPtr<FJsonValue> ActorErr;
+		AActor* TargetActor = MCPResolveActor(World, Params, ActorErr);
+		if (!TargetActor) return ActorErr;
+		ActorLabel = TargetActor->GetActorLabel();
 
 		// Find or create a binding for this actor
 		FGuid BindingGuid;
@@ -576,6 +579,7 @@ TSharedPtr<FJsonValue> FSequencerHandlers::AddTrack(const TSharedPtr<FJsonObject
 		{
 			MCPSetExisted(Result);
 			Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+			Result->SetStringField(TEXT("actorPath"), TargetActor->GetPathName());
 			Result->SetStringField(TEXT("bindingGuid"), BindingGuid.ToString());
 			Result->SetStringField(TEXT("trackType"), TrackType);
 			Result->SetStringField(TEXT("trackClass"), ExistingTrack->GetClass()->GetName());
@@ -592,6 +596,7 @@ TSharedPtr<FJsonValue> FSequencerHandlers::AddTrack(const TSharedPtr<FJsonObject
 
 		MCPSetCreated(Result);
 		Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+		Result->SetStringField(TEXT("actorPath"), TargetActor->GetPathName());
 		Result->SetStringField(TEXT("bindingGuid"), BindingGuid.ToString());
 		Result->SetStringField(TEXT("trackType"), TrackType);
 		Result->SetStringField(TEXT("trackClass"), NewTrack->GetClass()->GetName());
@@ -900,12 +905,17 @@ TSharedPtr<FJsonValue> FSequencerHandlers::AddSection(const TSharedPtr<FJsonObje
 	if (!TrackClass) return MCPError(FString::Printf(TEXT("Unknown track type: '%s'"), *TrackType));
 
 	const FString ActorLabel = OptionalString(Params, TEXT("actorLabel"));
+	const FString ActorPath = OptionalString(Params, TEXT("actorPath"));
 
 	UMovieSceneTrack* Track = nullptr;
 	FGuid BindingGuid;
-	if (!ActorLabel.IsEmpty())
+	if (!ActorLabel.IsEmpty() || !ActorPath.IsEmpty())
 	{
-		if (!ResolveActorBinding(Sequence, MovieScene, ActorLabel, BindingGuid, Err)) return MCPError(Err);
+		REQUIRE_EDITOR_WORLD(BindingWorld);
+		TSharedPtr<FJsonValue> ActorErr;
+		AActor* BoundActor = MCPResolveActor(BindingWorld, Params, ActorErr);
+		if (!BoundActor) return ActorErr;
+		if (!ResolveActorBinding(Sequence, MovieScene, BoundActor, BindingGuid, Err)) return MCPError(Err);
 		Track = MovieScene->FindTrack(TrackClass, BindingGuid);
 		if (!Track) Track = MovieScene->AddTrack(TrackClass, BindingGuid);
 	}
@@ -922,10 +932,18 @@ TSharedPtr<FJsonValue> FSequencerHandlers::AddSection(const TSharedPtr<FJsonObje
 	// Resolve the camera binding up front so a bad cameraActorLabel fails before
 	// we create an orphan section.
 	const FString CameraActorLabel = OptionalString(Params, TEXT("cameraActorLabel"));
+	const FString CameraActorPath = OptionalString(Params, TEXT("cameraActorPath"));
 	FGuid CamGuid;
-	if (!CameraActorLabel.IsEmpty())
+	if (!CameraActorLabel.IsEmpty() || !CameraActorPath.IsEmpty())
 	{
-		if (!ResolveActorBinding(Sequence, MovieScene, CameraActorLabel, CamGuid, Err)) return MCPError(Err);
+		REQUIRE_EDITOR_WORLD(CameraWorld);
+		FMCPActorSelector CameraSel;
+		CameraSel.LabelKey = TEXT("cameraActorLabel");
+		CameraSel.PathKey = TEXT("cameraActorPath");
+		TSharedPtr<FJsonValue> CameraErr;
+		AActor* CameraActor = MCPResolveActor(CameraWorld, Params, CameraErr, CameraSel);
+		if (!CameraActor) return CameraErr;
+		if (!ResolveActorBinding(Sequence, MovieScene, CameraActor, CamGuid, Err)) return MCPError(Err);
 	}
 
 	UMovieSceneSection* Section = Track->CreateNewSection();
@@ -1006,11 +1024,16 @@ TSharedPtr<FJsonValue> FSequencerHandlers::SetKeyframes(const TSharedPtr<FJsonOb
 	}
 
 	const FString ActorLabel = OptionalString(Params, TEXT("actorLabel"));
+	const FString ActorPath = OptionalString(Params, TEXT("actorPath"));
 	UMovieSceneTrack* Track = nullptr;
-	if (!ActorLabel.IsEmpty())
+	if (!ActorLabel.IsEmpty() || !ActorPath.IsEmpty())
 	{
+		REQUIRE_EDITOR_WORLD(BindingWorld);
+		TSharedPtr<FJsonValue> ActorErr;
+		AActor* BoundActor = MCPResolveActor(BindingWorld, Params, ActorErr);
+		if (!BoundActor) return ActorErr;
 		FGuid BindingGuid;
-		if (!ResolveActorBinding(Sequence, MovieScene, ActorLabel, BindingGuid, Err)) return MCPError(Err);
+		if (!ResolveActorBinding(Sequence, MovieScene, BoundActor, BindingGuid, Err)) return MCPError(Err);
 		Track = MovieScene->FindTrack(TrackClass, BindingGuid);
 	}
 	else

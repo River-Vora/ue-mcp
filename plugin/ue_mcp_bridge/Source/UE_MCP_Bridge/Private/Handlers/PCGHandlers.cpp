@@ -910,15 +910,14 @@ TSharedPtr<FJsonValue> FPCGHandlers::SetPCGNodeSettings(const TSharedPtr<FJsonOb
 TSharedPtr<FJsonValue> FPCGHandlers::ExecutePCGGraph(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	AActor* FoundActor = FindActorByLabel(World, ActorLabel);
-	if (!FoundActor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found with label: %s"), *ActorLabel));
-	}
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* FoundActor = MCPResolveActor(World, Params, ActorErr);
+	if (!FoundActor) return ActorErr;
+	ActorLabel = FoundActor->GetActorLabel();
 
 	// Get PCG component from the actor
 	UPCGComponent* PCGComp = FoundActor->FindComponentByClass<UPCGComponent>();
@@ -939,6 +938,7 @@ TSharedPtr<FJsonValue> FPCGHandlers::ExecutePCGGraph(const TSharedPtr<FJsonObjec
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), FoundActor->GetPathName());
 	Result->SetStringField(TEXT("componentName"), PCGComp->GetName());
 	if (PCGComp->GetGraph())
 	{
@@ -1208,15 +1208,14 @@ TSharedPtr<FJsonValue> FPCGHandlers::ReadPCGNodeSettings(const TSharedPtr<FJsonO
 TSharedPtr<FJsonValue> FPCGHandlers::GetPCGComponentDetails(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	AActor* FoundActor = FindActorByLabel(World, ActorLabel);
-	if (!FoundActor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found with label: %s"), *ActorLabel));
-	}
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* FoundActor = MCPResolveActor(World, Params, ActorErr);
+	if (!FoundActor) return ActorErr;
+	ActorLabel = FoundActor->GetActorLabel();
 
 	// Get all PCG components on the actor
 	TArray<UPCGComponent*> PCGComps;
@@ -1229,6 +1228,7 @@ TSharedPtr<FJsonValue> FPCGHandlers::GetPCGComponentDetails(const TSharedPtr<FJs
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), FoundActor->GetPathName());
 	Result->SetStringField(TEXT("actorClass"), FoundActor->GetClass()->GetName());
 
 	TArray<TSharedPtr<FJsonValue>> ComponentsArray;
@@ -1384,7 +1384,10 @@ TSharedPtr<FJsonValue> FPCGHandlers::SetStaticMeshSpawnerMeshes(const TSharedPtr
 namespace
 {
 	// Locate a UPCGComponent by actor label. Returns error JsonValue on failure.
-	TSharedPtr<FJsonValue> FindPCGComponentByLabel(const FString& ActorLabel, UPCGComponent*& OutComp, AActor*& OutActor)
+	// #983: takes the parameter bag so it can read actorPath, and refuses a
+	// label that names more than one actor rather than regenerating whichever
+	// PCG volume the iterator reached first.
+	TSharedPtr<FJsonValue> FindPCGComponentByLabel(const TSharedPtr<FJsonObject>& Params, UPCGComponent*& OutComp, AActor*& OutActor)
 	{
 		OutComp = nullptr;
 		OutActor = nullptr;
@@ -1396,8 +1399,10 @@ namespace
 		}
 		if (!World) return MCPError(TEXT("Editor world not available"));
 
-		OutActor = FindActorByLabel(World, ActorLabel);
-		if (!OutActor) return MCPError(FString::Printf(TEXT("Actor not found with label: %s"), *ActorLabel));
+		TSharedPtr<FJsonValue> ActorErr;
+		OutActor = MCPResolveActor(World, Params, ActorErr);
+		if (!OutActor) return ActorErr;
+		const FString ActorLabel = OutActor->GetActorLabel();
 		OutComp = OutActor->FindComponentByClass<UPCGComponent>();
 		if (!OutComp) return MCPError(FString::Printf(TEXT("No PCGComponent on actor: %s"), *ActorLabel));
 		return nullptr;
@@ -1412,10 +1417,11 @@ namespace
 TSharedPtr<FJsonValue> FPCGHandlers::ForceRegeneratePCG(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
 	UPCGComponent* PCGComp = nullptr; AActor* Actor = nullptr;
-	if (auto Err = FindPCGComponentByLabel(ActorLabel, PCGComp, Actor)) return Err;
+	if (auto Err = FindPCGComponentByLabel(Params, PCGComp, Actor)) return Err;
+	ActorLabel = Actor->GetActorLabel();
 
 	UPCGGraph* OriginalGraph = PCGComp->GetGraph();
 	if (!OriginalGraph)
@@ -1432,6 +1438,7 @@ TSharedPtr<FJsonValue> FPCGHandlers::ForceRegeneratePCG(const TSharedPtr<FJsonOb
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("componentName"), PCGComp->GetName());
 	Result->SetStringField(TEXT("graphName"), OriginalGraph->GetName());
 	Result->SetStringField(TEXT("graphPath"), OriginalGraph->GetPathName());
@@ -1442,16 +1449,18 @@ TSharedPtr<FJsonValue> FPCGHandlers::ForceRegeneratePCG(const TSharedPtr<FJsonOb
 TSharedPtr<FJsonValue> FPCGHandlers::CleanupPCG(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
 	UPCGComponent* PCGComp = nullptr; AActor* Actor = nullptr;
-	if (auto Err = FindPCGComponentByLabel(ActorLabel, PCGComp, Actor)) return Err;
+	if (auto Err = FindPCGComponentByLabel(Params, PCGComp, Actor)) return Err;
+	ActorLabel = Actor->GetActorLabel();
 
 	const bool bRemoveComponents = OptionalBool(Params, TEXT("removeComponents"), true);
 	PCGComp->Cleanup(bRemoveComponents);
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("componentName"), PCGComp->GetName());
 	Result->SetBoolField(TEXT("removeComponents"), bRemoveComponents);
 	Result->SetBoolField(TEXT("cleaned"), true);
@@ -1461,10 +1470,11 @@ TSharedPtr<FJsonValue> FPCGHandlers::CleanupPCG(const TSharedPtr<FJsonObject>& P
 TSharedPtr<FJsonValue> FPCGHandlers::ToggleGraphPCG(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
 	UPCGComponent* PCGComp = nullptr; AActor* Actor = nullptr;
-	if (auto Err = FindPCGComponentByLabel(ActorLabel, PCGComp, Actor)) return Err;
+	if (auto Err = FindPCGComponentByLabel(Params, PCGComp, Actor)) return Err;
+	ActorLabel = Actor->GetActorLabel();
 
 	// If the caller supplies graphPath, load and use that; otherwise re-apply the current graph.
 	FString GraphPath;
@@ -1485,6 +1495,7 @@ TSharedPtr<FJsonValue> FPCGHandlers::ToggleGraphPCG(const TSharedPtr<FJsonObject
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("componentName"), PCGComp->GetName());
 	Result->SetStringField(TEXT("graphName"), TargetGraph->GetName());
 	Result->SetStringField(TEXT("graphPath"), TargetGraph->GetPathName());

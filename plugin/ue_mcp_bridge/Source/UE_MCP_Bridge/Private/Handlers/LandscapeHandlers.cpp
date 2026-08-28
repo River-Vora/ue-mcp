@@ -565,12 +565,22 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::SampleLandscape(const TSharedPtr<FJso
 	// Which landscape. A label picks one explicitly; without one, every proxy in
 	// the world contributes its ULandscapeInfo and the point decides between
 	// them, because a map with two landscapes has no single right default.
+	// #983: actorPath narrows to exactly one proxy when several share a label,
+	// which is what a World Partition map full of streaming proxies looks like.
 	const FString ActorLabel = OptionalString(Params, TEXT("actorLabel"));
+	const FString ActorPath = OptionalString(Params, TEXT("actorPath"));
+	// Normalised the same way MCPFindActorByPath normalises, so the export-text
+	// form (Actor'/Game/...') resolves here exactly as it does on every other
+	// action rather than silently matching nothing (#983).
+	const FString WantedPath = ActorPath.IsEmpty()
+		? FString()
+		: FPackageName::ExportTextPathToObjectPath(ActorPath).TrimStartAndEnd();
 	TArray<ULandscapeInfo*> Candidates;
 	for (TActorIterator<ALandscapeProxy> It(World); It; ++It)
 	{
 		ALandscapeProxy* Proxy = *It;
 		if (!Proxy) continue;
+		if (!WantedPath.IsEmpty() && !Proxy->GetPathName().Equals(WantedPath, ESearchCase::IgnoreCase)) continue;
 		if (!ActorLabel.IsEmpty() && !Proxy->GetActorLabel().Equals(ActorLabel, ESearchCase::IgnoreCase)) continue;
 		ULandscapeInfo* ProxyInfo = Proxy->GetLandscapeInfo();
 		if (!ProxyInfo) continue;
@@ -579,12 +589,13 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::SampleLandscape(const TSharedPtr<FJso
 	}
 	if (Candidates.Num() == 0)
 	{
-		if (ActorLabel.IsEmpty())
+		if (ActorLabel.IsEmpty() && ActorPath.IsEmpty())
 		{
 			return MCPError(TEXT("No landscape in the current level. Create one with landscape(create)."));
 		}
 		return MCPError(FString::Printf(
-			TEXT("No landscape actor labelled '%s' (nothing with a registered LandscapeInfo matched)"), *ActorLabel));
+			TEXT("No landscape actor matched '%s' (nothing with a registered LandscapeInfo matched)"),
+			ActorPath.IsEmpty() ? *ActorLabel : *ActorPath));
 	}
 
 	// Pick the landscape whose quad extent actually covers the point. With one

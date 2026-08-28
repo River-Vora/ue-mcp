@@ -666,13 +666,15 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 	if (!World) return MCPError(TEXT("No world available"));
 
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
-	AActor* Actor = FindActorByLabelNameOrPath(World, ActorLabel);
-	if (!Actor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found (by label, name or path): %s"), *ActorLabel));
-	}
+	FMCPActorSelector ActorSel;
+	ActorSel.Match = EMCPActorMatch::LabelNameOrPath;
+	ActorSel.WorldLabel = World->IsGameWorld() ? TEXT("PIE") : TEXT("editor");
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr, ActorSel);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	const FString ComponentName = OptionalString(Params, TEXT("componentName"));
 	USkeletalMeshComponent* Mesh = nullptr;
@@ -880,6 +882,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::ReadBoneTransforms(const TSharedPtr<FJso
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("component"), Mesh->GetName());
 	Result->SetStringField(TEXT("space"), bRelative ? TEXT("relative") : (bComponentSpace ? TEXT("component") : TEXT("world")));
 	if (bRelative) Result->SetStringField(TEXT("relativeTo"), RelativeTo);
@@ -905,13 +908,15 @@ TSharedPtr<FJsonValue> FEditorHandlers::TeleportRuntimeActor(const TSharedPtr<FJ
 	if (!World) return MCPError(TEXT("PIE is not running - teleport_runtime_actor targets a live world"));
 
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
-	AActor* Actor = FindActorByLabelNameOrPath(World, ActorLabel);
-	if (!Actor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found in the live world (by label, name or path): %s"), *ActorLabel));
-	}
+	FMCPActorSelector ActorSel;
+	ActorSel.Match = EMCPActorMatch::LabelNameOrPath;
+	ActorSel.WorldLabel = World->IsGameWorld() ? TEXT("PIE") : TEXT("editor");
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr, ActorSel);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	const FVector StartLocation = Actor->GetActorLocation();
 	const FVector Location = Params->HasField(TEXT("location"))
@@ -951,6 +956,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::TeleportRuntimeActor(const TSharedPtr<FJ
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("world"), World->GetPathName());
 	Result->SetStringField(TEXT("netMode"), DescribePIENetMode(World));
 	Result->SetBoolField(TEXT("teleported"), bMoved);
@@ -987,13 +993,15 @@ TSharedPtr<FJsonValue> FEditorHandlers::SetMovementMode(const TSharedPtr<FJsonOb
 	if (!World) return MCPError(TEXT("PIE is not running - set_movement_mode targets a live world"));
 
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
-	AActor* Actor = FindActorByLabelNameOrPath(World, ActorLabel);
-	if (!Actor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found in the live world (by label, name or path): %s"), *ActorLabel));
-	}
+	FMCPActorSelector ActorSel;
+	ActorSel.Match = EMCPActorMatch::LabelNameOrPath;
+	ActorSel.WorldLabel = World->IsGameWorld() ? TEXT("PIE") : TEXT("editor");
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr, ActorSel);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	UCharacterMovementComponent* Movement = Actor->FindComponentByClass<UCharacterMovementComponent>();
 	if (!Movement)
@@ -1069,6 +1077,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::SetMovementMode(const TSharedPtr<FJsonOb
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("component"), Movement->GetName());
 	Result->SetStringField(TEXT("world"), World->GetPathName());
 	Result->SetStringField(TEXT("netMode"), DescribePIENetMode(World));

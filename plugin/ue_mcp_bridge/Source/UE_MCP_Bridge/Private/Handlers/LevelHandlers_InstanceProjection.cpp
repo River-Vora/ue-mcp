@@ -302,9 +302,11 @@ TSharedPtr<FJsonValue> UEMCPInstanceProjection::SnapInstancesToSurfaceInWorld(
 	if (!Params) return MCPError(TEXT("params must be an object"));
 
 	FString ActorLabel;
-	if (TSharedPtr<FJsonValue> Error = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Error;
-	AActor* Actor = FindActorByLabel(World, ActorLabel);
-	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	if (TSharedPtr<FJsonValue> Error = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Error;
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	FString ComponentName;
 	if (Params->HasField(TEXT("componentName"))
@@ -627,6 +629,7 @@ TSharedPtr<FJsonValue> UEMCPInstanceProjection::SnapInstancesToSurfaceInWorld(
 	Result->SetBoolField(TEXT("preflightPassed"), true);
 	Result->SetBoolField(TEXT("mutationPerformed"), bMutationPerformed);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("componentName"), ISMC->GetName());
 	Result->SetStringField(TEXT("componentClass"), ISMC->GetClass()->GetPathName());
 	Result->SetStringField(TEXT("channel"), ChannelName);

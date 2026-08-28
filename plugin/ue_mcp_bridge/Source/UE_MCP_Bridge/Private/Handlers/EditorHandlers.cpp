@@ -1168,7 +1168,11 @@ TSharedPtr<FJsonValue> FEditorHandlers::HitTestViewportPixel(const TSharedPtr<FJ
 		{
 			FString Label;
 			if (!V->TryGetString(Label)) continue;
-			if (AActor* A = FindActorByLabel(World, Label)) Query.AddIgnoredActor(A);
+			// #983: an ignore list is the plural case, so a label naming
+			// several actors ignores all of them.
+			TArray<AActor*> Matches;
+			MCPCollectActorsByToken(World, Label, EMCPActorMatch::LabelNameOrPath, Matches);
+			for (AActor* A : Matches) Query.AddIgnoredActor(A);
 		}
 	}
 
@@ -1195,6 +1199,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::HitTestViewportPixel(const TSharedPtr<FJ
 	AActor* HitActor = Hit.GetActor();
 	UPrimitiveComponent* HitComp = Hit.GetComponent();
 	if (HitActor) Result->SetStringField(TEXT("actorLabel"), HitActor->GetActorLabel());
+	if (HitActor) Result->SetStringField(TEXT("actorPath"), HitActor->GetPathName());
 	if (HitActor) Result->SetStringField(TEXT("actorClass"), HitActor->GetClass()->GetName());
 	if (HitComp)
 	{
@@ -2050,15 +2055,14 @@ TSharedPtr<FJsonValue> FEditorHandlers::RequestEditorShutdown(const TSharedPtr<F
 TSharedPtr<FJsonValue> FEditorHandlers::FocusViewportOnActor(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	AActor* TargetActor = FindActorByLabel(World, ActorLabel);
-	if (!TargetActor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor '%s' not found"), *ActorLabel));
-	}
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* TargetActor = MCPResolveActor(World, Params, ActorErr);
+	if (!TargetActor) return ActorErr;
+	ActorLabel = TargetActor->GetActorLabel();
 
 	// Get the viewport client
 	FLevelEditorViewportClient* ViewportClient = GCurrentLevelEditingViewportClient;
@@ -2101,6 +2105,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::FocusViewportOnActor(const TSharedPtr<FJ
 	auto Result = MCPSuccess();
 	Result->SetObjectField(TEXT("viewLocation"), LocObj);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), TargetActor->GetPathName());
 	return MCPResult(Result);
 }
 TSharedPtr<FJsonValue> FEditorHandlers::CreateNewLevel(const TSharedPtr<FJsonObject>& Params)
@@ -2558,10 +2563,18 @@ TSharedPtr<FJsonValue> FEditorHandlers::CaptureScenePng(const TSharedPtr<FJsonOb
 	// #599: focusActorLabel frames the capture on a specific actor by computing
 	// a camera position from the actor's bounds and looking at its center.
 	const FString FocusLabel = OptionalString(Params, TEXT("focusActorLabel"));
-	if (!FocusLabel.IsEmpty())
+	const FString FocusPath = OptionalString(Params, TEXT("focusActorPath"));
+	if (!FocusLabel.IsEmpty() || !FocusPath.IsEmpty())
 	{
-		AActor* Focus = FindActorByLabelNameOrPath(World, FocusLabel);
-		if (!Focus) return MCPError(FString::Printf(TEXT("focusActorLabel not found: %s"), *FocusLabel));
+		// #983: framing on the wrong copy of a duplicated label is a capture
+		// that quietly shows somewhere else entirely.
+		FMCPActorSelector FocusSel;
+		FocusSel.LabelKey = TEXT("focusActorLabel");
+		FocusSel.PathKey = TEXT("focusActorPath");
+		FocusSel.Match = EMCPActorMatch::LabelNameOrPath;
+		TSharedPtr<FJsonValue> FocusErr;
+		AActor* Focus = MCPResolveActor(World, Params, FocusErr, FocusSel);
+		if (!Focus) return FocusErr;
 		FVector Origin, Extent;
 		Focus->GetActorBounds(false, Origin, Extent);
 		const double Radius = FMath::Max(Extent.Size(), 50.0);

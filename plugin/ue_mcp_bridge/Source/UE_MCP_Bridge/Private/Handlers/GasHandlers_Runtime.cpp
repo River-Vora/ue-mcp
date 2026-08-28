@@ -104,7 +104,7 @@ namespace
 		TSharedPtr<FJsonValue>& OutError)
 	{
 		FString ActorLabel;
-		if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel))
+		if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel))
 		{
 			OutError = Err;
 			return nullptr;
@@ -120,14 +120,14 @@ namespace
 		// #956: label, internal name, or full object path, in that fixed order.
 		// A verification actor spawned into the editor world often has no label
 		// worth guessing, so the path has to be a first-class way to name it.
-		// The miss message names what was searched and offers near matches.
-		AActor* Actor = FindActorByLabelNameOrPath(World, ActorLabel);
-		if (!Actor)
-		{
-			OutError = MCPError(MCPDescribeActorLookupMiss(
-				World, ActorLabel, World->IsPlayInEditor() ? TEXT("PIE") : TEXT("editor")));
-			return nullptr;
-		}
+		// #983: actorPath is its own parameter now, and a label that names more
+		// than one actor is refused rather than answered from one of them.
+		FMCPActorSelector ActorSel;
+		ActorSel.Match = EMCPActorMatch::LabelNameOrPath;
+		ActorSel.WorldLabel = World->IsPlayInEditor() ? TEXT("PIE") : TEXT("editor");
+		AActor* Actor = MCPResolveActor(World, Params, OutError, ActorSel);
+		if (!Actor) return nullptr;
+		ActorLabel = Actor->GetActorLabel();
 		OutActor = Actor;
 
 		UAbilitySystemComponent* ASC =

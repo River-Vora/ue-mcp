@@ -542,21 +542,28 @@ TSharedPtr<FJsonValue> FLevelHandlers::PlaceActor(const TSharedPtr<FJsonObject>&
 
 TSharedPtr<FJsonValue> FLevelHandlers::DeleteActor(const TSharedPtr<FJsonObject>& Params)
 {
-	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	FString Selector;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), Selector)) return Err;
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	AActor* ActorToDelete = FindActorByLabel(World, ActorLabel);
+	// #983: a duplicate label is refused rather than deleted at random. The
+	// miss stays idempotent, but "already deleted" would be a lie when three
+	// actors carry the label and all three are still there.
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* ActorToDelete = MCPResolveActor(World, Params, ActorErr);
+	if (!ActorToDelete && MCPIsAmbiguousActorError(ActorErr)) return ActorErr;
 
 	// Idempotent: deleting a non-existent actor is a no-op, not an error.
 	if (!ActorToDelete)
 	{
 		auto Result = MCPSuccess();
-		Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+		Result->SetStringField(TEXT("actorLabel"), Selector);
 		Result->SetBoolField(TEXT("alreadyDeleted"), true);
 		return MCPResult(Result);
 	}
+
+	const FString ActorLabel = ActorToDelete->GetActorLabel();
 
 	World->DestroyActor(ActorToDelete);
 
@@ -570,14 +577,8 @@ TSharedPtr<FJsonValue> FLevelHandlers::DeleteActor(const TSharedPtr<FJsonObject>
 
 TSharedPtr<FJsonValue> FLevelHandlers::GetActorDetails(const TSharedPtr<FJsonObject>& Params)
 {
-	FString ActorLabel;
-	FString ActorPath;
-	bool bHasLabel = Params->TryGetStringField(TEXT("actorLabel"), ActorLabel);
-	bool bHasPath = Params->TryGetStringField(TEXT("actorPath"), ActorPath);
-	if (!bHasLabel && !bHasPath)
-	{
-		return MCPError(TEXT("Missing 'actorLabel' or 'actorPath' parameter"));
-	}
+	FString Selector;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), Selector)) return Err;
 
 	// World selection: "editor" (default) or "pie" (#111)
 	// #778: this hand-rolled loop took the FIRST PIE context, i.e. the server,
@@ -595,17 +596,26 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorDetails(const TSharedPtr<FJsonObj
 		if (!World) return MCPError(TEXT("No editor world available"));
 	}
 
-	AActor* Actor = FindActorByLabelOrPath(World, bHasLabel ? ActorLabel : FString(), bHasPath ? ActorPath : FString());
-	if (!Actor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), bHasPath ? *ActorPath : *ActorLabel));
-	}
+	// LabelOrName, not label alone: a caller often has an internal name rather
+	// than a label, because a PIE-spawned actor has no label worth guessing.
+	// The label tier is still exhausted first and the name tier refuses on
+	// ambiguity, so accepting the name cannot reintroduce a silent pick (#983).
+	FMCPActorSelector ActorSel;
+	ActorSel.Match = EMCPActorMatch::LabelOrName;
+	ActorSel.WorldLabel = World->IsGameWorld() ? TEXT("PIE") : TEXT("editor");
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr, ActorSel);
+	if (!Actor) return ActorErr;
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("label"), Actor->GetActorLabel());
 	Result->SetStringField(TEXT("name"), Actor->GetName());
 	Result->SetStringField(TEXT("class"), Actor->GetClass()->GetName());
 	Result->SetStringField(TEXT("path"), Actor->GetPathName());
+	// #983: the same value under the name the selector uses, so the round trip
+	// back into any actor-targeting action is a copy of one field.
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
+	Result->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
 	Result->SetStringField(TEXT("folderPath"), Actor->GetFolderPath().ToString());
 
 	FVector Location = Actor->GetActorLocation();
@@ -708,14 +718,8 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorDetails(const TSharedPtr<FJsonObj
 //   - reflected UPROPERTY name/type/value when includeProperties=true
 TSharedPtr<FJsonValue> FLevelHandlers::GetComponentTree(const TSharedPtr<FJsonObject>& Params)
 {
-	FString ActorLabel;
-	FString ActorPath;
-	const bool bHasLabel = Params->TryGetStringField(TEXT("actorLabel"), ActorLabel);
-	const bool bHasPath = Params->TryGetStringField(TEXT("actorPath"), ActorPath);
-	if (!bHasLabel && !bHasPath)
-	{
-		return MCPError(TEXT("Missing 'actorLabel' or 'actorPath' parameter"));
-	}
+	FString Selector;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), Selector)) return Err;
 
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
 	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
@@ -724,11 +728,16 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentTree(const TSharedPtr<FJsonOb
 		return MCPError(FString::Printf(TEXT("World '%s' not available"), *WorldScope));
 	}
 
-	AActor* Actor = FindActorByLabelOrPath(World, bHasLabel ? ActorLabel : FString(), bHasPath ? ActorPath : FString());
-	if (!Actor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), bHasPath ? *ActorPath : *ActorLabel));
-	}
+	// LabelOrName, not label alone: a caller often has an internal name rather
+	// than a label, because a PIE-spawned actor has no label worth guessing.
+	// The label tier is still exhausted first and the name tier refuses on
+	// ambiguity, so accepting the name cannot reintroduce a silent pick (#983).
+	FMCPActorSelector ActorSel;
+	ActorSel.Match = EMCPActorMatch::LabelOrName;
+	ActorSel.WorldLabel = World->IsGameWorld() ? TEXT("PIE") : TEXT("editor");
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr, ActorSel);
+	if (!Actor) return ActorErr;
 
 	const bool bIncludeProperties = OptionalBool(Params, TEXT("includeProperties"));
 	const FString PropertyFilter = OptionalString(Params, TEXT("componentClass"));
@@ -932,6 +941,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentTree(const TSharedPtr<FJsonOb
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("actorClass"), Actor->GetClass()->GetName());
 	Result->SetNumberField(TEXT("componentCount"), CompArr.Num());
 	Result->SetArrayField(TEXT("components"), CompArr);
@@ -944,19 +954,30 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentTree(const TSharedPtr<FJsonOb
 // required execute_python with MathLibrary.inverse_transform_location.
 TSharedPtr<FJsonValue> FLevelHandlers::GetRelativeTransform(const TSharedPtr<FJsonObject>& Params)
 {
-	FString TargetLabel;
-	if (auto Err = RequireStringAlt(Params, TEXT("targetLabel"), TEXT("target"), TargetLabel)) return Err;
-	FString ReferenceLabel;
-	if (auto Err = RequireStringAlt(Params, TEXT("referenceLabel"), TEXT("reference"), ReferenceLabel)) return Err;
-
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
 	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(FString::Printf(TEXT("World '%s' not available"), *WorldScope));
 
-	AActor* TargetActor = FindActorByLabel(World, TargetLabel);
-	AActor* ReferenceActor = FindActorByLabel(World, ReferenceLabel);
-	if (!TargetActor) return MCPError(FString::Printf(TEXT("Target actor not found: %s"), *TargetLabel));
-	if (!ReferenceActor) return MCPError(FString::Printf(TEXT("Reference actor not found: %s"), *ReferenceLabel));
+	// #983: both ends take a path. Two duplicated labels would otherwise
+	// produce a relative transform between whichever pair the actor iterator
+	// reached first, which is exactly the number this action exists to trust.
+	FMCPActorSelector TargetSel;
+	TargetSel.LabelKey = TEXT("targetLabel");
+	TargetSel.PathKey = TEXT("targetPath");
+	TargetSel.AltLabelKey = TEXT("target");
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* TargetActor = MCPResolveActor(World, Params, ActorErr, TargetSel);
+	if (!TargetActor) return ActorErr;
+
+	FMCPActorSelector ReferenceSel;
+	ReferenceSel.LabelKey = TEXT("referenceLabel");
+	ReferenceSel.PathKey = TEXT("referencePath");
+	ReferenceSel.AltLabelKey = TEXT("reference");
+	AActor* ReferenceActor = MCPResolveActor(World, Params, ActorErr, ReferenceSel);
+	if (!ReferenceActor) return ActorErr;
+
+	const FString TargetLabel = TargetActor->GetActorLabel();
+	const FString ReferenceLabel = ReferenceActor->GetActorLabel();
 
 	const FTransform Target = TargetActor->GetActorTransform();
 	const FTransform Reference = ReferenceActor->GetActorTransform();
@@ -979,7 +1000,9 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetRelativeTransform(const TSharedPtr<FJs
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("targetLabel"), TargetLabel);
+	Result->SetStringField(TEXT("targetPath"), TargetActor->GetPathName());
 	Result->SetStringField(TEXT("referenceLabel"), ReferenceLabel);
+	Result->SetStringField(TEXT("referencePath"), ReferenceActor->GetPathName());
 	Result->SetObjectField(TEXT("location"), MakeVec(Relative.GetLocation()));
 	Result->SetObjectField(TEXT("rotation"), MakeRot(Relative.GetRotation().Rotator()));
 	Result->SetObjectField(TEXT("scale"), MakeVec(Relative.GetScale3D()));
@@ -1082,21 +1105,27 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetSelectedActors(const TSharedPtr<FJsonO
 }
 TSharedPtr<FJsonValue> FLevelHandlers::MoveActor(const TSharedPtr<FJsonObject>& Params)
 {
-	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	FString Selector;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), Selector)) return Err;
 
 	// #586: support the PIE world so a label from get_outliner {world:pie}
-	// resolves and the live actor moves. FindActorByLabelOrName also matches the
-	// runtime instance name PIE shows.
+	// resolves and the live actor moves. The resolver also matches the runtime
+	// instance name PIE shows.
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
 	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
-	AActor* Actor = FindActorByLabelOrName(World, ActorLabel);
-	if (!Actor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-	}
+	// LabelOrName, not label alone: a caller often has an internal name rather
+	// than a label, because a PIE-spawned actor has no label worth guessing.
+	// The label tier is still exhausted first and the name tier refuses on
+	// ambiguity, so accepting the name cannot reintroduce a silent pick (#983).
+	FMCPActorSelector ActorSel;
+	ActorSel.Match = EMCPActorMatch::LabelOrName;
+	ActorSel.WorldLabel = World->IsGameWorld() ? TEXT("PIE") : TEXT("editor");
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr, ActorSel);
+	if (!Actor) return ActorErr;
+	const FString ActorLabel = Actor->GetActorLabel();
 
 	// Capture previous transform for rollback.
 	const FVector PreviousLocation = Actor->GetActorLocation();
@@ -1122,9 +1151,13 @@ TSharedPtr<FJsonValue> FLevelHandlers::MoveActor(const TSharedPtr<FJsonObject>& 
 	Result->SetObjectField(TEXT("rotation"), MCPRotatorToJsonObject(Actor->GetActorRotation()));
 	Result->SetObjectField(TEXT("scale"), MCPVec3ToJsonObject(Actor->GetActorScale3D()));
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 
-	// Self-inverse: call move_actor with previous transform.
+	// Self-inverse: call move_actor with previous transform. #983: the undo
+	// travels by path, so replaying it cannot land on a different actor that
+	// happens to share the label.
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Payload->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Payload->SetStringField(TEXT("actorLabel"), ActorLabel);
 	Payload->SetObjectField(TEXT("location"), MCPVec3ToJsonObject(PreviousLocation));
 	Payload->SetObjectField(TEXT("rotation"), MCPRotatorToJsonObject(PreviousRotation));
@@ -1139,23 +1172,27 @@ TSharedPtr<FJsonValue> FLevelHandlers::MoveActor(const TSharedPtr<FJsonObject>& 
 // reading two transforms and computing the look-at client-side.
 TSharedPtr<FJsonValue> FLevelHandlers::AimActorAt(const TSharedPtr<FJsonObject>& Params)
 {
-	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	FString Selector;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), Selector)) return Err;
 
 	FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
 	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(TEXT("World not available"));
 
-	AActor* Actor = FindActorByLabel(World, ActorLabel);
-	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr);
+	if (!Actor) return ActorErr;
+	const FString ActorLabel = Actor->GetActorLabel();
 
 	// Resolve the target point: an explicit target Vec3, or another actor's location.
 	FVector TargetLocation;
-	const FString TargetActorLabel = OptionalString(Params, TEXT("targetActor"));
-	if (!TargetActorLabel.IsEmpty())
+	if (Params->HasField(TEXT("targetActor")) || Params->HasField(TEXT("targetActorPath")))
 	{
-		AActor* TargetActor = FindActorByLabel(World, TargetActorLabel);
-		if (!TargetActor) return MCPError(FString::Printf(TEXT("Target actor not found: %s"), *TargetActorLabel));
+		FMCPActorSelector TargetSel;
+		TargetSel.LabelKey = TEXT("targetActor");
+		TargetSel.PathKey = TEXT("targetActorPath");
+		AActor* TargetActor = MCPResolveActor(World, Params, ActorErr, TargetSel);
+		if (!TargetActor) return ActorErr;
 		TargetLocation = TargetActor->GetActorLocation();
 	}
 	else if (Params->HasField(TEXT("target")))
@@ -1164,7 +1201,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::AimActorAt(const TSharedPtr<FJsonObject>&
 	}
 	else
 	{
-		return MCPError(TEXT("Supply 'target' (Vec3) or 'targetActor' (label)"));
+		return MCPError(TEXT("Supply 'target' (Vec3), 'targetActor' (label) or 'targetActorPath' (object path)"));
 	}
 
 	const FVector ActorLocation = Actor->GetActorLocation();
@@ -1183,11 +1220,14 @@ TSharedPtr<FJsonValue> FLevelHandlers::AimActorAt(const TSharedPtr<FJsonObject>&
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetObjectField(TEXT("rotation"), MCPRotatorToJsonObject(Actor->GetActorRotation()));
 	Result->SetObjectField(TEXT("target"), MCPVec3ToJsonObject(TargetLocation));
 
-	// Rollback: restore the prior rotation via move_actor.
+	// Rollback: restore the prior rotation via move_actor, by path so the undo
+	// cannot land on a namesake (#983).
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Payload->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Payload->SetStringField(TEXT("actorLabel"), ActorLabel);
 	Payload->SetObjectField(TEXT("rotation"), MCPRotatorToJsonObject(PreviousRotation));
 	MCPSetRollback(Result, TEXT("move_actor"), Payload);
@@ -1226,10 +1266,13 @@ TSharedPtr<FJsonValue> FLevelHandlers::NavProjectPoint(const TSharedPtr<FJsonObj
 
 TSharedPtr<FJsonValue> FLevelHandlers::SelectActors(const TSharedPtr<FJsonObject>& Params)
 {
-	const TArray<TSharedPtr<FJsonValue>>* ActorLabelsArray = nullptr;
-	if (!Params->TryGetArrayField(TEXT("actorLabels"), ActorLabelsArray))
+	static const TArray<TSharedPtr<FJsonValue>> EmptySelection;
+	const TArray<TSharedPtr<FJsonValue>>* ActorLabelsArray = &EmptySelection;
+	const bool bHasLabels = Params->TryGetArrayField(TEXT("actorLabels"), ActorLabelsArray);
+	if (!bHasLabels) ActorLabelsArray = &EmptySelection;
+	if (!bHasLabels && !Params->HasField(TEXT("actorPaths")))
 	{
-		return MCPError(TEXT("Missing 'actorLabels' parameter"));
+		return MCPError(TEXT("Missing 'actorLabels' parameter (or 'actorPaths')"));
 	}
 
 	REQUIRE_EDITOR_WORLD(World);
@@ -1240,31 +1283,61 @@ TSharedPtr<FJsonValue> FLevelHandlers::SelectActors(const TSharedPtr<FJsonObject
 	TArray<TSharedPtr<FJsonValue>> SelectedArray;
 	TArray<TSharedPtr<FJsonValue>> NotFoundArray;
 
+	// #983: selection is the plural case, so a label naming several actors
+	// selects all of them rather than one at random. selectedPaths reports
+	// exactly which, and is what a follow-up write should target.
+	TArray<TSharedPtr<FJsonValue>> SelectedPathsArray;
 	for (const TSharedPtr<FJsonValue>& LabelValue : *ActorLabelsArray)
 	{
 		FString Label = LabelValue->AsString();
-		if (AActor* Match = FindActorByLabel(World, Label))
-		{
-			GEditor->SelectActor(Match, true, true, true);
-			SelectedArray.Add(MakeShared<FJsonValueString>(Label));
-		}
-		else
+		TArray<AActor*> Matches;
+		MCPCollectActorsByToken(World, Label, EMCPActorMatch::Label, Matches);
+		if (Matches.Num() == 0)
 		{
 			NotFoundArray.Add(MakeShared<FJsonValueString>(Label));
+			continue;
+		}
+		for (AActor* Match : Matches)
+		{
+			GEditor->SelectActor(Match, true, true, true);
+			SelectedPathsArray.Add(MakeShared<FJsonValueString>(Match->GetPathName()));
+		}
+		SelectedArray.Add(MakeShared<FJsonValueString>(Label));
+	}
+
+	// An explicit path list selects exactly what it names, with no label
+	// resolution in the way at all.
+	const TArray<TSharedPtr<FJsonValue>>* ActorPathsArray = nullptr;
+	if (Params->TryGetArrayField(TEXT("actorPaths"), ActorPathsArray))
+	{
+		for (const TSharedPtr<FJsonValue>& PathValue : *ActorPathsArray)
+		{
+			const FString Path = PathValue->AsString();
+			if (AActor* Match = MCPFindActorByPath(World, Path))
+			{
+				GEditor->SelectActor(Match, true, true, true);
+				SelectedPathsArray.Add(MakeShared<FJsonValueString>(Match->GetPathName()));
+				SelectedArray.Add(MakeShared<FJsonValueString>(Match->GetActorLabel()));
+			}
+			else
+			{
+				NotFoundArray.Add(MakeShared<FJsonValueString>(Path));
+			}
 		}
 	}
 
 	auto Result = MCPSuccess();
 	Result->SetArrayField(TEXT("selected"), SelectedArray);
+	Result->SetArrayField(TEXT("selectedPaths"), SelectedPathsArray);
 	Result->SetArrayField(TEXT("notFound"), NotFoundArray);
-	Result->SetNumberField(TEXT("selectedCount"), SelectedArray.Num());
+	Result->SetNumberField(TEXT("selectedCount"), SelectedPathsArray.Num());
 
 	return MCPResult(Result);
 }
 TSharedPtr<FJsonValue> FLevelHandlers::AddComponentToActor(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
 	FString ComponentClass;
 	if (auto Err = RequireString(Params, TEXT("componentClass"), ComponentClass)) return Err;
@@ -1276,11 +1349,10 @@ TSharedPtr<FJsonValue> FLevelHandlers::AddComponentToActor(const TSharedPtr<FJso
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	AActor* Actor = FindActorByLabel(World, ActorLabel);
-	if (!Actor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-	}
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	// Idempotency: check for an existing component with the same name on the actor.
 	FName CompName = FName(*ComponentName);
@@ -1296,6 +1368,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::AddComponentToActor(const TSharedPtr<FJso
 			auto ExistingResult = MCPSuccess();
 			MCPSetExisted(ExistingResult);
 			ExistingResult->SetStringField(TEXT("actorLabel"), ActorLabel);
+			ExistingResult->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 			ExistingResult->SetStringField(TEXT("componentName"), ComponentName);
 			ExistingResult->SetStringField(TEXT("componentClass"), Existing->GetClass()->GetName());
 			return MCPResult(ExistingResult);
@@ -1345,10 +1418,12 @@ TSharedPtr<FJsonValue> FLevelHandlers::AddComponentToActor(const TSharedPtr<FJso
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("componentName"), ComponentName);
 	Result->SetStringField(TEXT("componentClass"), NewComponent->GetClass()->GetName());
 
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Payload->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Payload->SetStringField(TEXT("actorLabel"), ActorLabel);
 	Payload->SetStringField(TEXT("componentName"), ComponentName);
 	MCPSetRollback(Result, TEXT("remove_component_from_actor"), Payload);
@@ -1360,14 +1435,16 @@ TSharedPtr<FJsonValue> FLevelHandlers::AddComponentToActor(const TSharedPtr<FJso
 TSharedPtr<FJsonValue> FLevelHandlers::RemoveComponentFromActor(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 	FString ComponentName;
 	if (auto Err = RequireString(Params, TEXT("componentName"), ComponentName)) return Err;
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	AActor* Actor = FindActorByLabel(World, ActorLabel);
-	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	const FName CompName(*ComponentName);
 	UActorComponent* Target = nullptr;
@@ -1380,6 +1457,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::RemoveComponentFromActor(const TSharedPtr
 	{
 		auto Noop = MCPSuccess();
 		Noop->SetStringField(TEXT("actorLabel"), ActorLabel);
+		Noop->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 		Noop->SetStringField(TEXT("componentName"), ComponentName);
 		Noop->SetBoolField(TEXT("alreadyDeleted"), true);
 		return MCPResult(Noop);
@@ -1393,6 +1471,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::RemoveComponentFromActor(const TSharedPtr
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("componentName"), ComponentName);
 	Result->SetStringField(TEXT("componentClass"), ComponentClass);
 	Result->SetBoolField(TEXT("deleted"), true);
@@ -1677,7 +1756,7 @@ static UActorComponent* FindNamedComponentOnActor(AActor* Actor, const FString& 
 TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
 	FString ComponentName = OptionalString(Params, TEXT("componentName"));
 
@@ -1698,12 +1777,13 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 	}
 	const bool bRuntimeWorld = World->IsGameWorld();
 
-	AActor* TargetActor = FindActorByLabelNameOrPath(World, ActorLabel);
-	if (!TargetActor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found in the %s world: %s"),
-			bRuntimeWorld ? TEXT("PIE") : TEXT("editor"), *ActorLabel));
-	}
+	FMCPActorSelector ActorSel;
+	ActorSel.Match = EMCPActorMatch::LabelNameOrPath;
+	ActorSel.WorldLabel = bRuntimeWorld ? TEXT("PIE") : TEXT("editor");
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* TargetActor = MCPResolveActor(World, Params, ActorErr, ActorSel);
+	if (!TargetActor) return ActorErr;
+	ActorLabel = TargetActor->GetActorLabel();
 
 	UActorComponent* TargetComp = FindComponentOnActor(TargetActor, ComponentName);
 	if (!TargetComp)
@@ -1848,9 +1928,21 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 						// Skip obvious non-identifiers
 						if (Token != TEXT("True") && Token != TEXT("False") && Token != TEXT("None") && !Token.IsNumeric())
 						{
-							if (AActor* Resolved = FindActorByLabel(World, Token))
+							// #983: a duplicated label here would wire the
+							// struct's object reference to whichever namesake
+							// the iterator reached first, so it is refused.
+							// An unmatched token is left alone, as before: it
+							// is probably an enum literal, not an actor.
+							TArray<AActor*> TokenMatches;
+							MCPCollectActorsByToken(World, Token, EMCPActorMatch::Label, TokenMatches);
+							if (TokenMatches.Num() > 1)
 							{
-								Result.Append(Resolved->GetPathName());
+								return MCPAmbiguousActorError(
+									Token, TEXT("value"), TEXT("actorPath"), TEXT("editor label"), TokenMatches);
+							}
+							if (TokenMatches.Num() == 1)
+							{
+								Result.Append(TokenMatches[0]->GetPathName());
 								i = End;
 								goto AppendDone;
 							}
@@ -1910,12 +2002,15 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), TargetActor->GetPathName());
 	Result->SetStringField(TEXT("componentClass"), TargetComp->GetClass()->GetName());
 	Result->SetStringField(TEXT("propertyName"), PropertyName);
 	Result->SetStringField(TEXT("previousValue"), PreviousValueStr);
 
-	// Self-inverse: same handler with previous value as string.
+	// Self-inverse: same handler with previous value as string, addressed by
+	// path so the undo cannot land on a namesake (#983).
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Payload->SetStringField(TEXT("actorPath"), TargetActor->GetPathName());
 	Payload->SetStringField(TEXT("actorLabel"), ActorLabel);
 	if (!ComponentName.IsEmpty()) Payload->SetStringField(TEXT("componentName"), ComponentName);
 	Payload->SetStringField(TEXT("propertyName"), PropertyName);
@@ -1932,7 +2027,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetComponentProperty(const TSharedPtr<FJs
 TSharedPtr<FJsonValue> FLevelHandlers::GetComponentDetails(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
 	const FString ComponentName = OptionalString(Params, TEXT("componentName"));
 	// #584: optionally dump arbitrary UPROPERTY values (custom fields,
@@ -1947,11 +2042,13 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentDetails(const TSharedPtr<FJso
 	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
-	AActor* TargetActor = FindActorByLabelNameOrPath(World, ActorLabel);
-	if (!TargetActor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-	}
+	FMCPActorSelector ActorSel;
+	ActorSel.Match = EMCPActorMatch::LabelNameOrPath;
+	ActorSel.WorldLabel = World->IsGameWorld() ? TEXT("PIE") : TEXT("editor");
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* TargetActor = MCPResolveActor(World, Params, ActorErr, ActorSel);
+	if (!TargetActor) return ActorErr;
+	ActorLabel = TargetActor->GetActorLabel();
 
 	auto DescribeComponent = [bIncludeValues, &PropFilter](UActorComponent* Comp) -> TSharedPtr<FJsonObject>
 	{
@@ -2006,6 +2103,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetComponentDetails(const TSharedPtr<FJso
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), TargetActor->GetPathName());
 
 	if (!ComponentName.IsEmpty())
 	{
@@ -2159,7 +2257,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetWorldSettings(const TSharedPtr<FJsonOb
 TSharedPtr<FJsonValue> FLevelHandlers::SetActorMaterial(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
 	FString MaterialPath;
 	if (auto Err = RequireString(Params, TEXT("materialPath"), MaterialPath)) return Err;
@@ -2168,11 +2266,10 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorMaterial(const TSharedPtr<FJsonOb
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	AActor* Actor = FindActorByLabel(World, ActorLabel);
-	if (!Actor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-	}
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, *MaterialPath);
 	if (!Material)
@@ -2199,6 +2296,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorMaterial(const TSharedPtr<FJsonOb
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("materialPath"), MaterialPath);
 	Result->SetNumberField(TEXT("slotIndex"), SlotIndex);
 	Result->SetStringField(TEXT("previousMaterialPath"), PreviousMaterialPath);
@@ -2209,6 +2307,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorMaterial(const TSharedPtr<FJsonOb
 	if (!PreviousMaterialPath.IsEmpty())
 	{
 		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 		Payload->SetStringField(TEXT("actorLabel"), ActorLabel);
 		Payload->SetStringField(TEXT("materialPath"), PreviousMaterialPath);
 		Payload->SetNumberField(TEXT("slotIndex"), SlotIndex);
@@ -2458,7 +2557,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetRVTSummary(const TSharedPtr<FJsonObjec
 TSharedPtr<FJsonValue> FLevelHandlers::SetWaterBodyProperty(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 	FString PropertyName;
 	if (auto Err = RequireString(Params, TEXT("propertyName"), PropertyName)) return Err;
 
@@ -2475,8 +2574,10 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetWaterBodyProperty(const TSharedPtr<FJs
 
 	REQUIRE_EDITOR_WORLD(World);
 
-	AActor* Actor = FindActorByLabel(World, ActorLabel);
-	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	UClass* WBClass = LoadClass<UActorComponent>(nullptr, TEXT("/Script/Water.WaterBodyComponent"));
 	if (!WBClass)
@@ -2509,6 +2610,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetWaterBodyProperty(const TSharedPtr<FJs
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("componentName"), WBComp->GetName());
 	Result->SetStringField(TEXT("componentClass"), WBComp->GetClass()->GetName());
 	Result->SetStringField(TEXT("propertyName"), PropertyName);
@@ -2518,21 +2620,23 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetWaterBodyProperty(const TSharedPtr<FJs
 
 // ─── #188 get_actor_bounds ──────────────────────────────────────────
 // Returns the axis-aligned bounding box (origin + extent) for an actor
-// found by its editor label.
+// named by its editor label or its object path.
 TSharedPtr<FJsonValue> FLevelHandlers::GetActorBounds(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("editor"));
 	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
-	AActor* Actor = FindActorByLabelNameOrPath(World, ActorLabel);
-	if (!Actor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
-	}
+	FMCPActorSelector ActorSel;
+	ActorSel.Match = EMCPActorMatch::LabelNameOrPath;
+	ActorSel.WorldLabel = World->IsGameWorld() ? TEXT("PIE") : TEXT("editor");
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr, ActorSel);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	FVector Origin;
 	FVector Extent;
@@ -2564,6 +2668,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetActorBounds(const TSharedPtr<FJsonObje
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetObjectField(TEXT("origin"), OriginObj);
 	Result->SetObjectField(TEXT("extent"), ExtentObj);
 	return MCPResult(Result);
@@ -2609,15 +2714,16 @@ TSharedPtr<FJsonValue> FLevelHandlers::ResolveActor(const TSharedPtr<FJsonObject
 }
 
 // #202/#230: generic per-instance UPROPERTY writer for level actors. Resolves
-// the actor by label, walks dotted property paths, and routes the value
-// through the recursive JSON setter so object refs / vectors / nested
-// structs all apply. The optional `force` flag flips off the EditDefaultsOnly
-// gate so per-instance overrides on EditDefaultsOnly properties go through
-// (the per-instance value always existed - the editor UI just hides it).
+// the actor by label or object path, walks dotted property paths, and routes
+// the value through the recursive JSON setter so object refs / vectors /
+// nested structs all apply. The optional `force` flag flips off the
+// EditDefaultsOnly gate so per-instance overrides on EditDefaultsOnly
+// properties go through (the per-instance value always existed - the editor
+// UI just hides it).
 TSharedPtr<FJsonValue> FLevelHandlers::SetActorProperty(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
 	FString PropertyName;
 	if (auto Err = RequireString(Params, TEXT("propertyName"), PropertyName)) return Err;
@@ -2638,19 +2744,22 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorProperty(const TSharedPtr<FJsonOb
 	}
 
 	AActor* TargetActor = nullptr;
-	const bool bWorldSettings = ActorLabel.Equals(TEXT("WorldSettings"), ESearchCase::IgnoreCase);
+	const bool bWorldSettings =
+		ActorLabel.Equals(TEXT("WorldSettings"), ESearchCase::IgnoreCase)
+		&& !Params->HasField(TEXT("actorPath"));
 	if (bWorldSettings)
 	{
 		TargetActor = World->GetWorldSettings();
+		if (!TargetActor) return MCPError(TEXT("World settings not available"));
 	}
 	else
 	{
-		TargetActor = FindActorByLabel(World, ActorLabel);
-	}
-
-	if (!TargetActor)
-	{
-		return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+		TSharedPtr<FJsonValue> ActorErr;
+		FMCPActorSelector ActorSel;
+		ActorSel.WorldLabel = World->IsGameWorld() ? TEXT("PIE") : TEXT("editor");
+		TargetActor = MCPResolveActor(World, Params, ActorErr, ActorSel);
+		if (!TargetActor) return ActorErr;
+		ActorLabel = TargetActor->GetActorLabel();
 	}
 
 	TArray<FString> PathParts;
@@ -2765,15 +2874,30 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorProperty(const TSharedPtr<FJsonOb
 	TargetActor->Modify();
 
 	// If the JSON value is a string and the property is an object reference,
-	// try resolving the string as an actor label first so callers can write
-	// {value: "Hopper_01"} for AHopper* references.
+	// try resolving the string as an actor label or object path first, so
+	// callers can write {value: "Hopper_01"} for AHopper* references and hand
+	// back an actorPath when the label is not unique.
 	TSharedPtr<FJsonValue> Value = *ValueField;
 	if (Value->Type == EJson::String)
 	{
 		FString S = Value->AsString();
 		if (FObjectProperty* OP = CastField<FObjectProperty>(Prop))
 		{
-			AActor* RefActor = FindActorByLabel(World, S);
+			// LabelNameOrPath, where this used to be label alone: the value
+			// slot has to take an actorPath back, which is the whole point of
+			// returning one. An actor object path contains ":PersistentLevel."
+			// and so cannot collide with an asset path, and a value matching
+			// nothing still falls through to the generic setter as before.
+			TArray<AActor*> RefMatches;
+			MCPCollectActorsByToken(World, S, EMCPActorMatch::LabelNameOrPath, RefMatches);
+			// #983: wiring a reference to whichever namesake came first is the
+			// silent wrong write this issue is about, so it is refused here too.
+			if (RefMatches.Num() > 1)
+			{
+				Prop->PropertyFlags = OriginalFlags;
+				return MCPAmbiguousActorError(S, TEXT("value"), TEXT("actorPath"), TEXT("editor label"), RefMatches);
+			}
+			AActor* RefActor = RefMatches.Num() == 1 ? RefMatches[0] : nullptr;
 			if (RefActor && RefActor->IsA(OP->PropertyClass))
 			{
 				OP->SetObjectPropertyValue(ValuePtr, RefActor);
@@ -2811,7 +2935,16 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorProperty(const TSharedPtr<FJsonOb
 				{
 					FString Label;
 					(*Items)[i]->TryGetString(Label);
-					AActor* Ref = FindActorByLabel(World, Label);
+					TArray<AActor*> ElementMatches;
+					MCPCollectActorsByToken(World, Label, EMCPActorMatch::LabelNameOrPath, ElementMatches);
+					if (ElementMatches.Num() > 1)
+					{
+						// #983: one ambiguous entry poisons the whole array,
+						// so the write is refused before any element lands.
+						Prop->PropertyFlags = OriginalFlags;
+						return MCPAmbiguousActorError(Label, TEXT("value"), TEXT("actorPath"), TEXT("editor label"), ElementMatches);
+					}
+					AActor* Ref = ElementMatches.Num() == 1 ? ElementMatches[0] : nullptr;
 					if (!Ref)
 					{
 						Prop->PropertyFlags = OriginalFlags;
@@ -2848,10 +2981,13 @@ WriteDone:
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), TargetActor->GetPathName());
 	Result->SetStringField(TEXT("propertyName"), PropertyName);
 	Result->SetStringField(TEXT("previousValue"), PrevValue);
 
+	// The undo travels by path so replaying it cannot land on a namesake (#983).
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+	if (!bWorldSettings) Payload->SetStringField(TEXT("actorPath"), TargetActor->GetPathName());
 	Payload->SetStringField(TEXT("actorLabel"), ActorLabel);
 	Payload->SetStringField(TEXT("propertyName"), PropertyName);
 	Payload->SetStringField(TEXT("value"), PrevValue);
@@ -2900,9 +3036,28 @@ TSharedPtr<FJsonValue> FLevelHandlers::ReadActorMotion(const TSharedPtr<FJsonObj
 			FString L; if (V->TryGetString(L) && !L.IsEmpty()) Labels.Add(L);
 		}
 	}
-	if (Labels.Num() == 0)
+	// #983: the same list spelled as object paths, which is what a caller
+	// reaches for when several actors share a label. These are kept apart from
+	// the label list and resolved by MCPFindActorByPath rather than folded into
+	// the label token tier, so the export-text form and a case difference both
+	// resolve here exactly as they do everywhere else.
+	TArray<FString> Paths;
+	FString SinglePath;
+	if (Params->TryGetStringField(TEXT("actorPath"), SinglePath) && !SinglePath.IsEmpty())
 	{
-		return MCPError(TEXT("Pass at least one of 'actorLabel' or 'actorLabels'"));
+		Paths.Add(SinglePath);
+	}
+	const TArray<TSharedPtr<FJsonValue>>* PathsArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("actorPaths"), PathsArr) && PathsArr)
+	{
+		for (const TSharedPtr<FJsonValue>& V : *PathsArr)
+		{
+			FString P; if (V->TryGetString(P) && !P.IsEmpty()) Paths.Add(P);
+		}
+	}
+	if (Labels.Num() == 0 && Paths.Num() == 0)
+	{
+		return MCPError(TEXT("Pass at least one of 'actorLabel', 'actorLabels', 'actorPath' or 'actorPaths'"));
 	}
 
 	auto VecToJson = [](const FVector& V) -> TSharedPtr<FJsonObject>
@@ -2920,16 +3075,37 @@ TSharedPtr<FJsonValue> FLevelHandlers::ReadActorMotion(const TSharedPtr<FJsonObj
 
 	TArray<TSharedPtr<FJsonValue>> Samples;
 	TArray<TSharedPtr<FJsonValue>> Missing;
+	TArray<AActor*> Targets;
 	for (const FString& Label : Labels)
 	{
-		AActor* Actor = FindActorByLabel(TargetWorld, Label);
-		if (!Actor)
+		// #983: this is a read, and a plural one, so a label naming several
+		// actors samples all of them rather than one at random. Each row
+		// carries actorPath, which is what a follow-up write should target.
+		TArray<AActor*> Matches;
+		MCPCollectActorsByToken(TargetWorld, Label, EMCPActorMatch::LabelNameOrPath, Matches);
+		if (Matches.Num() == 0)
 		{
 			Missing.Add(MakeShared<FJsonValueString>(Label));
 			continue;
 		}
+		for (AActor* Match : Matches) Targets.AddUnique(Match);
+	}
+	for (const FString& Path : Paths)
+	{
+		if (AActor* ByPath = MCPFindActorByPath(TargetWorld, Path))
+		{
+			Targets.AddUnique(ByPath);
+		}
+		else
+		{
+			Missing.Add(MakeShared<FJsonValueString>(Path));
+		}
+	}
+	for (AActor* Actor : Targets)
+	{
 		TSharedPtr<FJsonObject> S = MakeShared<FJsonObject>();
-		S->SetStringField(TEXT("actorLabel"), Label);
+		S->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
+		S->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 		S->SetStringField(TEXT("class"), Actor->GetClass()->GetName());
 		S->SetObjectField(TEXT("location"), VecToJson(Actor->GetActorLocation()));
 		S->SetObjectField(TEXT("rotation"), RotToJson(Actor->GetActorRotation()));
@@ -2987,10 +3163,12 @@ TSharedPtr<FJsonValue> FLevelHandlers::AddHismcInstances(const TSharedPtr<FJsonO
 {
 	REQUIRE_EDITOR_WORLD(World);
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 
-	AActor* Actor = FindActorByLabel(World, ActorLabel);
-	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	FString ComponentName = OptionalString(Params, TEXT("componentName"));
 	UInstancedStaticMeshComponent* ISMC = nullptr;
@@ -3071,6 +3249,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::AddHismcInstances(const TSharedPtr<FJsonO
 	auto Result = MCPSuccess();
 	MCPSetCreated(Result);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("componentName"), ISMC->GetName());
 	Result->SetStringField(TEXT("componentClass"), ISMC->GetClass()->GetName());
 	Result->SetNumberField(TEXT("addedCount"), AddedIndices.Num());
@@ -3102,9 +3281,11 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetInstanceTransforms(const TSharedPtr<FJ
 {
 	REQUIRE_EDITOR_WORLD(World);
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
-	AActor* Actor = FindActorByLabel(World, ActorLabel);
-	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	const FString ComponentName = OptionalString(Params, TEXT("componentName"));
 	UInstancedStaticMeshComponent* ISMC = ResolveISMC(Actor, ComponentName);
@@ -3127,6 +3308,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::GetInstanceTransforms(const TSharedPtr<FJ
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("componentName"), ISMC->GetName());
 	Result->SetNumberField(TEXT("count"), Count);
 	Result->SetBoolField(TEXT("worldSpace"), bWorldSpace);
@@ -3139,9 +3321,11 @@ TSharedPtr<FJsonValue> FLevelHandlers::UpdateInstanceTransform(const TSharedPtr<
 {
 	REQUIRE_EDITOR_WORLD(World);
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
-	AActor* Actor = FindActorByLabel(World, ActorLabel);
-	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	const FString ComponentName = OptionalString(Params, TEXT("componentName"));
 	UInstancedStaticMeshComponent* ISMC = ResolveISMC(Actor, ComponentName);
@@ -3174,6 +3358,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::UpdateInstanceTransform(const TSharedPtr<
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("componentName"), ISMC->GetName());
 	Result->SetNumberField(TEXT("index"), Index);
 	return MCPResult(Result);
@@ -3184,9 +3369,11 @@ TSharedPtr<FJsonValue> FLevelHandlers::RemoveInstance(const TSharedPtr<FJsonObje
 {
 	REQUIRE_EDITOR_WORLD(World);
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
-	AActor* Actor = FindActorByLabel(World, ActorLabel);
-	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	const FString ComponentName = OptionalString(Params, TEXT("componentName"));
 	UInstancedStaticMeshComponent* ISMC = ResolveISMC(Actor, ComponentName);
@@ -3206,6 +3393,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::RemoveInstance(const TSharedPtr<FJsonObje
 	auto Result = MCPSuccess();
 	Result->SetBoolField(TEXT("removed"), bOk);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 	Result->SetStringField(TEXT("componentName"), ISMC->GetName());
 	Result->SetNumberField(TEXT("remainingInstances"), ISMC->GetInstanceCount());
 	return MCPResult(Result);
@@ -3272,12 +3460,16 @@ TSharedPtr<FJsonValue> FLevelHandlers::ExportActorFbx(const TSharedPtr<FJsonObje
 {
 	REQUIRE_EDITOR_WORLD(World);
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 	FString OutputPath;
 	if (auto Err = RequireStringAlt(Params, TEXT("outputPath"), TEXT("filePath"), OutputPath)) return Err;
 
-	AActor* Actor = FindActorByLabelNameOrPath(World, ActorLabel);
-	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	FMCPActorSelector ActorSel;
+	ActorSel.Match = EMCPActorMatch::LabelNameOrPath;
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr, ActorSel);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	// Resolve the mesh asset from the actor (skeletal first, then static).
 	UObject* MeshAsset = nullptr;
@@ -3749,11 +3941,13 @@ TSharedPtr<FJsonValue> FLevelHandlers::DeleteActors(const TSharedPtr<FJsonObject
 TSharedPtr<FJsonValue> FLevelHandlers::AddActorTag(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);
-	FString ActorLabel; if (auto E = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return E;
+	FString ActorLabel; if (auto E = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return E;
 	FString Tag; if (auto E = RequireString(Params, TEXT("tag"), Tag)) return E;
 
-	AActor* A = FindActorByLabel(World, ActorLabel);
-	if (!A) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* A = MCPResolveActor(World, Params, ActorErr);
+	if (!A) return ActorErr;
+	ActorLabel = A->GetActorLabel();
 
 	const FName TagName(*Tag);
 	const bool bAlreadyHad = A->Tags.Contains(TagName);
@@ -3766,6 +3960,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::AddActorTag(const TSharedPtr<FJsonObject>
 	auto Result = MCPSuccess();
 	if (bAlreadyHad) MCPSetExisted(Result); else MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), A->GetPathName());
 	Result->SetStringField(TEXT("tag"), Tag);
 	TArray<TSharedPtr<FJsonValue>> TagsOut;
 	for (const FName& T : A->Tags) TagsOut.Add(MakeShared<FJsonValueString>(T.ToString()));
@@ -3776,11 +3971,13 @@ TSharedPtr<FJsonValue> FLevelHandlers::AddActorTag(const TSharedPtr<FJsonObject>
 TSharedPtr<FJsonValue> FLevelHandlers::RemoveActorTag(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);
-	FString ActorLabel; if (auto E = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return E;
+	FString ActorLabel; if (auto E = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return E;
 	FString Tag; if (auto E = RequireString(Params, TEXT("tag"), Tag)) return E;
 
-	AActor* A = FindActorByLabel(World, ActorLabel);
-	if (!A) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* A = MCPResolveActor(World, Params, ActorErr);
+	if (!A) return ActorErr;
+	ActorLabel = A->GetActorLabel();
 
 	const FName TagName(*Tag);
 	const int32 Removed = A->Tags.Remove(TagName);
@@ -3793,6 +3990,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::RemoveActorTag(const TSharedPtr<FJsonObje
 	auto Result = MCPSuccess();
 	if (Removed == 0) MCPSetExisted(Result); else MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), A->GetPathName());
 	Result->SetStringField(TEXT("tag"), Tag);
 	Result->SetNumberField(TEXT("removed"), Removed);
 	return MCPResult(Result);
@@ -3801,10 +3999,12 @@ TSharedPtr<FJsonValue> FLevelHandlers::RemoveActorTag(const TSharedPtr<FJsonObje
 TSharedPtr<FJsonValue> FLevelHandlers::SetActorTags(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);
-	FString ActorLabel; if (auto E = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return E;
+	FString ActorLabel; if (auto E = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return E;
 
-	AActor* A = FindActorByLabel(World, ActorLabel);
-	if (!A) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* A = MCPResolveActor(World, Params, ActorErr);
+	if (!A) return ActorErr;
+	ActorLabel = A->GetActorLabel();
 
 	const TArray<TSharedPtr<FJsonValue>>* TagsArr = nullptr;
 	if (!Params->TryGetArrayField(TEXT("tags"), TagsArr) || !TagsArr)
@@ -3827,6 +4027,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorTags(const TSharedPtr<FJsonObject
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), A->GetPathName());
 	TArray<TSharedPtr<FJsonValue>> Out;
 	for (const FName& T : A->Tags) Out.Add(MakeShared<FJsonValueString>(T.ToString()));
 	Result->SetArrayField(TEXT("tags"), Out);
@@ -3836,13 +4037,16 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorTags(const TSharedPtr<FJsonObject
 TSharedPtr<FJsonValue> FLevelHandlers::ListActorTags(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);
-	FString ActorLabel; if (auto E = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return E;
+	FString ActorLabel; if (auto E = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return E;
 
-	AActor* A = FindActorByLabel(World, ActorLabel);
-	if (!A) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* A = MCPResolveActor(World, Params, ActorErr);
+	if (!A) return ActorErr;
+	ActorLabel = A->GetActorLabel();
 
 	auto Result = MCPSuccess();
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), A->GetPathName());
 	TArray<TSharedPtr<FJsonValue>> Out;
 	for (const FName& T : A->Tags) Out.Add(MakeShared<FJsonValueString>(T.ToString()));
 	Result->SetArrayField(TEXT("tags"), Out);
@@ -3854,13 +4058,21 @@ TSharedPtr<FJsonValue> FLevelHandlers::ListActorTags(const TSharedPtr<FJsonObjec
 TSharedPtr<FJsonValue> FLevelHandlers::AttachActor(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);
-	FString ChildLabel; if (auto E = RequireString(Params, TEXT("childLabel"), ChildLabel)) return E;
-	FString ParentLabel; if (auto E = RequireString(Params, TEXT("parentLabel"), ParentLabel)) return E;
+	FString ChildLabel; if (auto E = RequireStringAlt(Params, TEXT("childLabel"), TEXT("childPath"), ChildLabel)) return E;
+	FString ParentLabel; if (auto E = RequireStringAlt(Params, TEXT("parentLabel"), TEXT("parentPath"), ParentLabel)) return E;
 
-	AActor* Child = FindActorByLabel(World, ChildLabel);
-	AActor* Parent = FindActorByLabel(World, ParentLabel);
-	if (!Child) return MCPError(FString::Printf(TEXT("Child actor not found: %s"), *ChildLabel));
-	if (!Parent) return MCPError(FString::Printf(TEXT("Parent actor not found: %s"), *ParentLabel));
+	// #983: both ends of an attachment take a path. Attaching to whichever
+	// namesake the iterator reached first is how a prop ends up parented to a
+	// building at the other end of the map.
+	FMCPActorSelector ChildSel; ChildSel.LabelKey = TEXT("childLabel"); ChildSel.PathKey = TEXT("childPath");
+	FMCPActorSelector ParentSel; ParentSel.LabelKey = TEXT("parentLabel"); ParentSel.PathKey = TEXT("parentPath");
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Child = MCPResolveActor(World, Params, ActorErr, ChildSel);
+	if (!Child) return ActorErr;
+	AActor* Parent = MCPResolveActor(World, Params, ActorErr, ParentSel);
+	if (!Parent) return ActorErr;
+	ChildLabel = Child->GetActorLabel();
+	ParentLabel = Parent->GetActorLabel();
 
 	const FString RuleStr = OptionalString(Params, TEXT("attachRule"), TEXT("KeepWorld")).ToLower();
 	EAttachmentRule Loc = EAttachmentRule::KeepWorld;
@@ -3877,10 +4089,13 @@ TSharedPtr<FJsonValue> FLevelHandlers::AttachActor(const TSharedPtr<FJsonObject>
 	MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("childLabel"), ChildLabel);
 	Result->SetStringField(TEXT("parentLabel"), ParentLabel);
+	Result->SetStringField(TEXT("childPath"), Child->GetPathName());
+	Result->SetStringField(TEXT("parentPath"), Parent->GetPathName());
 	Result->SetBoolField(TEXT("attached"), bOk);
 
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("childLabel"), ChildLabel);
+	Payload->SetStringField(TEXT("childPath"), Child->GetPathName());
 	MCPSetRollback(Result, TEXT("detach_actor"), Payload);
 	return MCPResult(Result);
 }
@@ -3888,10 +4103,13 @@ TSharedPtr<FJsonValue> FLevelHandlers::AttachActor(const TSharedPtr<FJsonObject>
 TSharedPtr<FJsonValue> FLevelHandlers::DetachActor(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);
-	FString ChildLabel; if (auto E = RequireString(Params, TEXT("childLabel"), ChildLabel)) return E;
+	FString ChildLabel; if (auto E = RequireStringAlt(Params, TEXT("childLabel"), TEXT("childPath"), ChildLabel)) return E;
 
-	AActor* Child = FindActorByLabel(World, ChildLabel);
-	if (!Child) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ChildLabel));
+	FMCPActorSelector ChildSel; ChildSel.LabelKey = TEXT("childLabel"); ChildSel.PathKey = TEXT("childPath");
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Child = MCPResolveActor(World, Params, ActorErr, ChildSel);
+	if (!Child) return ActorErr;
+	ChildLabel = Child->GetActorLabel();
 
 	Child->Modify();
 	Child->DetachFromActor(FDetachmentTransformRules(EDetachmentRule::KeepWorld, true));
@@ -3900,6 +4118,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::DetachActor(const TSharedPtr<FJsonObject>
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("childLabel"), ChildLabel);
+	Result->SetStringField(TEXT("childPath"), Child->GetPathName());
 	Result->SetBoolField(TEXT("detached"), true);
 	return MCPResult(Result);
 }
@@ -3910,13 +4129,21 @@ TSharedPtr<FJsonValue> FLevelHandlers::DetachActor(const TSharedPtr<FJsonObject>
 TSharedPtr<FJsonValue> FLevelHandlers::AttachComponent(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);
-	FString ChildLabel; if (auto E = RequireString(Params, TEXT("childLabel"), ChildLabel)) return E;
-	FString ParentLabel; if (auto E = RequireString(Params, TEXT("parentLabel"), ParentLabel)) return E;
+	FString ChildLabel; if (auto E = RequireStringAlt(Params, TEXT("childLabel"), TEXT("childPath"), ChildLabel)) return E;
+	FString ParentLabel; if (auto E = RequireStringAlt(Params, TEXT("parentLabel"), TEXT("parentPath"), ParentLabel)) return E;
 
-	AActor* Child = FindActorByLabel(World, ChildLabel);
-	AActor* Parent = FindActorByLabel(World, ParentLabel);
-	if (!Child) return MCPError(FString::Printf(TEXT("Child actor not found: %s"), *ChildLabel));
-	if (!Parent) return MCPError(FString::Printf(TEXT("Parent actor not found: %s"), *ParentLabel));
+	// #983: both ends of an attachment take a path. Attaching to whichever
+	// namesake the iterator reached first is how a prop ends up parented to a
+	// building at the other end of the map.
+	FMCPActorSelector ChildSel; ChildSel.LabelKey = TEXT("childLabel"); ChildSel.PathKey = TEXT("childPath");
+	FMCPActorSelector ParentSel; ParentSel.LabelKey = TEXT("parentLabel"); ParentSel.PathKey = TEXT("parentPath");
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Child = MCPResolveActor(World, Params, ActorErr, ChildSel);
+	if (!Child) return ActorErr;
+	AActor* Parent = MCPResolveActor(World, Params, ActorErr, ParentSel);
+	if (!Parent) return ActorErr;
+	ChildLabel = Child->GetActorLabel();
+	ParentLabel = Parent->GetActorLabel();
 
 	const FString ChildComponentSelector = OptionalString(Params, TEXT("childComponentName"));
 	const FString ParentComponentSelector = OptionalString(Params, TEXT("parentComponentName"));
@@ -4142,10 +4369,13 @@ TSharedPtr<FJsonValue> FLevelHandlers::AttachComponent(const TSharedPtr<FJsonObj
 TSharedPtr<FJsonValue> FLevelHandlers::DetachComponent(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);
-	FString ChildLabel; if (auto E = RequireString(Params, TEXT("childLabel"), ChildLabel)) return E;
+	FString ChildLabel; if (auto E = RequireStringAlt(Params, TEXT("childLabel"), TEXT("childPath"), ChildLabel)) return E;
 
-	AActor* Child = FindActorByLabel(World, ChildLabel);
-	if (!Child) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ChildLabel));
+	FMCPActorSelector ChildSel; ChildSel.LabelKey = TEXT("childLabel"); ChildSel.PathKey = TEXT("childPath");
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Child = MCPResolveActor(World, Params, ActorErr, ChildSel);
+	if (!Child) return ActorErr;
+	ChildLabel = Child->GetActorLabel();
 
 	const FString ChildComponentSelector = OptionalString(Params, TEXT("childComponentName"));
 	UActorComponent* ResolvedChildComponent = ChildComponentSelector.IsEmpty()
@@ -4205,11 +4435,13 @@ TSharedPtr<FJsonValue> FLevelHandlers::DetachComponent(const TSharedPtr<FJsonObj
 TSharedPtr<FJsonValue> FLevelHandlers::SetActorMobility(const TSharedPtr<FJsonObject>& Params)
 {
 	REQUIRE_EDITOR_WORLD(World);
-	FString ActorLabel; if (auto E = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return E;
+	FString ActorLabel; if (auto E = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return E;
 	FString MobilityStr; if (auto E = RequireString(Params, TEXT("mobility"), MobilityStr)) return E;
 
-	AActor* A = FindActorByLabel(World, ActorLabel);
-	if (!A) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* A = MCPResolveActor(World, Params, ActorErr);
+	if (!A) return ActorErr;
+	ActorLabel = A->GetActorLabel();
 	USceneComponent* Root = A->GetRootComponent();
 	if (!Root) return MCPError(FString::Printf(TEXT("Actor '%s' has no root component"), *ActorLabel));
 
@@ -4228,12 +4460,14 @@ TSharedPtr<FJsonValue> FLevelHandlers::SetActorMobility(const TSharedPtr<FJsonOb
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Result->SetStringField(TEXT("actorPath"), A->GetPathName());
 	Result->SetStringField(TEXT("mobility"), MobilityStr);
 
 	const TCHAR* PrevStr = Prev == EComponentMobility::Movable ? TEXT("movable")
 		: Prev == EComponentMobility::Stationary ? TEXT("stationary") : TEXT("static");
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("actorLabel"), ActorLabel);
+	Payload->SetStringField(TEXT("actorPath"), A->GetPathName());
 	Payload->SetStringField(TEXT("mobility"), PrevStr);
 	MCPSetRollback(Result, TEXT("set_actor_mobility"), Payload);
 	return MCPResult(Result);
@@ -4518,7 +4752,22 @@ TSharedPtr<FJsonValue> FLevelHandlers::BatchTranslate(const TSharedPtr<FJsonObje
 		{
 			FString S; if (V.IsValid() && V->TryGetString(S))
 			{
-				if (AActor* A = FindActorByLabel(World, S)) Targets.Add(A);
+				// #983: a batch is the plural case, so a label naming several
+				// actors moves all of them rather than one at random.
+				TArray<AActor*> Matches;
+				MCPCollectActorsByToken(World, S, EMCPActorMatch::Label, Matches);
+				for (AActor* Match : Matches) Targets.Add(Match);
+			}
+		}
+	}
+	const TArray<TSharedPtr<FJsonValue>>* PathArr = nullptr;
+	if (Params->TryGetArrayField(TEXT("actorPaths"), PathArr) && PathArr)
+	{
+		for (const auto& V : *PathArr)
+		{
+			FString S; if (V.IsValid() && V->TryGetString(S))
+			{
+				if (AActor* A = MCPFindActorByPath(World, S)) Targets.Add(A);
 			}
 		}
 	}
@@ -4530,7 +4779,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::BatchTranslate(const TSharedPtr<FJsonObje
 			if (It->ActorHasTag(TagName)) Targets.Add(*It);
 		}
 	}
-	if (Targets.Num() == 0) return MCPError(TEXT("Provide actorLabels[] or tag matching at least one actor"));
+	if (Targets.Num() == 0) return MCPError(TEXT("Provide actorLabels[], actorPaths[] or tag matching at least one actor"));
 
 	for (AActor* A : Targets)
 	{

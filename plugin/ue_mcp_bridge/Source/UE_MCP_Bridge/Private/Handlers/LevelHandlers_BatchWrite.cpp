@@ -985,12 +985,14 @@ TSharedPtr<FJsonValue> FLevelHandlers::SpawnActorsBatch(const TSharedPtr<FJsonOb
 		const TSharedPtr<FJsonObject> Source = *AlongSpline;
 
 		FString SplineActorLabel;
-		if (auto Err = RequireString(Source, TEXT("actorLabel"), SplineActorLabel)) return Err;
-		AActor* SplineActor = FindActorByLabel(World, SplineActorLabel);
-		if (!SplineActor)
-		{
-			return MCPError(FString::Printf(TEXT("Actor not found for 'alongSpline.actorLabel': %s"), *SplineActorLabel));
-		}
+		if (auto Err = RequireStringAlt(Source, TEXT("actorLabel"), TEXT("actorPath"), SplineActorLabel)) return Err;
+		// #983: the spline the batch runs along is selected the same way as
+		// any other actor, and a duplicated label refuses rather than picking
+		// a spline at the other end of the map to scatter along.
+		TSharedPtr<FJsonValue> SplineErr;
+		AActor* SplineActor = MCPResolveActor(World, Source, SplineErr);
+		if (!SplineActor) return SplineErr;
+		SplineActorLabel = SplineActor->GetActorLabel();
 		const FString SplineComponentName = OptionalString(Source, TEXT("componentName"));
 		USplineComponent* Spline = nullptr;
 		for (UActorComponent* Component : SplineActor->GetComponents())
