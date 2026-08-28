@@ -35,6 +35,15 @@ private:
 	// path editor(save_dirty) uses, and report what happened to each package
 	// rather than one bare boolean. LevelHandlers_Save.cpp.
 	static TSharedPtr<FJsonValue> SaveLevel(const TSharedPtr<FJsonObject>& Params);
+	// #985: World Partition streaming settings (CellSize / LoadingRange) and the
+	// runtime cell transformer stack, whose instanced transformer object had no
+	// writable path at all. LevelHandlers_WorldPartitionSettings.cpp.
+	static TSharedPtr<FJsonValue> GetWorldPartitionSettings(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> SetWorldPartitionSettings(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> AddRuntimeCellTransformer(const TSharedPtr<FJsonObject>& Params);
+	// #985: bulk HLOD layer assignment, with the other selector-driven batch
+	// writes in LevelHandlers_BatchWrite.cpp.
+	static TSharedPtr<FJsonValue> SetActorHLODLayer(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ListLevels(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> GetSelectedActors(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ListVolumes(const TSharedPtr<FJsonObject>& Params);

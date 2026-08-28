@@ -187,6 +187,16 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("set_actor_folder_path"), &SetActorFolderPath);
 	Registry.RegisterHandler(TEXT("list_actor_descs"), &ListActorDescs);
 	Registry.RegisterHandlerWithTimeout(TEXT("load_actor_descs"), &LoadActorDescs, 300.0f);
+	// #985: LevelHandlers_WorldPartitionSettings.cpp. The streaming knobs and
+	// the runtime cell transformer stack live with the other World Partition
+	// actions rather than in a category of their own.
+	Registry.RegisterHandler(TEXT("get_world_partition_settings"), &GetWorldPartitionSettings);
+	Registry.RegisterHandler(TEXT("set_world_partition_settings"), &SetWorldPartitionSettings);
+	Registry.RegisterHandler(TEXT("add_runtime_cell_transformer"), &AddRuntimeCellTransformer);
+	// #985: bulk HLOD layer assignment. A whole-map selector, so it takes the
+	// same 300 second budget as the other batch writes. Mirrored in
+	// src/bridge-timeouts.ts, which a parity test checks.
+	Registry.RegisterHandlerWithTimeout(TEXT("set_actor_hlod_layer"), &SetActorHLODLayer, 300.0f);
 	Registry.RegisterHandler(TEXT("add_actor_tag"), &AddActorTag);
 	Registry.RegisterHandler(TEXT("remove_actor_tag"), &RemoveActorTag);
 	Registry.RegisterHandler(TEXT("set_actor_tags"), &SetActorTags);

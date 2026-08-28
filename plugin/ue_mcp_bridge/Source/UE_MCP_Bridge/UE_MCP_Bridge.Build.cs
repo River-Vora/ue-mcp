@@ -61,6 +61,8 @@ public class UE_MCP_Bridge : ModuleRules
 	// Private/Handlers/LevelHandlers_Save.cpp and
 	// Private/Tests/LevelSaveReportTests.cpp (#964): same reason.
 	// Private/Tests/LevelComponentTreeInstanceCountTests.cpp (#986): same reason.
+	// Private/Handlers/LevelHandlers_WorldPartitionSettings.cpp and
+	// Private/Tests/LevelWorldPartitionSettingsTests.cpp (#985): same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
