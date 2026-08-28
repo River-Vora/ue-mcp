@@ -14,6 +14,7 @@
 #include "Engine/Level.h"
 #include "Engine/LevelScriptBlueprint.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Editor.h"
 #include "FileHelpers.h"
@@ -691,19 +692,158 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReadAsset(const TSharedPtr<FJsonObject>& 
 // own properties (ParentClass, etc.) are rarely what a caller wants. Resolve to
 // the generated-class CDO so asset property reads/writes hit the real defaults
 // and can author Instanced sub-object arrays. Non-Blueprint assets pass through.
-static UObject* MCPResolveAssetToCDO(UObject* Asset)
+//
+// OutBlueprint carries the wrapper back out, because a write to the CDO has
+// bookkeeping the CDO alone cannot do: the package to save is the Blueprint's,
+// and the compiler's own record of the variable's default has to be reconciled
+// with the value just written (#931).
+static UObject* MCPResolveAssetToCDO(UObject* Asset, UBlueprint** OutBlueprint = nullptr)
 {
+	if (OutBlueprint) *OutBlueprint = nullptr;
 	if (UBlueprint* BP = Cast<UBlueprint>(Asset))
 	{
 		if (UClass* GenClass = BP->GeneratedClass)
 		{
 			if (UObject* CDO = GenClass->GetDefaultObject())
 			{
+				if (OutBlueprint) *OutBlueprint = BP;
 				return CDO;
 			}
 		}
 	}
 	return Asset;
+}
+
+// #931: a property write marked the package dirty and stopped there, so it read
+// back correctly, survived until the editor closed, and was gone on the next
+// start. A GameplayAbility whose default reverted computed correct values and
+// applied no effect, with nothing pointing at the cause. A write now either
+// reaches the package on disk or says why it did not, and never reports plain
+// success for a change that only exists in memory.
+//
+// Returns true when the package was written. On false, OutReason carries the
+// sentence to hand back to the caller.
+static bool MCPPersistAssetWrite(UObject* Asset, UBlueprint* OwningBlueprint, bool bSave, FString& OutReason)
+{
+	OutReason.Reset();
+	UPackage* Package = Asset ? Asset->GetOutermost() : nullptr;
+	if (!Package)
+	{
+		OutReason = TEXT("The asset has no package, so there is nothing to write.");
+		return false;
+	}
+
+	const FString PackageName = Package->GetName();
+	if (!bSave)
+	{
+		OutReason = FString::Printf(
+			TEXT("save=false was requested, so '%s' is dirty in memory only and the change is lost when the editor closes. ")
+			TEXT("Call asset(save) for it, or repeat the write with save=true."),
+			*PackageName);
+		return false;
+	}
+	if (MCPIsProtectedAssetPath(PackageName))
+	{
+		OutReason = FString::Printf(
+			TEXT("'%s' is on a protected mount, which the bridge never writes to. The change is in memory only."),
+			*PackageName);
+		return false;
+	}
+
+	// A read-only package file is a real and common failure, and asking the
+	// engine to write a file it cannot open is the case #932 reported as a
+	// crash elsewhere. Answer it before the save rather than after.
+	FString PackageFileName;
+	if (FPackageName::DoesPackageExist(PackageName, &PackageFileName)
+		&& IFileManager::Get().IsReadOnly(*PackageFileName))
+	{
+		OutReason = FString::Printf(
+			TEXT("'%s' is read-only on disk. Check it out of source control or clear the read-only flag, then save."),
+			*PackageFileName);
+		return false;
+	}
+
+	// For a Blueprint the package's asset is the UBlueprint; the CDO is one of
+	// its exports and rides along.
+	if (SaveAssetPackage(OwningBlueprint ? static_cast<UObject*>(OwningBlueprint) : Asset))
+	{
+		return true;
+	}
+	OutReason = FString::Printf(
+		TEXT("The editor refused to write '%s'. The output log carries the reason."), *PackageName);
+	return false;
+}
+
+// A CDO write is a genuine package export and survives both the save and a
+// later recompile, but two pieces of editor bookkeeping do not happen on their
+// own, and both read as "my write did not take" (#931).
+//
+// UBlueprintGeneratedClass keeps a post-construct property list that newly
+// spawned instances initialise from, and only MarkBlueprintAsModified rebuilds
+// it. And FBPVariableDescription::DefaultValue, when it is not empty, is
+// replayed onto the CDO by the next full compile AFTER the old CDO's values are
+// copied forward, so a stale string default silently overwrites the value that
+// was just written. Clearing it makes the CDO the single record of the default,
+// which is what the Blueprint editor's own Class Defaults panel does.
+static void MCPNoteBlueprintCDOWrite(UBlueprint* Blueprint, const FString& PropertyPath)
+{
+	if (!Blueprint) return;
+
+	// The root segment is the variable the compiler knows by name. A dotted or
+	// indexed path lands inside that variable's value, and the string default
+	// it would replay covers the whole variable either way.
+	FString RootName = PropertyPath;
+	int32 Cut = INDEX_NONE;
+	if (RootName.FindChar(TEXT('.'), Cut)) RootName = RootName.Left(Cut);
+	if (RootName.FindChar(TEXT('['), Cut)) RootName = RootName.Left(Cut);
+	const FName RootVarName(*RootName);
+
+	FProperty* ChangedProperty = nullptr;
+	if (UClass* GenClass = Blueprint->GeneratedClass)
+	{
+		ChangedProperty = GenClass->FindPropertyByName(RootVarName);
+	}
+
+	for (FBPVariableDescription& Variable : Blueprint->NewVariables)
+	{
+		if (Variable.VarName == RootVarName)
+		{
+			Variable.DefaultValue.Empty();
+			break;
+		}
+	}
+
+	FPropertyChangedEvent ChangeEvent(ChangedProperty, EPropertyChangeType::ValueSet);
+	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint, ChangeEvent);
+}
+
+/** Report where a property write ended up: the package, whether it reached
+ *  disk, and the reason when it did not. A write the caller asked to persist
+ *  and that did not persist is a failure, not a success with a footnote. */
+static void MCPDescribePropertyWritePersistence(
+	TSharedPtr<FJsonObject>& Result,
+	UObject* Asset,
+	const FString& PropertyName,
+	bool bSaveRequested,
+	bool bPersisted,
+	const FString& PersistReason)
+{
+	if (UPackage* Package = Asset ? Asset->GetOutermost() : nullptr)
+	{
+		Result->SetStringField(TEXT("packageName"), Package->GetName());
+		Result->SetBoolField(TEXT("packageDirty"), Package->IsDirty());
+	}
+	Result->SetBoolField(TEXT("persisted"), bPersisted);
+	Result->SetBoolField(TEXT("saved"), bPersisted);
+	if (bPersisted) return;
+
+	Result->SetStringField(TEXT("persistError"), PersistReason);
+	if (bSaveRequested)
+	{
+		Result->SetBoolField(TEXT("success"), false);
+		Result->SetStringField(TEXT("error"), FString::Printf(
+			TEXT("Set '%s' in memory but could not persist it: %s"), *PropertyName, *PersistReason));
+	}
 }
 
 TSharedPtr<FJsonValue> FAssetHandlers::ReadAssetProperties(const TSharedPtr<FJsonObject>& Params)
@@ -2957,10 +3097,15 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetAssetProperty(const TSharedPtr<FJsonOb
 		return MCPError(TEXT("Missing 'value' parameter"));
 	}
 
+	// #931: default to persisting. A write that only marked the package dirty
+	// was the whole defect, so opting out has to be deliberate.
+	const bool bSave = OptionalBool(Params, TEXT("save"), true);
+
 	TSharedPtr<FJsonValue> LoadError;
 	UObject* Asset = MCPRequireAssetObject(AssetPath, LoadError);
 	if (!Asset) return LoadError;
-	Asset = MCPResolveAssetToCDO(Asset); // #568 - author the generated-class CDO for Blueprint paths
+	UBlueprint* OwningBlueprint = nullptr;
+	Asset = MCPResolveAssetToCDO(Asset, &OwningBlueprint); // #568 - author the generated-class CDO for Blueprint paths
 
 	// Resolve the (possibly indexed, possibly subobject-descending) path.
 	// Supports "Config.Traits[1].Params.RepresentationActorManagementClass"
@@ -2997,9 +3142,13 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetAssetProperty(const TSharedPtr<FJsonOb
 	if (LeafOwner) LeafOwner->PostEditChange();
 	Asset->PostEditChange();
 	Asset->MarkPackageDirty();
+	MCPNoteBlueprintCDOWrite(OwningBlueprint, PropertyName);
 
 	FString NewValue;
 	FinalProp->ExportText_Direct(NewValue, ValuePtr, ValuePtr, nullptr, PPF_None);
+
+	FString PersistReason;
+	const bool bPersisted = MCPPersistAssetWrite(Asset, OwningBlueprint, bSave, PersistReason);
 
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
@@ -3007,6 +3156,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetAssetProperty(const TSharedPtr<FJsonOb
 	Result->SetStringField(TEXT("propertyName"), PropertyName);
 	Result->SetStringField(TEXT("previousValue"), PrevValue);
 	Result->SetStringField(TEXT("value"), NewValue);
+	MCPDescribePropertyWritePersistence(Result, Asset, PropertyName, bSave, bPersisted, PersistReason);
 	if (bMapBearing)
 	{
 		Result->SetNumberField(TEXT("mapPairCount"), MCPPropertyText::CountMapPairs(FinalProp, ValuePtr));
@@ -3048,10 +3198,13 @@ TSharedPtr<FJsonValue> FAssetHandlers::AppendAssetArrayElements(const TSharedPtr
 		return MCPError(TEXT("'elements' must contain at least one value"));
 	}
 
+	const bool bSave = OptionalBool(Params, TEXT("save"), true);
+
 	TSharedPtr<FJsonValue> LoadError;
 	UObject* Asset = MCPRequireAssetObject(AssetPath, LoadError);
 	if (!Asset) return LoadError;
-	Asset = MCPResolveAssetToCDO(Asset);
+	UBlueprint* OwningBlueprint = nullptr;
+	Asset = MCPResolveAssetToCDO(Asset, &OwningBlueprint);
 
 	FProperty* FinalProp = nullptr;
 	void* ValuePtr = nullptr;
@@ -3124,6 +3277,10 @@ TSharedPtr<FJsonValue> FAssetHandlers::AppendAssetArrayElements(const TSharedPtr
 	if (LeafOwner && LeafOwner != Asset) LeafOwner->PostEditChange();
 	Asset->PostEditChange();
 	Asset->MarkPackageDirty();
+	MCPNoteBlueprintCDOWrite(OwningBlueprint, PropertyName);
+
+	FString PersistReason;
+	const bool bPersisted = MCPPersistAssetWrite(Asset, OwningBlueprint, bSave, PersistReason);
 
 	TArray<TSharedPtr<FJsonValue>> AppendedIndices;
 	AppendedIndices.Reserve(AppendedCount);
@@ -3142,7 +3299,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::AppendAssetArrayElements(const TSharedPtr
 	Result->SetNumberField(TEXT("newNum"), PreviousNum + AppendedCount);
 	Result->SetArrayField(TEXT("appendedIndices"), AppendedIndices);
 	Result->SetField(TEXT("previousValue"), PreviousValue);
-	Result->SetBoolField(TEXT("saved"), false);
+	MCPDescribePropertyWritePersistence(Result, Asset, PropertyName, bSave, bPersisted, PersistReason);
 
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("assetPath"), AssetPath);

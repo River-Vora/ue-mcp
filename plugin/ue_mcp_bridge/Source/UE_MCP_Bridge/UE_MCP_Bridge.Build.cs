@@ -29,7 +29,8 @@ public class UE_MCP_Bridge : ModuleRules
 	// Private/Handlers/AnimationHandlers_Pose.cpp,
 	// Private/Tests/MeshGeometryTests.cpp and
 	// Private/Tests/AnimationPoseTests.cpp: same reason.
-	// Private/Tests/AssetPathResolutionTests.cpp: same reason.
+	// Private/Tests/AssetPathResolutionTests.cpp and
+	// Private/Tests/AssetPropertyPersistTests.cpp: same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
