@@ -153,6 +153,10 @@ const OVERRIDES: Readonly<Record<string, ActionClass>> = {
   // engine surface uses it as one (mirror_selected_controls), and a mutate verb
   // anywhere in the name wins, which is wrong for exactly this action.
   "animation.read_mirror_data_table": "read",
+  // Reads a property off many assets at once. "bulk" is a mutate verb because
+  // every batch action before this one wrote, but the shape word is not the
+  // verb: the read verb after it is.
+  "asset.bulk_read_properties": "read",
   // Reads whose first segment is not a verb at all.
   "level.line_trace": "read",
   "level.nav_project_point": "read",
