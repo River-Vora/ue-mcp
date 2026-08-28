@@ -155,6 +155,9 @@ const OVERRIDES: Readonly<Record<string, ActionClass>> = {
   "animation.read_mirror_data_table": "read",
   // Reads whose first segment is not a verb at all.
   "level.line_trace": "read",
+  // Batch of the same collision queries. `bulk` is a mutate verb because most
+  // bulk_* actions write; this one only observes.
+  "level.bulk_line_trace": "read",
   "level.nav_project_point": "read",
   "level.count_actors_by_class": "read",
   "gameplay.project_to_nav": "read",

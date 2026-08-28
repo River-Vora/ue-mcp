@@ -81,6 +81,7 @@ export const levelTool: ToolDef = categoryTool(
     batch_translate: bp("Translate a set of actors by an offset. Params: offset (Vec3), actorLabels[] OR tag (#203)", "batch_translate", (p) => ({ offset: p.offset, actorLabels: p.actorLabels, tag: p.tag })),
     place_actors_batch: bp("Bulk-spawn StaticMeshActors with per-instance mesh + transform. Params: actors[]: [{staticMesh, location?, rotation?, scale?, label?}]. Mesh loads cached per path. Returns spawned/failedMesh/failedSpawn counts + labels (#264)", "place_actors_batch", (p) => ({ actors: p.actors })),
     line_trace: bp("Line trace in the editor world. Traces simple collision by default, the same as a gameplay trace, so the result matches what the running game hits; pass traceComplex to trace per-triangle instead. channel picks the collision channel, including channels this project renamed in its collision settings. The response echoes traceComplex and channel, and faceIndex is only present on a complex hit. Returns hit + actorLabel/actorClass/componentName/componentClass/location/impactPoint/normal/distance/faceIndex/boneName/physicalMaterial. Params: start (Vec3), end? (Vec3) OR direction? (Vec3) + distance? (default 200000), traceComplex? (default false), channel? (default Visibility), ignoreActors? (array of labels) (#420, #807)", "line_trace", (p) => ({ start: p.start, end: p.end, direction: p.direction, distance: p.distance, traceComplex: p.traceComplex, channel: p.channel, ignoreActors: p.ignoreActors })),
+    bulk_line_trace: bp("Batch of line traces in the editor world. Each traces[] item uses the same semantics as line_trace (start + end or direction+distance, simple collision by default, optional traceComplex/channel/ignoreActors). Caps at 256. Returns results[] in traces[] order, one per item, each with the same fields as line_trace (or success=false + error for that item). Params: traces[]", "bulk_line_trace", (p) => ({ traces: p.traces })),
     snap_actor_to_floor: bp("Snap an actor's bounds-bottom to the first downward line-trace hit. Equivalent of the End-key shortcut, works on arbitrary geometry (not just Landscape). Params: actorLabel, floorOffset? (added to impact Z, default 0), maxDistance? (default 100000) (#419)", "snap_actor_to_floor", (p) => ({ actorLabel: p.actorLabel, floorOffset: p.floorOffset, maxDistance: p.maxDistance })),
   },
   undefined,  // actionDocs auto-generated from descriptions
@@ -167,6 +168,15 @@ export const levelTool: ToolDef = categoryTool(
     traceComplex: z.boolean().optional().describe("line_trace: trace per-triangle (complex) collision instead of the simple collision a gameplay trace uses (default false) (#807)"),
     channel: z.string().optional().describe("line_trace: collision channel to trace on, e.g. Visibility, Camera, WorldStatic, Pawn, or a channel renamed in this project's collision settings (default Visibility) (#807)"),
     ignoreActors: z.array(z.string()).optional().describe("line_trace: actor labels to skip"),
+    traces: z.array(z.object({
+      start: Vec3.describe("ray start"),
+      end: Vec3.optional().describe("ray end (use this OR direction+distance)"),
+      direction: Vec3.optional().describe("ray direction (unit-normalized internally)"),
+      distance: z.number().optional().describe("ray length when direction is supplied (default 200000)"),
+      traceComplex: z.boolean().optional().describe("trace per-triangle (complex) collision instead of simple collision (default false)"),
+      channel: z.string().optional().describe("collision channel (default Visibility)"),
+      ignoreActors: z.array(z.string()).optional().describe("actor labels to skip"),
+    })).min(1).max(256).optional().describe("bulk_line_trace: per-item line traces (max 256), each with the same fields as line_trace"),
     floorOffset: z.number().optional().describe("snap_actor_to_floor: vertical offset added to impact Z"),
     maxDistance: z.number().optional().describe("snap_actor_to_floor: line-trace length downward (default 100000)"),
     force: z.boolean().optional().describe("set_actor_property: bypass EditDefaultsOnly to write per-instance overrides"),
