@@ -118,6 +118,59 @@ describe("readEngineSnapshot", () => {
   });
 });
 
+describe("readEngineSnapshot per-process files (#990)", () => {
+  function writeInstanceStatus(project: string, pid: number, snapshot: unknown, mtimeMsAgo = 0): string {
+    const file = path.join(path.dirname(project), "Saved", "UE_MCP_Bridge", `status.${pid}.json`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(snapshot));
+    if (mtimeMsAgo > 0) {
+      const when = new Date(Date.now() - mtimeMsAgo);
+      fs.utimesSync(file, when, when);
+    }
+    return file;
+  }
+
+  it("prefers a per-process file over the shared one", () => {
+    // The shared status.json describes only whichever process wrote last, so
+    // it is the fallback and not the answer.
+    const project = makeProject(["LogInit: Display: Base directory: C:/UE/"], { phase: "shared" });
+    writeInstanceStatus(project, 4242, { phase: "per-process", pid: 4242 });
+    expect(readEngineSnapshot(project)?.phase).toBe("per-process");
+    expect(readEngineSnapshot(project)?.pid).toBe(4242);
+  });
+
+  it("takes the freshest of several, which is the one still being written", () => {
+    const project = makeProject(["LogInit: Display: Base directory: C:/UE/"]);
+    writeInstanceStatus(project, 111, { phase: "crashed hours ago", pid: 111 }, 3_600_000);
+    writeInstanceStatus(project, 222, { phase: "alive", pid: 222 });
+    expect(readEngineSnapshot(project)?.phase).toBe("alive");
+  });
+
+  it("still reads an editor that writes only the shared path", () => {
+    // A deployed plugin older than this change writes status.json and nothing
+    // else, and must keep working.
+    const project = makeProject(["LogInit: Display: Base directory: C:/UE/"], { phase: "ready" });
+    expect(readEngineSnapshot(project)?.phase).toBe("ready");
+  });
+
+  it("falls through an unreadable per-process file to the shared one", () => {
+    const project = makeProject(["LogInit: Display: Base directory: C:/UE/"], { phase: "shared" });
+    writeInstanceStatus(project, 4242, {});
+    fs.writeFileSync(
+      path.join(path.dirname(project), "Saved", "UE_MCP_Bridge", "status.4242.json"),
+      "{ half written",
+    );
+    expect(readEngineSnapshot(project)?.phase).toBe("shared");
+  });
+
+  it("ignores the pid-suffixed temp files the writer renames through", () => {
+    const project = makeProject(["LogInit: Display: Base directory: C:/UE/"], { phase: "shared" });
+    const dir = path.join(path.dirname(project), "Saved", "UE_MCP_Bridge");
+    fs.writeFileSync(path.join(dir, "status.json.1234.tmp"), JSON.stringify({ phase: "mid-write" }));
+    expect(readEngineSnapshot(project)?.phase).toBe("shared");
+  });
+});
+
 describe("withBridgeSnapshot", () => {
   /** The state a failed process probe produces: nothing found, nothing known. */
   function blindState(overrides: Partial<EngineState> = {}): EngineState {

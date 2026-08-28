@@ -566,6 +566,8 @@ export function dialogLikeWindows(windows: NativeWindow[]): NativeWindow[] {
 export interface EngineSnapshot {
   writtenAt?: string;
   ageSeconds?: number;
+  /** Which process this snapshot describes. Absent on plugin builds before #990. */
+  pid?: number;
   phase?: string;
   /**
    * Null until the engine loop starts ticking. Startup has no tick loop to
@@ -586,10 +588,7 @@ export interface EngineSnapshot {
  * keeps updating while the game thread is inside a modal loop or a slow task,
  * which is precisely when a bridge request cannot be answered.
  */
-export function readEngineSnapshot(projectPath: string | null | undefined): EngineSnapshot | null {
-  if (!projectPath) return null;
-  const file = path.join(path.dirname(projectPath), "Saved", "UE_MCP_Bridge", "status.json");
-
+function readSnapshotFile(file: string): EngineSnapshot | null {
   // The writer publishes atomically (temp file + move) four times a second, so
   // a read can land in the instant between unlink and rename. One retry turns
   // that transient miss back into a hit; without it, callers see a null and
@@ -604,6 +603,51 @@ export function readEngineSnapshot(projectPath: string | null | undefined): Engi
     }
   }
   return null;
+}
+
+/**
+ * `status.<pid>.json` names, newest last-written first.
+ *
+ * #990: one project directory can hold the status of several processes, and a
+ * single shared `status.json` describes only whichever of them wrote last. The
+ * per-process files are the ones that describe each editor honestly. A file
+ * whose process has died stops being updated, so newest-wins picks a live
+ * editor over a crashed one without a process-table query.
+ */
+function instanceStatusFiles(dir: string): string[] {
+  try {
+    return fs
+      .readdirSync(dir)
+      .filter((name) => /^status\.\d+\.json$/i.test(name))
+      .map((name) => {
+        const file = path.join(dir, name);
+        let mtimeMs = 0;
+        try {
+          mtimeMs = fs.statSync(file).mtimeMs;
+        } catch {
+          // Removed between readdir and stat; sorts last and reads as null.
+        }
+        return { file, mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .map((entry) => entry.file);
+  } catch {
+    return [];
+  }
+}
+
+export function readEngineSnapshot(projectPath: string | null | undefined): EngineSnapshot | null {
+  if (!projectPath) return null;
+  const dir = path.join(path.dirname(projectPath), "Saved", "UE_MCP_Bridge");
+
+  // Per-process first, shared second. The shared path is still written by
+  // current plugin builds and is the only thing an older one writes, so it
+  // stays the fallback rather than being dropped.
+  for (const file of instanceStatusFiles(dir)) {
+    const snapshot = readSnapshotFile(file);
+    if (snapshot) return snapshot;
+  }
+  return readSnapshotFile(path.join(dir, "status.json"));
 }
 
 // ---------------------------------------------------------------------------
