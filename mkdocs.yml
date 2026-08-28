@@ -60,6 +60,7 @@ nav:
   - Architecture: architecture.md
   - Tool Reference: tool-reference.md
   - Control Rig Animation: control-rig-animation.md
+  - Spatial Instructions: spatial-instructions.md
   - Native Tools: native-tools.md
   - Handler Conventions: handler-conventions.md
   - Widgets:
