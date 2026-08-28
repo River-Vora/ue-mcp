@@ -463,76 +463,199 @@ inline void MCPSetDeleteAssetRollback(TSharedPtr<FJsonObject> Result, const FStr
 	MCPSetRollback(Result, TEXT("delete_asset"), Payload);
 }
 
-/** Find an actor by GetActorLabel(). Returns nullptr on miss. Centralises
- *  the iterator-based lookup that previously lived as a private static in
- *  several handler translation units. */
-inline AActor* FindActorByLabel(UWorld* World, const FString& Label)
-{
-	if (!World) return nullptr;
-	for (TActorIterator<AActor> It(World); It; ++It)
-	{
-		if (It->GetActorLabel() == Label) return *It;
-	}
-	return nullptr;
-}
+// ── Actor selection ──────────────────────────────────────────────────────────
+//
+// Editor labels are NOT unique. A copy-pasted Blueprint gives every copy the
+// same label, and a label lookup that answers with "the first actor the
+// iterator reached" is a coin flip decided by streaming order. #983 is what
+// that costs: several actors labelled BP_SnappyRoad2, a write aimed at the one
+// the user had selected, and the edit landing on a road at the other end of
+// the map with a success response and nothing to suggest a choice was made.
+//
+// So there is one resolver, and it refuses rather than guesses:
+//
+//   * 'actorPath' is the unambiguous selector and wins whenever it is given.
+//   * A label naming more than one actor is an error listing every candidate
+//     and its actorPath, so the caller can retry precisely.
+//   * There is no "just pick one" override. The precise selector already
+//     exists, so a caller who wants a specific one of the duplicates has a
+//     correct answer, and a caller who wants all of them is asking for a
+//     different, plural action. A flag that picks an arbitrary actor out of a
+//     set the caller could not tell apart is the same silent wrong write with
+//     a name on it.
+//
+// The plural need is served by MCPCollectActorsByToken, which returns every
+// match and is what the ignore-list and reference-list parameters use.
 
-/** Find an actor by either editor label or internal UObject name. Used by
- *  PIE / runtime handlers where callers may pass either form. */
-inline AActor* FindActorByLabelOrName(UWorld* World, const FString& LabelOrName)
+/** How a selector token is allowed to match an actor. */
+enum class EMCPActorMatch : uint8
 {
-	if (!World) return nullptr;
-	for (TActorIterator<AActor> It(World); It; ++It)
-	{
-		if (It->GetActorLabel() == LabelOrName || It->GetName() == LabelOrName) return *It;
-	}
-	return nullptr;
-}
+	/** Editor label only. */
+	Label,
+	/** Editor label, then the internal UObject name. */
+	LabelOrName,
+	/** Editor label, then internal name, then the full object path. */
+	LabelNameOrPath,
+};
 
-/** Find an actor by either editor label or full object path. Used by
- *  get_actor_details / get_component_tree which accept either form. */
-inline AActor* FindActorByLabelOrPath(UWorld* World, const FString& Label, const FString& Path)
+/** The actor in World whose full object path is Path, or nullptr. Paths are
+ *  unique, so there is never a choice to make. Accepts the export-text form
+ *  (Actor'/Game/...') and falls back to a case-insensitive compare, because a
+ *  path that came back from one action and was pasted into another is the
+ *  whole point of having it. */
+inline AActor* MCPFindActorByPath(UWorld* World, const FString& Path)
 {
-	if (!World) return nullptr;
-	const bool bHasLabel = !Label.IsEmpty();
-	const bool bHasPath = !Path.IsEmpty();
-	if (!bHasLabel && !bHasPath) return nullptr;
-	for (TActorIterator<AActor> It(World); It; ++It)
-	{
-		if (bHasPath && It->GetPathName() == Path) return *It;
-		if (bHasLabel && It->GetActorLabel() == Label) return *It;
-	}
-	return nullptr;
-}
-
-/** Three-way actor lookup against the placed instances in a world: label
- *  first, then internal object name, then full path. Used by
- *  EditorHandlers_PIE invoke_function which accepts any of the three.
- *
- *  #806: the priority is fixed rather than "first actor that matches any of
- *  the three", because a token can be one actor's label and another actor's
- *  internal name at the same time, and which one won then depended on level
- *  iteration order. The label is what the outliner shows and what callers
- *  pass, so it decides outright; name and path only resolve the misses. */
-inline AActor* FindActorByLabelNameOrPath(UWorld* World, const FString& Token)
-{
-	if (!World || Token.IsEmpty()) return nullptr;
-	AActor* NameMatch = nullptr;
-	AActor* PathMatch = nullptr;
+	if (!World || Path.IsEmpty()) return nullptr;
+	FString Wanted = FPackageName::ExportTextPathToObjectPath(Path);
+	Wanted.TrimStartAndEndInline();
+	if (Wanted.IsEmpty()) return nullptr;
+	AActor* CaseInsensitive = nullptr;
 	for (TActorIterator<AActor> It(World); It; ++It)
 	{
 		AActor* A = *It;
 		if (!IsValid(A)) continue;
-		if (A->GetActorLabel() == Token) return A;
-		if (!NameMatch && A->GetName() == Token) NameMatch = A;
-		if (!PathMatch && A->GetPathName() == Token) PathMatch = A;
+		const FString Actual = A->GetPathName();
+		if (Actual.Equals(Wanted, ESearchCase::CaseSensitive)) return A;
+		if (!CaseInsensitive && Actual.Equals(Wanted, ESearchCase::IgnoreCase)) CaseInsensitive = A;
 	}
-	return NameMatch ? NameMatch : PathMatch;
+	return CaseInsensitive;
+}
+
+/** Every actor the token names under Match, sorted by object path so the order
+ *  is the same on every run rather than whatever the actor iterator happened
+ *  to produce that time.
+ *
+ *  The tiers do not blend: a token that is one actor's label and another
+ *  actor's internal name resolves to the label match alone, because the label
+ *  is what the outliner shows and what a caller types. Name and path answer
+ *  only when the label tier found nothing (#806). */
+inline void MCPCollectActorsByToken(
+	UWorld* World,
+	const FString& Token,
+	EMCPActorMatch Match,
+	TArray<AActor*>& OutMatches)
+{
+	OutMatches.Reset();
+	if (!World || Token.IsEmpty()) return;
+
+	TArray<AActor*> ByName;
+	TArray<AActor*> ByPath;
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* A = *It;
+		if (!IsValid(A)) continue;
+		if (A->GetActorLabel() == Token) { OutMatches.Add(A); continue; }
+		if (Match != EMCPActorMatch::Label && A->GetName() == Token) { ByName.Add(A); continue; }
+		if (Match == EMCPActorMatch::LabelNameOrPath && A->GetPathName() == Token) { ByPath.Add(A); }
+	}
+	if (OutMatches.Num() == 0) OutMatches = MoveTemp(ByName);
+	if (OutMatches.Num() == 0) OutMatches = MoveTemp(ByPath);
+
+	OutMatches.Sort([](const AActor& A, const AActor& B)
+	{
+		return A.GetPathName().Compare(B.GetPathName()) < 0;
+	});
+}
+
+/** Which tier of MCPCollectActorsByToken produced a match, for the message. */
+inline const TCHAR* MCPDescribeActorMatchTier(const FString& Token, AActor* Match)
+{
+	if (Match && Match->GetActorLabel() == Token) return TEXT("editor label");
+	if (Match && Match->GetName() == Token) return TEXT("internal object name");
+	return TEXT("object path");
+}
+
+/** One candidate row in an ambiguity refusal: enough to tell two same-labelled
+ *  actors apart without a follow-up call, plus the actorPath to retry with. */
+inline TSharedPtr<FJsonObject> MCPDescribeActorCandidate(AActor* Actor)
+{
+	TSharedPtr<FJsonObject> Row = MakeShared<FJsonObject>();
+	if (!Actor) return Row;
+	Row->SetStringField(TEXT("actorPath"), Actor->GetPathName());
+	Row->SetStringField(TEXT("actorLabel"), Actor->GetActorLabel());
+	Row->SetStringField(TEXT("actorName"), Actor->GetName());
+	Row->SetStringField(TEXT("actorClass"), Actor->GetClass()->GetName());
+	Row->SetStringField(TEXT("folderPath"), Actor->GetFolderPath().ToString());
+	const FVector Loc = Actor->GetActorLocation();
+	TSharedPtr<FJsonObject> LocObj = MakeShared<FJsonObject>();
+	LocObj->SetNumberField(TEXT("x"), Loc.X);
+	LocObj->SetNumberField(TEXT("y"), Loc.Y);
+	LocObj->SetNumberField(TEXT("z"), Loc.Z);
+	Row->SetObjectField(TEXT("location"), LocObj);
+	return Row;
+}
+
+/** The refusal an ambiguous selector produces. Lists every candidate and its
+ *  actorPath, so the retry is a copy of one field rather than a hunt back
+ *  through get_outliner. */
+inline TSharedPtr<FJsonValue> MCPAmbiguousActorError(
+	const FString& Token,
+	const TCHAR* LabelKey,
+	const TCHAR* PathKey,
+	const TCHAR* MatchedBy,
+	const TArray<AActor*>& Candidates)
+{
+	const int32 Cap = 25;
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField(TEXT("success"), false);
+	Obj->SetStringField(TEXT("error"), FString::Printf(
+		TEXT("Ambiguous actor selector: '%s' is the %s of %d actors. Editor labels are not unique, so this call refuses rather than picking one of them. Retry with '%s' set to one of the candidate paths below."),
+		*Token, MatchedBy, Candidates.Num(), PathKey));
+	Obj->SetBoolField(TEXT("ambiguous"), true);
+	Obj->SetStringField(TEXT("selector"), LabelKey);
+	Obj->SetStringField(TEXT("selectorValue"), Token);
+	Obj->SetStringField(TEXT("matchedBy"), MatchedBy);
+	Obj->SetNumberField(TEXT("matchCount"), Candidates.Num());
+	TArray<TSharedPtr<FJsonValue>> Rows;
+	for (int32 Index = 0; Index < Candidates.Num() && Index < Cap; ++Index)
+	{
+		Rows.Add(MakeShared<FJsonValueObject>(MCPDescribeActorCandidate(Candidates[Index])));
+	}
+	Obj->SetArrayField(TEXT("candidates"), Rows);
+	if (Candidates.Num() > Cap) Obj->SetBoolField(TEXT("candidatesTruncated"), true);
+	return MakeShared<FJsonValueObject>(Obj);
+}
+
+// The three pre-#983 finders, now shims over MCPCollectActorsByToken so there
+// is one search in the plugin while the call sites move across to
+// MCPResolveActor. They still answer with the first match on a duplicate
+// label, which is the behaviour #983 is removing, so nothing new may call
+// them: they are deleted with the last converted call site.
+inline AActor* FindActorByLabel(UWorld* World, const FString& Label)
+{
+	TArray<AActor*> Matches;
+	MCPCollectActorsByToken(World, Label, EMCPActorMatch::Label, Matches);
+	return Matches.Num() > 0 ? Matches[0] : nullptr;
+}
+
+inline AActor* FindActorByLabelOrName(UWorld* World, const FString& LabelOrName)
+{
+	TArray<AActor*> Matches;
+	MCPCollectActorsByToken(World, LabelOrName, EMCPActorMatch::LabelOrName, Matches);
+	return Matches.Num() > 0 ? Matches[0] : nullptr;
+}
+
+inline AActor* FindActorByLabelOrPath(UWorld* World, const FString& Label, const FString& Path)
+{
+	if (AActor* ByPath = MCPFindActorByPath(World, Path)) return ByPath;
+	return FindActorByLabel(World, Label);
+}
+
+inline AActor* FindActorByLabelNameOrPath(UWorld* World, const FString& Token)
+{
+	TArray<AActor*> Matches;
+	MCPCollectActorsByToken(World, Token, EMCPActorMatch::LabelNameOrPath, Matches);
+	return Matches.Num() > 0 ? Matches[0] : nullptr;
 }
 
 /** Build the "no such actor" message for a failed label/name/path lookup.
  *  Names what was searched and offers the labels that contain the token, so a
  *  caller that guessed a label sees the real one instead of a bare miss. */
-inline FString MCPDescribeActorLookupMiss(UWorld* World, const FString& Token, const FString& WorldLabel)
+inline FString MCPDescribeActorLookupMiss(
+	UWorld* World,
+	const FString& Token,
+	const FString& WorldLabel,
+	EMCPActorMatch Match = EMCPActorMatch::LabelNameOrPath)
 {
 	int32 ActorCount = 0;
 	TArray<FString> Near;
@@ -549,15 +672,132 @@ inline FString MCPDescribeActorLookupMiss(UWorld* World, const FString& Token, c
 			}
 		}
 	}
+	// Name what was actually searched. Claiming a name and path sweep that a
+	// label-only action never ran sends a caller looking for a typo in the
+	// wrong field.
+	const TCHAR* Searched =
+		Match == EMCPActorMatch::Label ? TEXT("by editor label")
+		: Match == EMCPActorMatch::LabelOrName ? TEXT("by editor label, then by internal object name")
+		: TEXT("by editor label, then by internal object name, then by full object path");
 	FString Msg = FString::Printf(
-		TEXT("Actor '%s' not found in the %s world. Searched every placed actor by editor label, then by internal object name, then by full object path (%d actors)."),
-		*Token, *WorldLabel, ActorCount);
+		TEXT("Actor '%s' not found in the %s world. Searched every placed actor %s (%d actors). Pass actorPath for an exact object path when a label is ambiguous or absent."),
+		*Token, *WorldLabel, Searched, ActorCount);
 	if (Near.Num() > 0)
 	{
 		Msg += FString::Printf(TEXT(" Labels containing that text: [%s]."), *FString::Join(Near, TEXT(", ")));
 	}
 	Msg += TEXT(" List the real labels with level(get_outliner).");
 	return Msg;
+}
+
+/** Which parameters carry the actor selector for one action, and how far the
+ *  label token is allowed to reach.
+ *
+ *  Handlers that name their actor something other than 'actorLabel' pass the
+ *  pair explicitly. The convention is that the path key is the label key with
+ *  its "Label" suffix swapped for "Path" (childLabel / childPath), so a caller
+ *  can guess it correctly. */
+struct FMCPActorSelector
+{
+	/** Parameter carrying the editor label (or the label/name/path token). */
+	const TCHAR* LabelKey = TEXT("actorLabel");
+	/** Parameter carrying the unambiguous full object path. */
+	const TCHAR* PathKey = TEXT("actorPath");
+	/** How far LabelKey's value is allowed to reach. */
+	EMCPActorMatch Match = EMCPActorMatch::Label;
+	/** When false, an absent selector is not an error: the resolver returns
+	 *  nullptr with OutError left unset and the caller decides what that
+	 *  means (an optional target, or a second selection route). */
+	bool bRequired = true;
+	/** Names the world in the miss message: "editor", "PIE". */
+	const TCHAR* WorldLabel = TEXT("editor");
+};
+
+/** Resolve one actor from an already-extracted token. Returns nullptr and
+ *  writes OutError on a miss or on ambiguity; the caller returns OutError
+ *  unchanged. Used where the token did not come from a parameter of its own
+ *  (a list entry, a fixed label). */
+inline AActor* MCPResolveActorToken(
+	UWorld* World,
+	const FString& Token,
+	TSharedPtr<FJsonValue>& OutError,
+	const FMCPActorSelector& Selector = FMCPActorSelector())
+{
+	OutError.Reset();
+	if (!World)
+	{
+		OutError = MCPError(TEXT("Editor world not available"));
+		return nullptr;
+	}
+	TArray<AActor*> Matches;
+	MCPCollectActorsByToken(World, Token, Selector.Match, Matches);
+	if (Matches.Num() == 1) return Matches[0];
+	if (Matches.Num() > 1)
+	{
+		OutError = MCPAmbiguousActorError(
+			Token, Selector.LabelKey, Selector.PathKey,
+			MCPDescribeActorMatchTier(Token, Matches[0]), Matches);
+		return nullptr;
+	}
+	OutError = MCPError(MCPDescribeActorLookupMiss(World, Token, Selector.WorldLabel, Selector.Match));
+	return nullptr;
+}
+
+/** THE actor resolver. Reads the unambiguous path selector first, then the
+ *  label, and refuses when the label names more than one actor.
+ *
+ *  A path that names nothing is an error rather than a quiet fall-through to
+ *  the label: the path is the precise selector, and demoting a precise miss to
+ *  a fuzzy hit is how the wrong actor gets edited in the first place.
+ *
+ *  Returns nullptr on every failure with OutError carrying the response to
+ *  return. When Selector.bRequired is false and neither key was supplied,
+ *  returns nullptr with OutError unset. */
+inline AActor* MCPResolveActor(
+	UWorld* World,
+	const TSharedPtr<FJsonObject>& Params,
+	TSharedPtr<FJsonValue>& OutError,
+	const FMCPActorSelector& Selector = FMCPActorSelector())
+{
+	OutError.Reset();
+
+	FString Path;
+	FString Token;
+	if (Params.IsValid())
+	{
+		Params->TryGetStringField(Selector.PathKey, Path);
+		Params->TryGetStringField(Selector.LabelKey, Token);
+	}
+	Path.TrimStartAndEndInline();
+	Token.TrimStartAndEndInline();
+
+	if (Path.IsEmpty() && Token.IsEmpty())
+	{
+		if (Selector.bRequired)
+		{
+			OutError = MCPError(FString::Printf(
+				TEXT("Missing required parameter '%s' (or '%s'). Editor labels are not unique, so '%s' is the selector to prefer when you have one."),
+				Selector.LabelKey, Selector.PathKey, Selector.PathKey));
+		}
+		return nullptr;
+	}
+
+	if (!World)
+	{
+		OutError = MCPError(TEXT("Editor world not available"));
+		return nullptr;
+	}
+
+	if (!Path.IsEmpty())
+	{
+		if (AActor* ByPath = MCPFindActorByPath(World, Path)) return ByPath;
+		OutError = MCPError(FString::Printf(
+			TEXT("No actor at '%s' in the %s world. Object paths look like /Game/Maps/Map.Map:PersistentLevel.Actor_0; level(get_outliner) reports the real one for every actor."),
+			*Path, Selector.WorldLabel));
+		return nullptr;
+	}
+
+	return MCPResolveActorToken(World, Token, OutError, Selector);
 }
 
 /** Spawn-by-label idempotency check. If World already has an actor with the
