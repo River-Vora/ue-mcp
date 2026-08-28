@@ -711,11 +711,9 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReadAssetProperties(const TSharedPtr<FJso
 	FString AssetPath;
 	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
 
-	UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
-	}
+	TSharedPtr<FJsonValue> LoadError;
+	UObject* Asset = MCPRequireAssetObject(AssetPath, LoadError);
+	if (!Asset) return LoadError;
 	Asset = MCPResolveAssetToCDO(Asset); // #568
 
 	FString ValueFormat;
@@ -976,17 +974,11 @@ TSharedPtr<FJsonValue> FAssetHandlers::DuplicateAsset(const TSharedPtr<FJsonObje
 	const FString OnConflict = OptionalString(Params, TEXT("onConflict"), TEXT("skip"));
 
 	// #441: DoesAssetExist returns false for some Blueprints in 5.7 even when
-	// the registry/loader can resolve them. Confirm via load-or-load_blueprint
+	// the registry/loader can resolve them. Confirm via the shared resolver
 	// before erroring out so duplicate doesn't bounce off valid paths.
-	UObject* SourceObj = UEditorAssetLibrary::LoadAsset(SourcePath);
-	if (!SourceObj)
-	{
-		SourceObj = LoadObject<UObject>(nullptr, *SourcePath);
-	}
-	if (!SourceObj)
-	{
-		return MCPError(FString::Printf(TEXT("Source asset not found: %s"), *SourcePath));
-	}
+	TSharedPtr<FJsonValue> SourceLoadError;
+	UObject* SourceObj = MCPRequireAssetObject(SourcePath, SourceLoadError, TEXT("Source asset"));
+	if (!SourceObj) return SourceLoadError;
 
 	// Idempotency: if the destination already exists, short-circuit.
 	if (UEditorAssetLibrary::DoesAssetExist(DestPath))
@@ -1148,7 +1140,7 @@ static TSharedPtr<FJsonValue> RenameWorldWithExternals(const FString& SourceAsse
 	Gather(ExtActorsSrc, SrcActors);
 	Gather(ExtObjectsSrc, SrcObjects);
 
-	UObject* World = UEditorAssetLibrary::LoadAsset(SourceAssetPath);
+	UObject* World = MCPLoadAssetObject(SourceAssetPath);
 	if (!World)
 	{
 		return MCPError(FString::Printf(TEXT("Failed to load World asset: %s. No changes made."), *SourceAssetPath));
@@ -1559,7 +1551,7 @@ namespace
 		UAssetEditorSubsystem* AES = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
 		if (!AES) return false;
 
-		UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
+		UObject* Asset = MCPLoadAssetObject(AssetPath);
 		if (!Asset) return false;
 
 		const TArray<IAssetEditorInstance*> Editors = AES->FindEditorsForAsset(Asset);
@@ -1579,7 +1571,7 @@ namespace
 		{
 			if (UAssetEditorSubsystem* AES = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>())
 			{
-				if (UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath))
+				if (UObject* Asset = MCPLoadAssetObject(AssetPath))
 				{
 					Diag.bOpenInEditor = AES->FindEditorsForAsset(Asset).Num() > 0;
 				}
@@ -1602,7 +1594,7 @@ namespace
 		// #601: when there are no editors/on-disk referencers the delete still
 		// fails for non-obvious reasons. Gather the common culprits so callers
 		// get something actionable instead of a bare "unknown".
-		if (UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath))
+		if (UObject* Asset = MCPLoadAssetObject(AssetPath))
 		{
 			// Live (in-memory) references beyond the asset's own package.
 			FReferencerInformationList RefInfo;
@@ -1889,7 +1881,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::BulkRename(const TSharedPtr<FJsonObject>&
 			continue;
 		}
 
-		UObject* Asset = UEditorAssetLibrary::LoadAsset(SourcePath);
+		UObject* Asset = MCPLoadAssetObject(SourcePath);
 		if (!Asset)
 		{
 			Record->SetStringField(TEXT("status"), TEXT("not_found"));
@@ -2158,7 +2150,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::SaveAsset(const TSharedPtr<FJsonObject>& 
 			UObject* Asset = LoadAssetByPath<UObject>(AssetPath);
 			if (!Asset)
 			{
-				return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
+				return MCPAssetNotFoundError(AssetPath);
 			}
 			UPackage* Package = Asset->GetOutermost();
 			if (!Package)
@@ -2173,7 +2165,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::SaveAsset(const TSharedPtr<FJsonObject>& 
 		else
 		{
 			bSuccess = UEditorAssetLibrary::SaveAsset(AssetPath);
-			if (UObject* Asset = FindObject<UObject>(nullptr, *AssetPath))
+			if (UObject* Asset = MCPLoadAssetObject(AssetPath))
 			{
 				if (UPackage* Package = Asset->GetOutermost())
 				{
@@ -2285,11 +2277,9 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReloadPackage(const TSharedPtr<FJsonObjec
 	FString AssetPath;
 	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
 
-	UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
-	}
+	TSharedPtr<FJsonValue> LoadError;
+	UObject* Asset = MCPRequireAssetObject(AssetPath, LoadError);
+	if (!Asset) return LoadError;
 
 	UPackage* Package = Asset->GetOutermost();
 	if (!Package)
@@ -2310,7 +2300,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReloadPackage(const TSharedPtr<FJsonObjec
 		CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
 
 		// Reload
-		UObject* Reloaded = UEditorAssetLibrary::LoadAsset(AssetPath);
+		UObject* Reloaded = MCPLoadAssetObject(AssetPath);
 		bSuccess = (Reloaded != nullptr);
 	}
 
@@ -2807,7 +2797,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::HealthCheck(const TSharedPtr<FJsonObject>
 	bool bCanLoad = bIsLoaded;
 	if (!bIsLoaded)
 	{
-		UObject* Probe = UEditorAssetLibrary::LoadAsset(AssetPath);
+		UObject* Probe = MCPLoadAssetObject(AssetPath);
 		bCanLoad = Probe != nullptr;
 		if (Probe) InMemory = Probe;
 	}
@@ -2836,7 +2826,8 @@ TSharedPtr<FJsonValue> FAssetHandlers::ForceReload(const TSharedPtr<FJsonObject>
 	FString AssetPath;
 	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
 
-	const FString PackageName = FPackageName::ObjectPathToPackageName(AssetPath);
+	const FMCPAssetPathForms Forms = MCPAssetPathForms(AssetPath);
+	const FString PackageName = Forms.PackagePath;
 	FString PackageFileName;
 	if (!FPackageName::DoesPackageExist(PackageName, &PackageFileName))
 	{
@@ -2849,7 +2840,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::ForceReload(const TSharedPtr<FJsonObject>
 	{
 		if (UAssetEditorSubsystem* AES = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>())
 		{
-			if (UObject* Existing = StaticFindObject(UObject::StaticClass(), nullptr, *AssetPath))
+			if (UObject* Existing = StaticFindObject(UObject::StaticClass(), nullptr, *Forms.ObjectPath))
 			{
 				if (AES->FindEditorsForAsset(Existing).Num() > 0)
 				{
@@ -2867,7 +2858,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::ForceReload(const TSharedPtr<FJsonObject>
 	// package, recompiles the Blueprint and reinstances against the new class.
 	// A package the editor refuses to release is reported, not papered over.
 	UPackage* ExistingPkg = FindPackage(nullptr, *PackageName);
-	UObject* PreviousObject = StaticFindObject(UObject::StaticClass(), nullptr, *AssetPath);
+	UObject* PreviousObject = StaticFindObject(UObject::StaticClass(), nullptr, *Forms.ObjectPath);
 	const TWeakObjectPtr<UObject> PreviousWeak(PreviousObject);
 	const bool bWasDirty = ExistingPkg != nullptr && ExistingPkg->IsDirty();
 	const bool bDiscardUnsaved = OptionalBool(Params, TEXT("discardUnsaved"), false);
@@ -2911,7 +2902,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::ForceReload(const TSharedPtr<FJsonObject>
 		CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
 	}
 
-	UObject* Reloaded = LoadObject<UObject>(nullptr, *AssetPath, nullptr, LOAD_None);
+	UObject* Reloaded = LoadObject<UObject>(nullptr, *Forms.ObjectPath, nullptr, LOAD_None);
 	const bool bSuccess = Reloaded != nullptr;
 	// A package that was already in memory must come back as a new object for
 	// the read to be trustworthy. Same pointer means the editor kept its copy.
@@ -2966,11 +2957,9 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetAssetProperty(const TSharedPtr<FJsonOb
 		return MCPError(TEXT("Missing 'value' parameter"));
 	}
 
-	UObject* Asset = LoadObject<UObject>(nullptr, *AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("Could not load asset '%s'"), *AssetPath));
-	}
+	TSharedPtr<FJsonValue> LoadError;
+	UObject* Asset = MCPRequireAssetObject(AssetPath, LoadError);
+	if (!Asset) return LoadError;
 	Asset = MCPResolveAssetToCDO(Asset); // #568 - author the generated-class CDO for Blueprint paths
 
 	// Resolve the (possibly indexed, possibly subobject-descending) path.
@@ -3059,11 +3048,9 @@ TSharedPtr<FJsonValue> FAssetHandlers::AppendAssetArrayElements(const TSharedPtr
 		return MCPError(TEXT("'elements' must contain at least one value"));
 	}
 
-	UObject* Asset = LoadObject<UObject>(nullptr, *AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("Could not load asset '%s'"), *AssetPath));
-	}
+	TSharedPtr<FJsonValue> LoadError;
+	UObject* Asset = MCPRequireAssetObject(AssetPath, LoadError);
+	if (!Asset) return LoadError;
 	Asset = MCPResolveAssetToCDO(Asset);
 
 	FProperty* FinalProp = nullptr;
@@ -3219,7 +3206,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetTextureSettingsByType(const TSharedPtr
 		{
 			FString TexPath;
 			if (!V->TryGetString(TexPath)) continue;
-			UTexture2D* Tex = LoadObject<UTexture2D>(nullptr, *TexPath);
+			UTexture2D* Tex = LoadAssetByPath<UTexture2D>(TexPath);
 			if (!Tex)
 			{
 				TSharedPtr<FJsonObject> F = MakeShared<FJsonObject>();
@@ -3451,11 +3438,9 @@ TSharedPtr<FJsonValue> FAssetHandlers::MigrateAssets(const TSharedPtr<FJsonObjec
 	TArray<TSharedPtr<FJsonValue>> Resolved;
 	for (const FString& Path : AssetPaths)
 	{
-		UObject* Asset = UEditorAssetLibrary::LoadAsset(Path);
-		if (!Asset)
-		{
-			return MCPError(FString::Printf(TEXT("Asset not found: %s"), *Path));
-		}
+		TSharedPtr<FJsonValue> LoadError;
+		UObject* Asset = MCPRequireAssetObject(Path, LoadError);
+		if (!Asset) return LoadError;
 		UPackage* Package = Asset->GetOutermost();
 		const FName PackageName(*Package->GetName());
 

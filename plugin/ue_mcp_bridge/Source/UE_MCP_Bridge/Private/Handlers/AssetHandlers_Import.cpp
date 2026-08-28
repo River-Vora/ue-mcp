@@ -144,11 +144,13 @@ namespace
 	TSharedPtr<FJsonValue> LoadCurveTable(const TSharedPtr<FJsonObject>& Params, UCurveTable*& OutTable, FString& OutAssetPath)
 	{
 		if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), OutAssetPath)) return Err;
-		UObject* Asset = UEditorAssetLibrary::LoadAsset(OutAssetPath);
+		TSharedPtr<FJsonValue> LoadError;
+		UObject* Asset = MCPRequireAssetObject(OutAssetPath, LoadError);
+		if (!Asset) return LoadError;
 		OutTable = Cast<UCurveTable>(Asset);
 		if (!OutTable)
 		{
-			return MCPError(FString::Printf(TEXT("Asset is not a CurveTable: %s"), *OutAssetPath));
+			return MCPAssetWrongTypeError(OutAssetPath, Asset, TEXT("CurveTable"));
 		}
 		return nullptr;
 	}
@@ -334,7 +336,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::ImportSkeletalMesh(const TSharedPtr<FJson
 	FString SkeletonPath;
 	if (Params->TryGetStringField(TEXT("skeletonPath"), SkeletonPath) && !SkeletonPath.IsEmpty())
 	{
-		USkeleton* Skeleton = LoadObject<USkeleton>(nullptr, *SkeletonPath);
+		USkeleton* Skeleton = LoadAssetByPath<USkeleton>(SkeletonPath);
 		if (Skeleton)
 		{
 			ImportUI->Skeleton = Skeleton;
@@ -471,10 +473,10 @@ TSharedPtr<FJsonValue> FAssetHandlers::ImportAnimation(const TSharedPtr<FJsonObj
 		return MCPError(FString::Printf(TEXT("File not found: %s"), *FileName));
 	}
 
-	USkeleton* Skeleton = LoadObject<USkeleton>(nullptr, *SkeletonPath);
+	USkeleton* Skeleton = LoadAssetByPath<USkeleton>(SkeletonPath);
 	if (!Skeleton)
 	{
-		return MCPError(FString::Printf(TEXT("Skeleton not found: %s"), *SkeletonPath));
+		return MCPAssetLoadError(SkeletonPath, TEXT("Skeleton"));
 	}
 
 	UFbxFactory* FbxFactory = NewObject<UFbxFactory>();
@@ -578,16 +580,14 @@ TSharedPtr<FJsonValue> FAssetHandlers::ListTextureProperties(const TSharedPtr<FJ
 	FString AssetPath;
 	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
 
-	UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
-	}
+	TSharedPtr<FJsonValue> LoadError;
+	UObject* Asset = MCPRequireAssetObject(AssetPath, LoadError);
+	if (!Asset) return LoadError;
 
 	UTexture2D* Texture = Cast<UTexture2D>(Asset);
 	if (!Texture)
 	{
-		return MCPError(FString::Printf(TEXT("Asset is not a Texture2D: %s"), *AssetPath));
+		return MCPAssetWrongTypeError(AssetPath, Asset, TEXT("Texture2D"));
 	}
 
 	auto Result = MCPSuccess();
@@ -663,16 +663,14 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetTextureProperties(const TSharedPtr<FJs
 	FString AssetPath;
 	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
 
-	UObject* Asset = UEditorAssetLibrary::LoadAsset(AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
-	}
+	TSharedPtr<FJsonValue> LoadError;
+	UObject* Asset = MCPRequireAssetObject(AssetPath, LoadError);
+	if (!Asset) return LoadError;
 
 	UTexture2D* Texture = Cast<UTexture2D>(Asset);
 	if (!Texture)
 	{
-		return MCPError(FString::Printf(TEXT("Asset is not a Texture2D: %s"), *AssetPath));
+		return MCPAssetWrongTypeError(AssetPath, Asset, TEXT("Texture2D"));
 	}
 
 	// Capture previous values for self-inverse rollback. Use reflection paths
@@ -1063,7 +1061,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateCurveTable(const TSharedPtr<FJsonOb
 			{
 				FString ExistingAssetPath;
 				ExistingObj->TryGetStringField(TEXT("path"), ExistingAssetPath);
-				if (UCurveTable* Existing = LoadObject<UCurveTable>(nullptr, *ExistingAssetPath))
+				if (UCurveTable* Existing = LoadAssetByPath<UCurveTable>(ExistingAssetPath))
 				{
 					ExistingObj->SetStringField(TEXT("assetPath"), Existing->GetPathName());
 					ExistingObj->SetStringField(TEXT("curveType"), CurveTableModeName(Existing->GetCurveTableMode()));
@@ -1553,7 +1551,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateDataTable(const TSharedPtr<FJsonObj
 
 	// Find the row struct type
 	UScriptStruct* ScriptStruct = nullptr;
-	ScriptStruct = LoadObject<UScriptStruct>(nullptr, *RowStruct);
+	ScriptStruct = LoadAssetByPath<UScriptStruct>(RowStruct);
 	if (!ScriptStruct)
 	{
 		for (TObjectIterator<UScriptStruct> It; It; ++It)
@@ -1584,7 +1582,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateDataTable(const TSharedPtr<FJsonObj
 			{
 				FString ExistingAssetPath;
 				ExistingObj->TryGetStringField(TEXT("path"), ExistingAssetPath);
-				if (UDataTable* Existing = LoadObject<UDataTable>(nullptr, *ExistingAssetPath))
+				if (UDataTable* Existing = LoadAssetByPath<UDataTable>(ExistingAssetPath))
 				{
 					ExistingObj->SetStringField(TEXT("assetPath"), Existing->GetPathName());
 					ExistingObj->SetStringField(TEXT("rowStruct"), Existing->RowStruct ? Existing->RowStruct->GetName() : TEXT(""));
@@ -1630,17 +1628,13 @@ namespace
 	{
 		if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), OutAssetPath)) return Err;
 
-		UObject* Asset = MCPLoadAssetObject(OutAssetPath);
-		if (!Asset)
-		{
-			return MCPError(FString::Printf(TEXT("Asset not found: %s"), *OutAssetPath));
-		}
+		TSharedPtr<FJsonValue> LoadError;
+		UObject* Asset = MCPRequireAssetObject(OutAssetPath, LoadError);
+		if (!Asset) return LoadError;
 		OutTable = Cast<UDataTable>(Asset);
 		if (!OutTable)
 		{
-			return MCPError(FString::Printf(
-				TEXT("Asset is not a DataTable: %s (found a %s)"),
-				*OutAssetPath, *Asset->GetClass()->GetName()));
+			return MCPAssetWrongTypeError(OutAssetPath, Asset, TEXT("DataTable"));
 		}
 		return nullptr;
 	}
@@ -2234,16 +2228,14 @@ namespace
 	{
 		if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), OutAssetPath)) return Err;
 
-		UObject* Asset = UEditorAssetLibrary::LoadAsset(OutAssetPath);
-		if (!Asset)
-		{
-			return MCPError(FString::Printf(TEXT("Asset not found: %s"), *OutAssetPath));
-		}
+		TSharedPtr<FJsonValue> LoadError;
+		UObject* Asset = MCPRequireAssetObject(OutAssetPath, LoadError);
+		if (!Asset) return LoadError;
 
 		OutStringTable = Cast<UStringTable>(Asset);
 		if (!OutStringTable)
 		{
-			return MCPError(FString::Printf(TEXT("Asset is not a StringTable: %s"), *OutAssetPath));
+			return MCPAssetWrongTypeError(OutAssetPath, Asset, TEXT("StringTable"));
 		}
 		return nullptr;
 	}
@@ -2324,7 +2316,7 @@ TSharedPtr<FJsonValue> FAssetHandlers::CreateStringTable(const TSharedPtr<FJsonO
 			{
 				FString ExistingAssetPath;
 				ExistingObj->TryGetStringField(TEXT("path"), ExistingAssetPath);
-				if (UStringTable* Existing = LoadObject<UStringTable>(nullptr, *ExistingAssetPath))
+				if (UStringTable* Existing = LoadAssetByPath<UStringTable>(ExistingAssetPath))
 				{
 					SetStringTableInfoFields(ExistingObj, Existing);
 				}
@@ -2593,11 +2585,9 @@ TSharedPtr<FJsonValue> FAssetHandlers::ReimportAsset(const TSharedPtr<FJsonObjec
 	FString AssetPath;
 	if (auto Err = RequireStringAlt(Params, TEXT("assetPath"), TEXT("path"), AssetPath)) return Err;
 
-	UObject* Asset = LoadObject<UObject>(nullptr, *AssetPath);
-	if (!Asset)
-	{
-		return MCPError(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
-	}
+	TSharedPtr<FJsonValue> LoadError;
+	UObject* Asset = MCPRequireAssetObject(AssetPath, LoadError);
+	if (!Asset) return LoadError;
 
 	// Optionally override the source file path
 	FString NewSourcePath;
@@ -2717,8 +2707,8 @@ TSharedPtr<FJsonValue> FAssetHandlers::ExportTexture(const TSharedPtr<FJsonObjec
 	FString OutputPath;
 	if (auto Err = RequireStringAlt(Params, TEXT("outputPath"), TEXT("filePath"), OutputPath)) return Err;
 
-	UTexture2D* Texture = Cast<UTexture2D>(UEditorAssetLibrary::LoadAsset(AssetPath));
-	if (!Texture) return MCPError(FString::Printf(TEXT("Texture2D not found: %s"), *AssetPath));
+	UTexture2D* Texture = LoadAssetByPath<UTexture2D>(AssetPath);
+	if (!Texture) return MCPAssetLoadError(AssetPath, TEXT("Texture2D"));
 
 	FString AbsPath = OutputPath;
 	if (FPaths::IsRelative(AbsPath)) AbsPath = FPaths::Combine(FPaths::ProjectDir(), AbsPath);
@@ -2755,10 +2745,10 @@ TSharedPtr<FJsonValue> FAssetHandlers::CompareTextures(const TSharedPtr<FJsonObj
 	if (auto Err = RequireStringAlt(Params, TEXT("assetPathA"), TEXT("a"), PathA)) return Err;
 	if (auto Err = RequireStringAlt(Params, TEXT("assetPathB"), TEXT("b"), PathB)) return Err;
 
-	UTexture2D* A = Cast<UTexture2D>(UEditorAssetLibrary::LoadAsset(PathA));
-	UTexture2D* B = Cast<UTexture2D>(UEditorAssetLibrary::LoadAsset(PathB));
-	if (!A) return MCPError(FString::Printf(TEXT("Texture2D not found: %s"), *PathA));
-	if (!B) return MCPError(FString::Printf(TEXT("Texture2D not found: %s"), *PathB));
+	UTexture2D* A = LoadAssetByPath<UTexture2D>(PathA);
+	UTexture2D* B = LoadAssetByPath<UTexture2D>(PathB);
+	if (!A) return MCPAssetLoadError(PathA, TEXT("Texture2D"));
+	if (!B) return MCPAssetLoadError(PathB, TEXT("Texture2D"));
 
 	const bool bSameDims = A->GetSizeX() == B->GetSizeX() && A->GetSizeY() == B->GetSizeY();
 	const bool bSameFormat = A->GetPixelFormat() == B->GetPixelFormat();
