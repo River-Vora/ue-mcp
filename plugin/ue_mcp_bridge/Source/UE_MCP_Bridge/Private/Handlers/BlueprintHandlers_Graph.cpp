@@ -89,46 +89,6 @@ namespace
 			PinObj->SetStringField(TEXT("defaultObject"), Pin->DefaultObject->GetPathName());
 		}
 	}
-
-	FString MakeDefaultGraphDumpPath(const FString& AssetPath, const FString& GraphName)
-	{
-		const FString AssetName = FPackageName::GetLongPackageAssetName(AssetPath);
-		const FString PathHash = FString::Printf(TEXT("%08x"), GetTypeHash(AssetPath + TEXT(":") + GraphName));
-		const FString BaseName = FPaths::MakeValidFileName(AssetName + TEXT("_") + GraphName + TEXT("_") + PathHash);
-		return FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UE_MCP"), TEXT("GraphDumps"), BaseName + TEXT(".json"));
-	}
-
-	bool WriteJsonObjectToFile(const TSharedPtr<FJsonObject>& JsonObject, const FString& RequestedPath, const FString& AssetPath, const FString& GraphName, FString& OutResolvedPath, FString& OutError)
-	{
-		OutResolvedPath = RequestedPath.IsEmpty() ? MakeDefaultGraphDumpPath(AssetPath, GraphName) : RequestedPath;
-		if (FPaths::IsRelative(OutResolvedPath))
-		{
-			OutResolvedPath = FPaths::Combine(FPaths::ProjectSavedDir(), OutResolvedPath);
-		}
-
-		const FString Directory = FPaths::GetPath(OutResolvedPath);
-		if (!Directory.IsEmpty() && !IFileManager::Get().MakeDirectory(*Directory, true))
-		{
-			OutError = FString::Printf(TEXT("Failed to create dump directory: %s"), *Directory);
-			return false;
-		}
-
-		FString JsonText;
-		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&JsonText);
-		if (!FJsonSerializer::Serialize(JsonObject.ToSharedRef(), Writer))
-		{
-			OutError = TEXT("Failed to serialize graph JSON");
-			return false;
-		}
-
-		if (!FFileHelper::SaveStringToFile(JsonText, *OutResolvedPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-		{
-			OutError = FString::Printf(TEXT("Failed to write graph dump: %s"), *OutResolvedPath);
-			return false;
-		}
-
-		return true;
-	}
 }
 
 
@@ -145,7 +105,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AddNode(const TSharedPtr<FJsonObject>
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	// Find the target graph
@@ -819,7 +779,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ReadBlueprintGraph(const TSharedPtr<F
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	// Find the graph in UbergraphPages and FunctionGraphs
@@ -908,6 +868,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ReadBlueprintGraph(const TSharedPtr<F
 
 		auto Result = MCPSuccess();
 		Result->SetStringField(TEXT("path"), AssetPath);
+		AnnotateResolvedBlueprint(Result, Blueprint);
 		Result->SetStringField(TEXT("graphName"), GraphName);
 		Result->SetArrayField(TEXT("nodes"), Nodes);
 		Result->SetNumberField(TEXT("nodeCount"), Nodes.Num());
@@ -956,6 +917,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ReadBlueprintGraph(const TSharedPtr<F
 
 		auto Result = MCPSuccess();
 		Result->SetStringField(TEXT("path"), AssetPath);
+		AnnotateResolvedBlueprint(Result, Blueprint);
 		Result->SetStringField(TEXT("graphName"), GraphName);
 		Result->SetBoolField(TEXT("dumpedToFile"), true);
 		Result->SetStringField(TEXT("outputPath"), ResolvedDumpPath);
@@ -1003,7 +965,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ConnectPins(const TSharedPtr<FJsonObj
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	UEdGraph* TargetGraph = FindGraph(Blueprint, GraphName);
@@ -1219,7 +1181,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::DeleteNode(const TSharedPtr<FJsonObje
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	UEdGraph* TargetGraph = FindGraph(Blueprint, GraphName);
@@ -1274,7 +1236,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetNodeProperty(const TSharedPtr<FJso
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	UEdGraph* TargetGraph = FindGraph(Blueprint, GraphName);
@@ -1685,7 +1647,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ExportNodesT3D(const TSharedPtr<FJson
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	UEdGraph* TargetGraph = FindGraph(Blueprint, GraphName);
@@ -1779,7 +1741,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ImportNodesT3D(const TSharedPtr<FJson
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint)
 	{
-		return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+		return BlueprintNotFoundError(AssetPath);
 	}
 
 	UEdGraph* TargetGraph = FindGraph(Blueprint, GraphName);
@@ -1927,7 +1889,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::CleanupGraph(const TSharedPtr<FJsonOb
 	if (auto Err = RequireStringAlt(Params, TEXT("path"), TEXT("assetPath"), AssetPath)) return Err;
 
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
-	if (!Blueprint) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	if (!Blueprint) return BlueprintNotFoundError(AssetPath);
 
 	const FString GraphName = OptionalString(Params, TEXT("graphName"));
 
@@ -2003,7 +1965,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ConnectPinsBatch(const TSharedPtr<FJs
 	}
 
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
-	if (!Blueprint) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	if (!Blueprint) return BlueprintNotFoundError(AssetPath);
 
 	UEdGraph* TargetGraph = FindGraph(Blueprint, GraphName);
 	if (!TargetGraph) return MCPError(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
@@ -2108,7 +2070,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::SetNodePosition(const TSharedPtr<FJso
 	int32 PosY = OptionalInt(Params, TEXT("posY"), 0);
 
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
-	if (!Blueprint) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	if (!Blueprint) return BlueprintNotFoundError(AssetPath);
 	UEdGraph* Graph = FindGraph(Blueprint, GraphName);
 	if (!Graph) return MCPError(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
 	UEdGraphNode* Node = FindNodeByGuidOrName(Graph, NodeId);
@@ -2141,7 +2103,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::AutoLayoutGraph(const TSharedPtr<FJso
 	int32 RowGap = OptionalInt(Params, TEXT("rowGap"), 200);
 
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
-	if (!Blueprint) return MCPError(FString::Printf(TEXT("Blueprint not found: %s"), *AssetPath));
+	if (!Blueprint) return BlueprintNotFoundError(AssetPath);
 	UEdGraph* Graph = FindGraph(Blueprint, GraphName);
 	if (!Graph) return MCPError(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
 

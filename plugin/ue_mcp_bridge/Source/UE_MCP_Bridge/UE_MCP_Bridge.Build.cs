@@ -31,6 +31,8 @@ public class UE_MCP_Bridge : ModuleRules
 	// Private/Tests/AnimationPoseTests.cpp: same reason.
 	// Private/Tests/WidgetBlueprintResolveTests.cpp and
 	// Private/Tests/GasLiveAttributeTests.cpp: same reason.
+	// Private/Tests/BlueprintHandlerSurfaceTests.cpp: same reason.
+	// Private/Handlers/BlueprintHandlers_Search.cpp: same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;

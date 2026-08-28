@@ -140,6 +140,11 @@ const OVERRIDES: Readonly<Record<string, ActionClass>> = {
   // ── Reads whose verb reads as a write ───────────────────────────────
   // Serializers: they render a graph as text or JSON and return it.
   "blueprint.export_nodes_t3d": "read",
+  // Reads call-site nodes across a directory. "search" is a read verb, but
+  // "call" is a mutate verb from the wrapped engine surface, and a mutate verb
+  // anywhere in the name wins - which is wrong for exactly this action. It
+  // loads packages and reads graphs; it authors nothing (#945).
+  "blueprint.search_call_sites": "read",
   "material.export_graph": "read",
   "pcg.export_graph": "read",
   // Reads the actor descriptors of an unloaded World Partition level. Nothing

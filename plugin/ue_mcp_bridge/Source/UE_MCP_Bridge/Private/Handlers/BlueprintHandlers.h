@@ -54,6 +54,10 @@ private:
 	static TSharedPtr<FJsonValue> DeleteVariable(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AddFunctionParameter(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetVariableDefault(const TSharedPtr<FJsonObject>& Params);
+	// #902: read the RESOLVED default off the generated class CDO, so a
+	// write-compile-readback loop can verify itself. Reports whether that value
+	// has reached the package as well as what it is (#931).
+	static TSharedPtr<FJsonValue> GetVariableDefault(const TSharedPtr<FJsonObject>& Params);
 
 	// v0.7.8 - agent-ergonomics additions (stubs)
 	static TSharedPtr<FJsonValue> ReadBlueprintGraphSummary(const TSharedPtr<FJsonObject>& Params);
@@ -98,6 +102,11 @@ private:
 	static TSharedPtr<FJsonValue> ConnectPinsBatch(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetNodePosition(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> AutoLayoutGraph(const TSharedPtr<FJsonObject>& Params);
+	// #945: project-wide search for authored function call sites, narrowed by
+	// the Asset Registry before any package is loaded. Defined in
+	// BlueprintHandlers_Search.cpp.
+	static TSharedPtr<FJsonValue> SearchCallSites(const TSharedPtr<FJsonObject>& Params);
+
 	// #419: SetCapsuleSize on CapsuleComponent BP templates (UFUNCTION setter
 	// path; raw property writes leave the visualizer stale)
 	static TSharedPtr<FJsonValue> SetCapsuleSize(const TSharedPtr<FJsonObject>& Params);
