@@ -1430,6 +1430,14 @@ TSharedPtr<FJsonValue> FWidgetHandlers::ListWidgetClasses(const TSharedPtr<FJson
 // ─────────────────────────────────────────────────────────────
 namespace WidgetRuntime_Internal
 {
+	// These names are deliberately widget-specific. This namespace is opened with
+	// a block-scope using-directive at several call sites, which injects its names
+	// into the global namespace at exactly the point where a unity-blob neighbour's
+	// anonymous-namespace definitions live. GasHandlers_Runtime.cpp defines a
+	// ResolveRuntimeWorld and EditorHandlers_PIERuntime.cpp a VectorJson; those
+	// pairs resolved as overloads only by arity and by the absence of an implicit
+	// FVector/FVector2D conversion. audit:unity cannot see this class of collision,
+	// because it walks anonymous-namespace bodies only.
 	struct FDerivedClipState
 	{
 		bool bHasRect = false;
@@ -1469,7 +1477,7 @@ namespace WidgetRuntime_Internal
 	static TMap<FString, uint64> PreviousLayoutCaptureFrames;
 	static uint64 LayoutCaptureSequence = 0;
 
-	static UWorld* ResolveRuntimeWorld()
+	static UWorld* ResolveWidgetRuntimeWorld()
 	{
 		if (!GEditor) return nullptr;
 		FWorldContext* PIE = GEditor->GetPIEWorldContext();
@@ -1504,7 +1512,7 @@ namespace WidgetRuntime_Internal
 		return TEXT("Unknown");
 	}
 
-	static TSharedPtr<FJsonObject> VectorJson(const FVector2D& Value)
+	static TSharedPtr<FJsonObject> WidgetVector2DJson(const FVector2D& Value)
 	{
 		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 		Obj->SetNumberField(TEXT("x"), Value.X);
@@ -1578,13 +1586,13 @@ namespace WidgetRuntime_Internal
 			const FVector2D Alignment = CanvasSlot->GetAlignment();
 			TSharedPtr<FJsonObject> Canvas = MakeShared<FJsonObject>();
 			TSharedPtr<FJsonObject> AnchorsObj = MakeShared<FJsonObject>();
-			AnchorsObj->SetObjectField(TEXT("minimum"), VectorJson(Anchors.Minimum));
-			AnchorsObj->SetObjectField(TEXT("maximum"), VectorJson(Anchors.Maximum));
+			AnchorsObj->SetObjectField(TEXT("minimum"), WidgetVector2DJson(Anchors.Minimum));
+			AnchorsObj->SetObjectField(TEXT("maximum"), WidgetVector2DJson(Anchors.Maximum));
 			AnchorsObj->SetBoolField(TEXT("stretchedHorizontally"), !FMath::IsNearlyEqual(Anchors.Minimum.X, Anchors.Maximum.X));
 			AnchorsObj->SetBoolField(TEXT("stretchedVertically"), !FMath::IsNearlyEqual(Anchors.Minimum.Y, Anchors.Maximum.Y));
 			Canvas->SetObjectField(TEXT("anchors"), AnchorsObj);
 			Canvas->SetObjectField(TEXT("offsets"), MarginJson(Offsets));
-			Canvas->SetObjectField(TEXT("alignment"), VectorJson(Alignment));
+			Canvas->SetObjectField(TEXT("alignment"), WidgetVector2DJson(Alignment));
 			Canvas->SetBoolField(TEXT("autoSize"), CanvasSlot->GetAutoSize());
 			Canvas->SetNumberField(TEXT("zOrder"), CanvasSlot->GetZOrder());
 			SlotObj->SetObjectField(TEXT("canvas"), Canvas);
@@ -1807,21 +1815,21 @@ namespace WidgetRuntime_Internal
 
 			TSharedPtr<FJsonObject> GeometryObj = MakeShared<FJsonObject>();
 			GeometryObj->SetBoolField(TEXT("hasCachedSlateWidget"), bHasCachedSlateWidget);
-			GeometryObj->SetObjectField(TEXT("desiredSize"), VectorJson(DesiredSize));
-			GeometryObj->SetObjectField(TEXT("localSize"), VectorJson(LocalSize));
-			GeometryObj->SetObjectField(TEXT("absoluteSize"), VectorJson(AbsoluteSize));
-			GeometryObj->SetObjectField(TEXT("absolutePosition"), VectorJson(AbsolutePosition));
+			GeometryObj->SetObjectField(TEXT("desiredSize"), WidgetVector2DJson(DesiredSize));
+			GeometryObj->SetObjectField(TEXT("localSize"), WidgetVector2DJson(LocalSize));
+			GeometryObj->SetObjectField(TEXT("absoluteSize"), WidgetVector2DJson(AbsoluteSize));
+			GeometryObj->SetObjectField(TEXT("absolutePosition"), WidgetVector2DJson(AbsolutePosition));
 			GeometryObj->SetObjectField(TEXT("layoutBoundingRect"), RectJson(LayoutRect));
 			GeometryObj->SetObjectField(TEXT("renderBoundingRect"), RectJson(RenderRect));
 			GeometryObj->SetNumberField(TEXT("accumulatedLayoutScale"), Geometry.GetAccumulatedLayoutTransform().GetScale());
 			Obj->SetObjectField(TEXT("geometry"), GeometryObj);
 
 			TSharedPtr<FJsonObject> TransformObj = MakeShared<FJsonObject>();
-			TransformObj->SetObjectField(TEXT("translation"), VectorJson(RenderTransform.Translation));
-			TransformObj->SetObjectField(TEXT("scale"), VectorJson(RenderTransform.Scale));
-			TransformObj->SetObjectField(TEXT("shear"), VectorJson(RenderTransform.Shear));
+			TransformObj->SetObjectField(TEXT("translation"), WidgetVector2DJson(RenderTransform.Translation));
+			TransformObj->SetObjectField(TEXT("scale"), WidgetVector2DJson(RenderTransform.Scale));
+			TransformObj->SetObjectField(TEXT("shear"), WidgetVector2DJson(RenderTransform.Shear));
 			TransformObj->SetNumberField(TEXT("angleDegrees"), RenderTransform.Angle);
-			TransformObj->SetObjectField(TEXT("pivot"), VectorJson(Widget->GetRenderTransformPivot()));
+			TransformObj->SetObjectField(TEXT("pivot"), WidgetVector2DJson(Widget->GetRenderTransformPivot()));
 			Obj->SetObjectField(TEXT("renderTransform"), TransformObj);
 
 			TSharedPtr<FJsonObject> ClipObj = MakeShared<FJsonObject>();
@@ -1972,10 +1980,10 @@ namespace WidgetRuntime_Internal
 						bSlotChanged;
 					DeltaObj->SetBoolField(TEXT("hasPreviousCapture"), true);
 					DeltaObj->SetBoolField(TEXT("changed"), bChanged);
-					DeltaObj->SetObjectField(TEXT("absolutePositionDelta"), VectorJson(PositionDelta));
-					DeltaObj->SetObjectField(TEXT("localSizeDelta"), VectorJson(LocalSizeDelta));
-					DeltaObj->SetObjectField(TEXT("absoluteSizeDelta"), VectorJson(AbsoluteSizeDelta));
-					DeltaObj->SetObjectField(TEXT("desiredSizeDelta"), VectorJson(DesiredSizeDelta));
+					DeltaObj->SetObjectField(TEXT("absolutePositionDelta"), WidgetVector2DJson(PositionDelta));
+					DeltaObj->SetObjectField(TEXT("localSizeDelta"), WidgetVector2DJson(LocalSizeDelta));
+					DeltaObj->SetObjectField(TEXT("absoluteSizeDelta"), WidgetVector2DJson(AbsoluteSizeDelta));
+					DeltaObj->SetObjectField(TEXT("desiredSizeDelta"), WidgetVector2DJson(DesiredSizeDelta));
 					DeltaObj->SetBoolField(TEXT("slotPropertiesChanged"), bSlotChanged);
 					if (bChanged)
 					{
@@ -2076,7 +2084,7 @@ TSharedPtr<FJsonValue> FWidgetHandlers::ListRuntimeWidgets(const TSharedPtr<FJso
 {
 	using namespace WidgetRuntime_Internal;
 
-	UWorld* World = ResolveRuntimeWorld();
+	UWorld* World = ResolveWidgetRuntimeWorld();
 	if (!World)
 	{
 		return MCPError(TEXT("No PIE world available. Is Play-In-Editor running?"));
@@ -2128,7 +2136,7 @@ TSharedPtr<FJsonValue> FWidgetHandlers::GetRuntimeWidget(const TSharedPtr<FJsonO
 {
 	using namespace WidgetRuntime_Internal;
 
-	UWorld* World = ResolveRuntimeWorld();
+	UWorld* World = ResolveWidgetRuntimeWorld();
 	if (!World)
 	{
 		return MCPError(TEXT("No PIE world available. Is Play-In-Editor running?"));
@@ -2324,7 +2332,7 @@ TSharedPtr<FJsonValue> FWidgetHandlers::GetRuntimeWidget(const TSharedPtr<FJsonO
 TSharedPtr<FJsonValue> FWidgetHandlers::AddWidgetToViewport(const TSharedPtr<FJsonObject>& Params)
 {
 	using namespace WidgetRuntime_Internal;
-	UWorld* World = ResolveRuntimeWorld();
+	UWorld* World = ResolveWidgetRuntimeWorld();
 	if (!World)
 	{
 		return MCPError(TEXT("No PIE world available. Start Play-In-Editor first (editor pie_control action=play)."));
@@ -2381,7 +2389,7 @@ TSharedPtr<FJsonValue> FWidgetHandlers::AddWidgetToViewport(const TSharedPtr<FJs
 TSharedPtr<FJsonValue> FWidgetHandlers::InvokeRuntimeWidgetFunction(const TSharedPtr<FJsonObject>& Params)
 {
 	using namespace WidgetRuntime_Internal;
-	UWorld* World = ResolveRuntimeWorld();
+	UWorld* World = ResolveWidgetRuntimeWorld();
 	if (!World)
 	{
 		return MCPError(TEXT("No PIE world available. Is Play-In-Editor running?"));
@@ -2472,7 +2480,7 @@ TSharedPtr<FJsonValue> FWidgetHandlers::GetRuntimeDelegates(const TSharedPtr<FJs
 {
 	using namespace WidgetRuntime_Internal;
 
-	UWorld* World = ResolveRuntimeWorld();
+	UWorld* World = ResolveWidgetRuntimeWorld();
 	if (!World)
 	{
 		return MCPError(TEXT("No PIE world available. Is Play-In-Editor running?"));

@@ -71,7 +71,7 @@ namespace
 	}
 
 	// #213: locate a node by name within a graph, including Input/Output specials.
-	static UPCGNode* FindNodeByName(UPCGGraph* Graph, const FString& Name)
+	static UPCGNode* FindPCGNodeByName(UPCGGraph* Graph, const FString& Name)
 	{
 		if (!Graph || Name.IsEmpty()) return nullptr;
 		for (UPCGNode* Node : Graph->GetNodes())
@@ -1647,7 +1647,7 @@ TSharedPtr<FJsonValue> FPCGHandlers::ImportGraph(const TSharedPtr<FJsonObject>& 
 		auto Resolve = [&](const FString& Name) -> UPCGNode*
 		{
 			if (UPCGNode** Found = ByLocalName.Find(Name); Found && *Found) return *Found;
-			return FindNodeByName(Graph, Name);
+			return FindPCGNodeByName(Graph, Name);
 		};
 
 		auto FirstOutputPin = [](UPCGNode* N) -> FName

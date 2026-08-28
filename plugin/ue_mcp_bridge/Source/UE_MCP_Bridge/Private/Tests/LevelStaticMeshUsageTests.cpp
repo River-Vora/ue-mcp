@@ -84,7 +84,7 @@ namespace
 		UWorld* TestWorld = nullptr;
 	};
 
-	AActor* SpawnTransientActor(UWorld* World, const TCHAR* Name, const TCHAR* Label)
+	AActor* SpawnMeshUsageTestActor(UWorld* World, const TCHAR* Name, const TCHAR* Label)
 	{
 		if (!World)
 		{
@@ -254,8 +254,8 @@ bool FLevelStaticMeshUsageAggregationTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	AActor* ActorA = SpawnTransientActor(World, TEXT("UEMCP_Actor_A"), TEXT("Usage Actor A"));
-	AActor* ActorB = SpawnTransientActor(World, TEXT("UEMCP_Actor_B"), TEXT("Usage Actor B"));
+	AActor* ActorA = SpawnMeshUsageTestActor(World, TEXT("UEMCP_Actor_A"), TEXT("Usage Actor A"));
+	AActor* ActorB = SpawnMeshUsageTestActor(World, TEXT("UEMCP_Actor_B"), TEXT("Usage Actor B"));
 	if (!TestNotNull(TEXT("first fixture actor exists"), ActorA) ||
 		!TestNotNull(TEXT("second fixture actor exists"), ActorB))
 	{

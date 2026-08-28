@@ -115,7 +115,7 @@ namespace
 		return true;
 	}
 
-	bool ReadOptionalBool(
+	bool ReadRetargeterOptionalBool(
 		const TSharedPtr<FJsonObject>& Object,
 		const TCHAR* Field,
 		const bool DefaultValue,
@@ -438,8 +438,8 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ConfigureIKRetargeter(const TSharedPt
 
 	bool bEnsureDefaultOps = true;
 	bool bForceRemap = false;
-	if (!ReadOptionalBool(Params, TEXT("ensureDefaultOps"), true, bEnsureDefaultOps, Error)
-		|| !ReadOptionalBool(Params, TEXT("forceRemap"), false, bForceRemap, Error))
+	if (!ReadRetargeterOptionalBool(Params, TEXT("ensureDefaultOps"), true, bEnsureDefaultOps, Error)
+		|| !ReadRetargeterOptionalBool(Params, TEXT("forceRemap"), false, bForceRemap, Error))
 	{
 		return MCPError(Error);
 	}
@@ -544,8 +544,8 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ConfigureIKRetargeter(const TSharedPt
 			return MCPError(TEXT("pose.name must be a non-empty string"));
 		Pose.Name = FName(*PoseName);
 		if (Pose.Name.IsNone()) return MCPError(TEXT("pose.name cannot be 'None'"));
-		if (!ReadOptionalBool(PoseObject, TEXT("create"), false, Pose.bCreate, Error)
-			|| !ReadOptionalBool(PoseObject, TEXT("reset"), false, Pose.bReset, Error))
+		if (!ReadRetargeterOptionalBool(PoseObject, TEXT("create"), false, Pose.bCreate, Error)
+			|| !ReadRetargeterOptionalBool(PoseObject, TEXT("reset"), false, Pose.bReset, Error))
 		{
 			return MCPError(Error);
 		}

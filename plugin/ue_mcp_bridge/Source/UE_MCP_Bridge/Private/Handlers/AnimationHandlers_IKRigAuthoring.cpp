@@ -139,7 +139,7 @@ static bool ReadOptionalNonNegativeInteger(
 	return true;
 }
 
-static bool ReadOptionalBool(
+static bool ReadIKRigOptionalBool(
 	const TSharedPtr<FJsonObject>& Object,
 	const TCHAR* Field,
 	TOptional<bool>& Out,
@@ -300,7 +300,7 @@ TSharedPtr<FJsonValue> FAnimationHandlers::ConfigureIKRig(const TSharedPtr<FJson
 		}
 		FullBody.RootBone = FName(*RootBone);
 		if (!ReadOptionalNonNegativeInteger(Object, TEXT("solverIndex"), FullBody.SolverIndex, ParseError) ||
-			!ReadOptionalBool(Object, TEXT("enabled"), FullBody.bEnabled, ParseError))
+			!ReadIKRigOptionalBool(Object, TEXT("enabled"), FullBody.bEnabled, ParseError))
 		{
 			return Error(TEXT("invalid_params"), FString::Printf(TEXT("fullBodyIK: %s"), *ParseError));
 		}

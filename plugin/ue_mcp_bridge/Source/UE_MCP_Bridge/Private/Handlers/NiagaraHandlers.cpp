@@ -1329,7 +1329,7 @@ namespace
 		return Src ? Src->NodeGraph : nullptr;
 	}
 
-	TSharedPtr<FJsonObject> PinToJson(const UEdGraphPin* Pin)
+	TSharedPtr<FJsonObject> NiagaraPinToJson(const UEdGraphPin* Pin)
 	{
 		TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
 		O->SetStringField(TEXT("name"), Pin->PinName.ToString());
@@ -1518,8 +1518,8 @@ TSharedPtr<FJsonValue> FNiagaraHandlers::ListModuleInputs(const TSharedPtr<FJson
 			for (UEdGraphPin* Pin : FC->Pins)
 			{
 				if (!Pin) continue;
-				if (Pin->Direction == EGPD_Input)  SwitchPins.Add(MakeShared<FJsonValueObject>(PinToJson(Pin)));
-				if (Pin->Direction == EGPD_Output) Outputs.Add(MakeShared<FJsonValueObject>(PinToJson(Pin)));
+				if (Pin->Direction == EGPD_Input)  SwitchPins.Add(MakeShared<FJsonValueObject>(NiagaraPinToJson(Pin)));
+				if (Pin->Direction == EGPD_Output) Outputs.Add(MakeShared<FJsonValueObject>(NiagaraPinToJson(Pin)));
 			}
 			ModObj->SetArrayField(TEXT("inputs"), Inputs);
 			ModObj->SetNumberField(TEXT("inputCount"), Inputs.Num());

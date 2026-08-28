@@ -61,7 +61,7 @@ namespace
 		UWorld* World = nullptr;
 	};
 
-	AActor* SpawnTransientActor(UWorld* World, const FString& Label)
+	AActor* SpawnInstanceProjectionTestActor(UWorld* World, const FString& Label)
 	{
 		FActorSpawnParameters SpawnParameters;
 		SpawnParameters.Name = MakeUniqueObjectName(
@@ -176,9 +176,9 @@ bool FLevelInstanceProjectionDryRunAndCommitTest::RunTest(const FString& Paramet
 	const FString TargetLabel = TEXT("UEMCP_ProjectionTarget");
 	const FString SurfaceLabel = TEXT("UEMCP_ProjectionSurface");
 	const FString BlockerLabel = TEXT("UEMCP_ProjectionBlocker");
-	AActor* Target = SpawnTransientActor(TestWorld.Get(), TargetLabel);
-	AActor* Surface = SpawnTransientActor(TestWorld.Get(), SurfaceLabel);
-	AActor* Blocker = SpawnTransientActor(TestWorld.Get(), BlockerLabel);
+	AActor* Target = SpawnInstanceProjectionTestActor(TestWorld.Get(), TargetLabel);
+	AActor* Surface = SpawnInstanceProjectionTestActor(TestWorld.Get(), SurfaceLabel);
+	AActor* Blocker = SpawnInstanceProjectionTestActor(TestWorld.Get(), BlockerLabel);
 	TestNotNull(TEXT("target actor exists"), Target);
 	TestNotNull(TEXT("surface actor exists"), Surface);
 	TestNotNull(TEXT("non-matching blocker exists"), Blocker);
