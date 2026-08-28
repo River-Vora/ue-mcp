@@ -69,7 +69,7 @@ const MUTATE_VERBS: ReadonlySet<string> = new Set<string>([
   "start", "stop", "restart", "quit", "kill", "launch", "request", "hot", "cook", "deploy",
   // Editor and viewport state a user would see happen in the wrong window.
   "open", "close", "focus", "select", "play", "simulate", "possess", "eject",
-  "pause", "resume", "teleport", "respond", "stage", "capture", "render",
+  "pause", "resume", "teleport", "respond", "stage", "capture", "render", "scrub",
   // Authoring verbs the asset lexicon has no reason to know about.
   "author", "edit", "place", "load", "reload", "force", "regenerate", "recompile",
   "rebuild", "reparent", "auto", "populate", "bind", "rebind", "fill", "append",

@@ -5,6 +5,7 @@
 
 #include "LevelSequenceEditorBlueprintLibrary.h"
 #include "MovieSceneSequencePlayer.h"
+#include "MovieSceneTimeUnit.h"
 
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "HandlerAssetCreate.h"
@@ -45,6 +46,7 @@ void FSequencerHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("get_sequence_info"), &ReadSequenceInfo);
 	Registry.RegisterHandler(TEXT("add_sequence_track"), &AddTrack);
 	Registry.RegisterHandler(TEXT("play_sequence"), &SequenceControl);
+	Registry.RegisterHandler(TEXT("scrub_sequence"), &ScrubSequence);
 	Registry.RegisterHandler(TEXT("set_sequence_playback_range"), &SetPlaybackRange);
 	Registry.RegisterHandler(TEXT("add_sequence_section"), &AddSection);
 	Registry.RegisterHandler(TEXT("set_sequence_keyframes"), &SetKeyframes);
@@ -699,6 +701,152 @@ TSharedPtr<FJsonValue> FSequencerHandlers::SequenceControl(const TSharedPtr<FJso
 	Result->SetStringField(TEXT("sequencePath"), Current->GetPathName());
 	// Read the transport back rather than reporting what was asked for.
 	Result->SetBoolField(TEXT("playing"), ULevelSequenceEditorBlueprintLibrary::IsPlaying());
+	return MCPResult(Result);
+}
+
+// scrub_sequence (#881) - park the playhead on an exact time and evaluate there.
+//
+// Building a data-driven cinematic means capturing the evaluated world at a
+// known frame, and play_sequence only offers play/pause/stop: realtime playback
+// races capture_scene_png and the frame that lands is whatever the tick gave
+// you. This puts the playhead on the frame that was asked for and forces the
+// evaluation before answering, which is what makes scrub-then-capture
+// reproducible.
+//
+// A separate action rather than a fourth verb on play_sequence: sequenceAction
+// is a closed enum of play|pause|stop and widening it is a contract change on
+// the transport, while a scrub carries a time argument the transport verbs have
+// no use for.
+TSharedPtr<FJsonValue> FSequencerHandlers::ScrubSequence(const TSharedPtr<FJsonObject>& Params)
+{
+	// The Sequencer scripting surface acts on whatever is currently open, so a
+	// named sequence has to be opened first or the scrub would move a different
+	// one. Same rule as play_sequence.
+	const FString RequestedPath = OptionalString(Params, TEXT("sequencePath"), OptionalString(Params, TEXT("assetPath")));
+	if (!RequestedPath.IsEmpty())
+	{
+		ULevelSequence* Sequence = LoadAssetByPath<ULevelSequence>(RequestedPath);
+		if (!Sequence)
+		{
+			return MCPError(FString::Printf(TEXT("Level Sequence not found: %s"), *RequestedPath));
+		}
+		if (!ULevelSequenceEditorBlueprintLibrary::OpenLevelSequence(Sequence))
+		{
+			return MCPError(FString::Printf(TEXT("Failed to open '%s' in Sequencer."), *Sequence->GetPathName()));
+		}
+	}
+
+	ULevelSequence* Current = ULevelSequenceEditorBlueprintLibrary::GetCurrentLevelSequence();
+	if (!Current)
+	{
+		return MCPError(TEXT("No Level Sequence is open in Sequencer. Pass sequencePath to open one, or open it in the editor first."));
+	}
+	UMovieScene* MovieScene = Current->GetMovieScene();
+	if (!MovieScene)
+	{
+		return MCPError(TEXT("LevelSequence has no MovieScene"));
+	}
+
+	const FFrameRate DisplayRate = MovieScene->GetDisplayRate();
+	const FFrameRate TickResolution = MovieScene->GetTickResolution();
+
+	// Two units are in play and confusing them is an 800x error, so the unit is
+	// named rather than guessed: 'display' is the frame number Sequencer shows,
+	// 'tick' is what get_sequence_info's playbackRange reports.
+	const FString TimeUnit = OptionalString(Params, TEXT("timeUnit"), TEXT("display")).ToLower();
+	if (TimeUnit != TEXT("display") && TimeUnit != TEXT("tick"))
+	{
+		return MCPError(FString::Printf(
+			TEXT("Unknown timeUnit '%s'. Use 'display' (the frame numbers Sequencer shows) or 'tick' (the units get_sequence_info's playbackRange reports)."),
+			*TimeUnit));
+	}
+
+	double RequestedSeconds = 0.0;
+	double RequestedFrame = 0.0;
+	const bool bHasSeconds = Params->TryGetNumberField(TEXT("seconds"), RequestedSeconds);
+	const bool bHasFrame = Params->TryGetNumberField(TEXT("frame"), RequestedFrame);
+	if (bHasSeconds == bHasFrame)
+	{
+		return MCPError(TEXT("Provide exactly one of 'seconds' or 'frame'"));
+	}
+
+	// Everything resolves to a display-rate frame time, which is the unit
+	// SetGlobalPosition takes and the unit the Sequencer time field shows.
+	FFrameTime TargetDisplay;
+	if (bHasSeconds)
+	{
+		TargetDisplay = DisplayRate.AsFrameTime(RequestedSeconds);
+	}
+	else if (TimeUnit == TEXT("tick"))
+	{
+		const FFrameTime AsTicks(FFrameNumber(static_cast<int32>(FMath::RoundToDouble(RequestedFrame))));
+		TargetDisplay = FFrameRate::TransformTime(AsTicks, TickResolution, DisplayRate);
+	}
+	else
+	{
+		TargetDisplay = FFrameTime(FFrameNumber(static_cast<int32>(FMath::RoundToDouble(RequestedFrame))));
+	}
+
+	// Pause before scrubbing: a playing sequence moves the playhead again on the
+	// next tick, and the capture would not be at the time that was asked for.
+	ULevelSequenceEditorBlueprintLibrary::Pause();
+	const FMovieSceneSequencePlaybackParams ScrubTo(TargetDisplay, EUpdatePositionMethod::Scrub);
+	ULevelSequenceEditorBlueprintLibrary::SetGlobalPosition(ScrubTo, EMovieSceneTimeUnit::DisplayRate);
+	// Evaluate now instead of on the next tick. The playhead move alone does not
+	// write possessed-actor transforms; the evaluation does, and a capture taken
+	// before it would read the previous frame's world.
+	ULevelSequenceEditorBlueprintLibrary::ForceUpdate();
+
+	const FFrameTime TargetTicks = FFrameRate::TransformTime(TargetDisplay, DisplayRate, TickResolution);
+	const double EvaluatedSeconds = DisplayRate.AsSeconds(TargetDisplay);
+
+	auto Result = MCPSuccess();
+	Result->SetStringField(TEXT("sequencePath"), Current->GetPathName());
+	Result->SetStringField(TEXT("timeUnit"), TimeUnit);
+	Result->SetNumberField(TEXT("seconds"), EvaluatedSeconds);
+	Result->SetNumberField(TEXT("frame"), TargetDisplay.AsDecimal());
+	Result->SetNumberField(TEXT("tick"), TargetTicks.AsDecimal());
+	Result->SetBoolField(TEXT("evaluated"), true);
+	// Read the transport back rather than reporting what was asked for.
+	Result->SetBoolField(TEXT("playing"), ULevelSequenceEditorBlueprintLibrary::IsPlaying());
+
+	TSharedPtr<FJsonObject> DisplayRateObj = MakeShared<FJsonObject>();
+	DisplayRateObj->SetNumberField(TEXT("numerator"), DisplayRate.Numerator);
+	DisplayRateObj->SetNumberField(TEXT("denominator"), DisplayRate.Denominator);
+	Result->SetObjectField(TEXT("displayRate"), DisplayRateObj);
+
+	TSharedPtr<FJsonObject> TickRateObj = MakeShared<FJsonObject>();
+	TickRateObj->SetNumberField(TEXT("numerator"), TickResolution.Numerator);
+	TickRateObj->SetNumberField(TEXT("denominator"), TickResolution.Denominator);
+	Result->SetObjectField(TEXT("tickResolution"), TickRateObj);
+
+	// A scrub outside the playback range is legal and evaluates, but a track
+	// that has no section there reads as its nearest key, which presents as
+	// "the scrub did nothing". Say so rather than leaving it to be guessed.
+	const TRange<FFrameNumber> PlaybackRange = MovieScene->GetPlaybackRange();
+	TSharedPtr<FJsonObject> RangeObj = MakeShared<FJsonObject>();
+	if (PlaybackRange.HasLowerBound())
+	{
+		RangeObj->SetNumberField(TEXT("startTick"), PlaybackRange.GetLowerBoundValue().Value);
+		RangeObj->SetNumberField(TEXT("startSeconds"), TickResolution.AsSeconds(FFrameTime(PlaybackRange.GetLowerBoundValue())));
+	}
+	if (PlaybackRange.HasUpperBound())
+	{
+		RangeObj->SetNumberField(TEXT("endTick"), PlaybackRange.GetUpperBoundValue().Value);
+		RangeObj->SetNumberField(TEXT("endSeconds"), TickResolution.AsSeconds(FFrameTime(PlaybackRange.GetUpperBoundValue())));
+	}
+	Result->SetObjectField(TEXT("playbackRange"), RangeObj);
+
+	const bool bWithinRange = PlaybackRange.Contains(TargetTicks.FrameNumber);
+	Result->SetBoolField(TEXT("withinPlaybackRange"), bWithinRange);
+	if (!bWithinRange)
+	{
+		Result->SetStringField(TEXT("warning"), TEXT(
+			"The requested time is outside the sequence's playback range. The playhead moved and the sequence "
+			"evaluated, but a track with no section there holds its nearest key, which looks like a scrub that "
+			"did nothing. playbackRange above is in ticks; seconds are given alongside."));
+	}
+
 	return MCPResult(Result);
 }
 
