@@ -437,3 +437,37 @@ describe("the engine a project was last opened with", () => {
     expect(readEngineRootFromLog(writeLog("Log file open\nLogInit: Display: nothing useful here"))).toBeNull();
   });
 });
+
+describe("deny-list parsing is platform independent", () => {
+  // This suite exists because the deny list used path.delimiter, which is ":"
+  // on POSIX and therefore cut "D:\protected" into "D" and "\protected". CI
+  // runs on ubuntu and the developer machine is Windows, so the break only
+  // ever appeared after a push. It is a SAFETY list: a mangled entry does not
+  // fail loudly, it silently protects nothing.
+  const roots = (value: string) =>
+    protectedEngineRoots({ UE_MCP_PROTECTED_ENGINE_ROOTS: value } as NodeJS.ProcessEnv);
+
+  it("keeps a Windows drive-letter path whole", () => {
+    expect(roots(String.raw`D:\protected`)).toEqual([String.raw`D:\protected`]);
+    expect(roots("C:/Program Files/Epic Games/UE_5.8")).toEqual([
+      "C:/Program Files/Epic Games/UE_5.8",
+    ]);
+  });
+
+  it("separates several Windows paths on semicolons", () => {
+    expect(roots(String.raw`D:\one;E:\two`)).toEqual([String.raw`D:\one`, String.raw`E:\two`]);
+  });
+
+  it("still separates POSIX paths on colons", () => {
+    expect(roots("/opt/ue:/srv/ue")).toEqual(["/opt/ue", "/srv/ue"]);
+  });
+
+  it("tolerates whitespace around a separator without losing the drive letter", () => {
+    expect(roots(String.raw` D:\one ; E:\two `)).toEqual([String.raw`D:\one`, String.raw`E:\two`]);
+  });
+
+  it("still rejects a relative entry rather than protecting nothing", () => {
+    expect(() => roots("Epic Games")).toThrow("is not an absolute path");
+    expect(() => roots("./relative")).toThrow("is not an absolute path");
+  });
+});

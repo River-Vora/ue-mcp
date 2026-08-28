@@ -186,13 +186,56 @@ function isSameOrUnder(candidate: string, parent: string, platform: NodeJS.Platf
  * would leave the caller believing an engine is protected when it is not. Same
  * rule as `scripts/build-utils.js`.
  */
+/** Split a deny-list value into entries.
+ *
+ *  `path.delimiter` is ":" on POSIX, which cuts a Windows path in half at its
+ *  drive letter: "D:\protected" becomes "D" and "\protected". That matters
+ *  because this list is a SAFETY deny list, and a mangled entry does not fail
+ *  loudly, it silently protects nothing. A value authored on Windows and read
+ *  anywhere else has to survive.
+ *
+ *  Semicolons always separate. A colon separates only when it is not the colon
+ *  of a drive letter. */
+function splitDenyList(value: string): string[] {
+  const out: string[] = [];
+  let current = "";
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (ch === ";") {
+      out.push(current);
+      current = "";
+      continue;
+    }
+    if (ch === ":") {
+      // Compare on the trimmed value: a list may be written with spaces
+      // around its separators, and " C" is still a drive letter.
+      const head = current.trim();
+      const isDriveColon = head.length === 1 && /[A-Za-z]/.test(head);
+      if (!isDriveColon) {
+        out.push(current);
+        current = "";
+        continue;
+      }
+    }
+    current += ch;
+  }
+  out.push(current);
+  return out;
+}
+
+/** Absolute in the POSIX sense, or a Windows drive-letter or UNC root, whatever
+ *  platform is doing the parsing. A deny list written on one machine is often
+ *  read on another. */
+function isAbsoluteAnyPlatform(entry: string): boolean {
+  return path.isAbsolute(entry) || /^[A-Za-z]:[\/]/.test(entry) || /^\\/.test(entry);
+}
+
 export function protectedEngineRoots(env: NodeJS.ProcessEnv = process.env): string[] {
-  return (env.UE_MCP_PROTECTED_ENGINE_ROOTS || "")
-    .split(path.delimiter)
+  return splitDenyList(env.UE_MCP_PROTECTED_ENGINE_ROOTS || "")
     .map((entry) => entry.trim())
     .filter(Boolean)
     .map((entry) => {
-      if (!path.isAbsolute(entry)) {
+      if (!isAbsoluteAnyPlatform(entry)) {
         throw new Error(
           `UE_MCP_PROTECTED_ENGINE_ROOTS entry '${entry}' is not an absolute path, so it would protect nothing.`,
         );
