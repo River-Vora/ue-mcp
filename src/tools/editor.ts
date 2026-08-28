@@ -5,6 +5,7 @@ import { readEngineState } from "../engine-observer.js";
 import { progressRenderingNote } from "../client-quirks.js";
 import { pushWorkaround, workaroundCount } from "../workaround-tracker.js";
 import { searchTools } from "../tool-search.js";
+import { evaluateGate, gateRefusalMessage } from "../python-gate.js";
 import { Vec3, Rotator } from "../schemas.js";
 import { FunctionArgs, normalizeFunctionArgs, normalizePythonArgs } from "../function-args.js";
 
@@ -93,7 +94,7 @@ export const editorTool: ToolDef = categoryTool(
     },
     execute_command: bp("Run console command. Params: command", "execute_command"),
     execute_python: {
-      description: "GATED LAST RESORT. execute_python is unreachable until a semantic tool search over your taskSummary has been run AND every candidate it returns is EXPLICITLY ruled out with a stated reason. Flow: (1) call with taskSummary (+code) - it returns the candidate actions; (2) re-call with the same taskSummary/code PLUS ruledOut=[{action, reason}] giving a specific reason each candidate does not fit. Python runs only once every candidate is ruled out. Params: code, taskSummary (required), ruledOut?, resultVariable? (name of a top-level variable to return as `result`, separate from print()/log; #732) (#704)",
+      description: "GATED LAST RESORT. execute_python is unreachable until a semantic tool search over your taskSummary has been run AND every candidate it returns is EXPLICITLY ruled out with a stated reason. Flow: (1) call with taskSummary (+code) - it returns the candidate actions AND the exact ruledOut array to send back; (2) re-call with the same taskSummary/code PLUS that ruledOut=[{action, reason}], each reason at least 12 characters saying why that candidate does not fit. The action field accepts the bare name, tool(action) or tool.action, and rulings are remembered for the session so rewording the taskSummary never asks you to justify the same action twice. Python runs only once every candidate is ruled out. Params: code, taskSummary (required), ruledOut?, resultVariable? (name of a top-level variable to return as `result`, separate from print()/log; #732) (#704, #938, #960)",
       handler: async (ctx: ToolContext, params: Record<string, unknown>) => {
         const code = (params.code as string) ?? "";
         const taskSummary = ((params.taskSummary as string) ?? "").trim();
@@ -112,23 +113,25 @@ export const editorTool: ToolDef = categoryTool(
         // Candidates = meaningful matches (a name/phrase hit), capped at 5.
         const candidates = (await searchTools(taskSummary, 5)).filter((h) => h.score >= 4);
         if (candidates.length > 0) {
-          const ruledRaw = Array.isArray(params.ruledOut) ? (params.ruledOut as Array<Record<string, unknown>>) : [];
-          const ruled = new Map<string, string>();
-          for (const r of ruledRaw) {
-            const action = String(r?.action ?? "").trim();
-            const reason = String(r?.reason ?? "").trim();
-            if (action && reason.length >= 12) ruled.set(action, reason); // non-trivial reason required
-          }
-          const unresolved = candidates.filter((c) => !ruled.has(c.action));
-          if (unresolved.length > 0) {
+          // #938 / #960: matching is spelling-insensitive and rulings persist
+          // for the session, so the strings this refusal prints are exactly the
+          // strings that satisfy it, and a reworded summary cannot reset the
+          // work already done. See src/python-gate.ts.
+          const verdict = evaluateGate(candidates, params.ruledOut, ctx);
+          if (verdict.unresolved.length > 0) {
             pushWorkaround({ code, timestamp: new Date().toISOString(), taskSummary, suggestedTool: candidates.map((c) => `${c.tool}(${c.action})`).join(", ") }, ctx);
             return {
               blocked: true,
               reason: "candidates_not_ruled_out",
               taskSummary,
               candidates,
-              needReasonFor: unresolved.map((c) => `${c.tool}(${c.action})`),
-              message: `execute_python is GATED. A tool search for "${taskSummary}" returned ${candidates.length} candidate action(s). Rule out EACH with a specific reason (>=12 chars) via ruledOut:[{action, reason}], then re-call. Still need a reason for: ${unresolved.map((c) => c.action).join(", ")}. If one of these actually does the task, call it instead of Python.`,
+              needReasonFor: verdict.unresolved.map((c) => `${c.tool}(${c.action})`),
+              // The array to send back, ready to fill in. #960 asked for this:
+              // describing the shape was not enough to make the gate passable.
+              sendThisBack: { ruledOut: verdict.ruledOutTemplate },
+              alreadyRuledOut: verdict.satisfied,
+              ignoredEntries: verdict.rejected,
+              message: gateRefusalMessage(taskSummary, candidates, verdict),
             };
           }
         }
@@ -349,7 +352,7 @@ export const editorTool: ToolDef = categoryTool(
     container: z.string().optional().describe("open_settings: settings container - Project | Editor (#727)"),
     section: z.string().optional().describe("open_settings: settings section, e.g. 'Physics' or 'Engine.Physics' (#727)"),
     taskSummary: z.string().optional().describe("execute_python: plain-words intent, searched against the tool registry to gate the call (#704)"),
-    ruledOut: z.array(z.object({ action: z.string(), reason: z.string() })).optional().describe("execute_python: reason each searched candidate action does not fit; every candidate must be ruled out before Python runs (#704)"),
+    ruledOut: z.array(z.object({ action: z.string(), reason: z.string() })).optional().describe("execute_python: reason each searched candidate action does not fit; every candidate must be ruled out before Python runs. 'action' accepts the bare action name, tool(action) or tool.action; 'reason' must be at least 12 characters. Send back the array the previous refusal printed under 'sendThisBack' (#704, #938, #960)"),
     filePath: z.string().optional().describe("Absolute path to a .py file for run_python_file"),
     args: FunctionArgs.optional().describe('run_python_file: array of positional args. invoke_function / invoke_object_function / invoke_static_function: object mapping parameter name to value, e.g. {"bEnabled": true}. An entry list ([{"name","value"}]) or a JSON string of either is accepted and normalized (#811)'),
     calls: z.array(z.object({

@@ -54,6 +54,7 @@ const PER_SESSION: Record<string, string> = {
   "hook-session.ts": "Resolves which project a hook invocation is about.",
   "hook-installer.ts": "Installs the hook for one project.",
   "workaround-tracker.ts": "The workaround stack is partitioned per session, because it is posted publicly.",
+  "python-gate.ts": "Remembers which candidate actions a session ruled out, partitioned the same way the workaround stack is.",
   "privacy-scrub.ts": "Redacts the other registered roots and session names.",
   "feedback-routing.ts": "Routes using the addressed session's plugin set.",
   "feedback-deferred.ts": "Deferred entries record the editor they came from and are filtered by it.",
@@ -93,6 +94,7 @@ const PER_SESSION: Record<string, string> = {
 /** No editor concept, or one deliberate answer for the whole process. */
 const SESSION_INDEPENDENT: Record<string, string> = {
   "action-class.ts": "A static classification of the action surface; the same answer in every editor.",
+  "bridge-timeouts.ts": "The call budget table and its resolution; the same answer for every editor.",
   "asset-path.ts": "Pure Unreal path handling.",
   "auth.ts": "GitHub identity for feedback authorship: per user, not per project.",
   "auth-cli.ts": "Runs that per-user device flow.",
