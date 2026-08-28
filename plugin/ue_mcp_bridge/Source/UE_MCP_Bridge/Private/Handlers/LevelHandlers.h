@@ -127,4 +127,9 @@ private:
 	static TSharedPtr<FJsonValue> AddPostProcessBlendable(const TSharedPtr<FJsonObject>& Params);
 	// #637: export a selected actor's mesh to FBX plus a metadata sidecar JSON.
 	static TSharedPtr<FJsonValue> ExportActorFbx(const TSharedPtr<FJsonObject>& Params);
+	// #910/#943/#912: one editor-side component query. Filters, projection,
+	// predicates, grouping and counts all evaluate here, because shipping the
+	// candidates out to be filtered by the client is what made these questions
+	// megabyte payloads and Python loops.
+	static TSharedPtr<FJsonValue> QueryComponents(const TSharedPtr<FJsonObject>& Params);
 };

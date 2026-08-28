@@ -10,6 +10,16 @@ public class UE_MCP_Bridge : ModuleRules
 	// file list and will not pick up a new .cpp until this file changes.
 	// Private/BridgeStateFiles.cpp, Private/BridgeParamEcho.cpp and
 	// Private/Tests/BridgeProtocolTests.cpp: same reason.
+	// Private/Handlers/LevelHandlers_Query.cpp,
+	// Private/Handlers/LevelHandlers_BatchWrite.cpp,
+	// Private/Handlers/LevelHandlers_Convert.cpp,
+	// Private/Handlers/LevelHandlers_Refresh.cpp,
+	// Private/Handlers/AssetHandlers_BulkRead.cpp,
+	// Private/Handlers/FoliageHandlers_Batch.cpp,
+	// Private/Tests/LevelQueryComponentsTests.cpp,
+	// Private/Tests/LevelBatchWriteTests.cpp,
+	// Private/Tests/AssetBulkReadTests.cpp and
+	// Private/Tests/FoliageBatchTests.cpp: same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;

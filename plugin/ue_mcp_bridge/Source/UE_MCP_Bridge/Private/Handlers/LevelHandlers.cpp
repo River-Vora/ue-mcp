@@ -173,6 +173,10 @@ void FLevelHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	Registry.RegisterHandler(TEXT("spawn_grid"), &SpawnGrid);
 	Registry.RegisterHandler(TEXT("batch_translate"), &BatchTranslate);
 	Registry.RegisterHandler(TEXT("place_actors_batch"), &PlaceActorsBatch);
+	// #910/#943/#912: the general editor-side component query. A whole-map
+	// scan with a projection can take a while on a 4,000 actor level, so it
+	// gets its own timeout rather than the 30 second default.
+	Registry.RegisterHandlerWithTimeout(TEXT("query_components"), &QueryComponents, 300.0f);
 }
 
 TSharedPtr<FJsonValue> FLevelHandlers::GetOutliner(const TSharedPtr<FJsonObject>& Params)
