@@ -5,19 +5,27 @@
 #include "Dom/JsonObject.h"
 
 class UBlackboardData;
+class UBTNode;
 
 class FGameplayHandlers
 {
 public:
 	static void RegisterHandlers(class FMCPHandlerRegistry& Registry);
 
-	// BehaviorTree introspection primitives, exercised directly by the
-	// automation tests in Private/Tests, which build a blackboard in memory
-	// rather than round-tripping an asset through disk. Definitions live in
-	// GameplayHandlers_BehaviorTree.cpp.
+	// BehaviorTree introspection primitives, shared by the BT handlers and
+	// exercised directly by the automation tests in Private/Tests, which build
+	// nodes in memory rather than round-tripping an asset through disk.
+	// Definitions live in GameplayHandlers_BehaviorTree.cpp.
 
 	/** Every key on a Blackboard asset: name, type, sync flag, description. */
 	static TArray<TSharedPtr<FJsonValue>> DescribeBlackboardKeys(const UBlackboardData* Blackboard);
+
+	/** One BT node as JSON: identity plus the decorator configuration that says
+	 *  which branch it guards and how it aborts (#888). */
+	static TSharedPtr<FJsonObject> DescribeBTNode(
+		UBTNode* Node,
+		const FString& NodePath,
+		const FString& ParentPath);
 
 private:
 	static TSharedPtr<FJsonValue> CreateSmartObjectDefinition(const TSharedPtr<FJsonObject>& Params);
@@ -87,7 +95,7 @@ private:
 	// Helper to create a blueprint with a given parent class
 	static TSharedPtr<FJsonValue> CreateBlueprintWithParent(const FString& Name, const FString& PackagePath, const FString& ParentClassPath, const FString& FriendlyTypeName);
 
-	// v0.7.11 - BT graph traversal (#124)
+	// v0.7.11 - BT graph traversal (#124), decorator configuration added (#888)
 	static TSharedPtr<FJsonValue> ReadBehaviorTreeGraph(const TSharedPtr<FJsonObject>& Params);
 
 	// #163 - detailed navmesh configuration
