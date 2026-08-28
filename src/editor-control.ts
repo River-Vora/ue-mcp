@@ -15,7 +15,7 @@ import {
   readLogState,
   type EngineState,
 } from "./engine-observer.js";
-import { isPidAlive, lockfileIsFromThisLaunch, resolveBridgeTarget } from "./editor-target.js";
+import { findLiveInstanceRecord, isPidAlive, lockfileIsFromThisLaunch, resolveBridgeTarget } from "./editor-target.js";
 import { startProgress } from "./ui/progress.js";
 import type { ProgressFn } from "./types.js";
 
@@ -509,6 +509,16 @@ export async function startEditor(
   project: ProjectContext,
   timeoutSeconds = 300,
   onProgress?: ProgressFn,
+  opts: {
+    /**
+     * #968: `pattern=response;...`, handed to the editor as
+     * UE_MCP_DIALOG_POLICY so the plugin can answer a prompt raised during
+     * startup. The bridge is not listening yet at that point, so a policy set
+     * over the socket afterwards is always too late for the modal that stalled
+     * the launch in the first place.
+     */
+    dialogPolicy?: string;
+  } = {},
 ): Promise<{ success: boolean; message: string; state?: EngineState; timeline?: ReadyPhase[]; elapsedSeconds?: number }> {
   // Every check below is about ONE editor: the one holding this project. Know
   // which project that is before looking at anything, because without it the
@@ -562,6 +572,9 @@ export async function startEditor(
     const editorProcess = spawn(editorExe, [project.projectPath], {
       stdio: "ignore",
       detached: true,
+      env: opts.dialogPolicy
+        ? { ...process.env, UE_MCP_DIALOG_POLICY: opts.dialogPolicy }
+        : process.env,
     });
 
     editorProcess.unref();
@@ -681,25 +694,47 @@ async function requestEditorSelfQuit(port: number, host: string): Promise<boolea
 }
 
 /**
- * Stop the editor by asking it to quit ITSELF through the bridge. ue-mcp NEVER
- * issues an OS kill: `taskkill /IM UnrealEditor.exe` matches by image name and
- * would also close the user's other editors (e.g. their real project). `force`
- * is accepted for back-compat but there is deliberately no force-kill path.
- * Success is confirmed by the project's own bridge port going quiet, so it is
- * specific to this editor even when others are open.
+ * Which editor belongs to the loaded project, decided once so that every
+ * lifecycle action agrees about it.
  *
- * The port comes from this project's lockfile and nowhere else, and the process
- * it names is checked before the quit goes out (#819).
+ * #967/#970: stop_editor and request_editor_shutdown act on the same editor
+ * through different code paths, and only one of them checked ownership. The
+ * check it used compared a lockfile pid against a process, then printed the
+ * process's whole command line as evidence of a project mismatch - which, when
+ * the command line parse was broken, was the loaded project's own .uproject.
+ * Both actions now ask this one function, so they can no longer disagree.
  */
-export async function stopEditor(force = false, projectDir?: string): Promise<{ success: boolean; message: string; state?: EngineState }> {
-  void force;
+export type EditorOwnership =
+  | {
+      owned: true;
+      port: number;
+      pid: number | null;
+      /** Where the address came from, for a caller that wants to say so. */
+      source: string;
+      /** Set when the shared lockfile was stale and a live editor was found instead. */
+      healed?: string;
+    }
+  | { owned: false; message: string; state?: EngineState };
 
-  const projectPath = uprojectInDir(projectDir);
+/**
+ * The editor holding `projectPath` open, resolved from what this project
+ * published and cross-checked against the process table.
+ *
+ * A lockfile that no longer describes a live editor of this project is a stale
+ * lockfile, and it is said in those words. It is never reported as a project
+ * mismatch, and the file is never blamed while a healthy editor is still
+ * listening: the recovery is to resolve the process that actually holds the
+ * .uproject, which is what this does before it refuses anything.
+ */
+export async function resolveOwnedEditor(
+  projectDir?: string | null,
+  projectPath?: string | null,
+): Promise<EditorOwnership> {
   if (!projectDir || !projectPath) {
     return {
-      success: false,
+      owned: false,
       message:
-        "No project is loaded, so stop_editor has no editor to aim at. Use project(action='set_project') first. " +
+        "No project is loaded, so there is no editor to aim at. Use project(action='set_project') first. " +
         "A lifecycle action never falls back to whichever editor it can find.",
     };
   }
@@ -708,11 +743,11 @@ export async function stopEditor(force = false, projectDir?: string): Promise<{ 
   if (!target.ok) {
     const running = await findInteractiveEditors(projectPath);
     if (running.length === 0) {
-      return { success: false, message: `Editor is not running for this project. ${target.reason}` };
+      return { owned: false, message: `Editor is not running for this project. ${target.reason}` };
     }
     const state = await readEngineState(projectPath, { probeWindows: true });
     return {
-      success: false,
+      owned: false,
       message:
         `Editor is running (pid ${running.map((p) => p.pid).join(", ")}) but no bridge port is published for it, ` +
         `so it cannot be asked to quit cleanly. ${target.reason} ${state.summary} ` +
@@ -721,41 +756,83 @@ export async function stopEditor(force = false, projectDir?: string): Promise<{ 
     };
   }
 
+  // Plugin builds before the lockfile carried a pid leave nothing to identify
+  // the listener with, so the process table has to answer instead.
+  if (target.pid === null) {
+    if ((await findInteractiveEditors(projectPath)).length === 0) {
+      return {
+        owned: false,
+        message:
+          `The bridge lockfile at ${target.lockfilePath} records no pid (older plugin build) and no editor for this ` +
+          `project is running, so port ${target.port} cannot be shown to belong to it. Nothing was asked to quit.`,
+      };
+    }
+    return { owned: true, port: target.port, pid: null, source: target.source };
+  }
+
   // The lockfile was written by an editor that had THIS project open, but it
   // outlives a crash, and the port it names can be taken by something else
-  // afterwards. Confirm the process it points at is still that editor before
-  // sending anything a quit request (#819).
-  if (target.pid !== null) {
-    const owner = await findEditorByPid(target.pid);
-    if (!owner) {
-      return {
-        success: false,
-        message:
-          `The bridge lockfile at ${target.lockfilePath} names pid ${target.pid}, which is no longer running - ` +
-          "the editor exited without removing it. Nothing was asked to quit, because port " +
-          `${target.port} may since have been taken by an unrelated process. Delete that file if it persists.`,
-      };
-    }
-    if (owner.projectPath !== null && !editorOwnsProject(owner, projectPath)) {
-      return {
-        success: false,
-        message:
-          `The bridge lockfile at ${target.lockfilePath} names pid ${target.pid}, but that process now has ` +
-          `${owner.projectPath} open, not this project. Nothing was asked to quit. Delete that file if it persists.`,
-      };
-    }
-  } else if ((await findInteractiveEditors(projectPath)).length === 0) {
-    // Plugin builds before the lockfile carried a pid leave nothing to identify
-    // the listener with, so the process table has to answer instead.
+  // afterwards (#819). A process whose command line could not be read is not
+  // evidence against it: "might be ours" is the only honest answer there, and
+  // the lockfile already says whose it is.
+  const owner = await findEditorByPid(target.pid);
+  if (owner && (owner.projectPath === null || editorOwnsProject(owner, projectPath))) {
+    return { owned: true, port: target.port, pid: target.pid, source: target.source };
+  }
+
+  // The lockfile does not describe an editor of this project any more. Before
+  // refusing, look for the editor that does: it publishes its own address to
+  // instances/<pid>.json, which no other instance can take away (#934). Telling
+  // the user to delete a file while a healthy editor is listening would throw
+  // away the bridge's only handle on it, which is exactly what used to happen.
+  const live = await findInteractiveEditors(projectPath);
+  const record = live.length > 0 ? findLiveInstanceRecord(projectDir, (pid) => live.some((p) => p.pid === pid)) : null;
+  if (record) {
     return {
-      success: false,
-      message:
-        `The bridge lockfile at ${target.lockfilePath} records no pid (older plugin build) and no editor for this ` +
-        `project is running, so port ${target.port} cannot be shown to belong to it. Nothing was asked to quit.`,
+      owned: true,
+      port: record.port,
+      pid: record.pid,
+      source: "instance-record",
+      healed:
+        `${target.lockfilePath} names pid ${target.pid}, which is no longer the editor for this project. ` +
+        `The editor that is (pid ${record.pid}) was resolved from ${record.recordPath} instead.`,
     };
   }
 
-  const port = target.port;
+  const staleDetail = owner
+    ? `names pid ${target.pid}, which is no longer the editor for this project - that process now has ` +
+      `${owner.projectPath} open`
+    : `names pid ${target.pid}, which is no longer running`;
+  return {
+    owned: false,
+    message:
+      `Stale lockfile: ${target.lockfilePath} ${staleDetail}. No editor holding ${projectPath} open is running ` +
+      `either, so nothing was asked to quit and port ${target.port} was not dialled - it may since have been taken ` +
+      "by an unrelated process. The file is safe to delete; the next editor for this project republishes it.",
+  };
+}
+
+/**
+ * Stop the editor by asking it to quit ITSELF through the bridge. ue-mcp NEVER
+ * issues an OS kill: `taskkill /IM UnrealEditor.exe` matches by image name and
+ * would also close the user's other editors (e.g. their real project). `force`
+ * is accepted for back-compat but there is deliberately no force-kill path.
+ * Success is confirmed by the project's own bridge port going quiet, so it is
+ * specific to this editor even when others are open.
+ *
+ * The port comes from what this project published and nowhere else, and the
+ * process behind it is checked before the quit goes out (#819).
+ */
+export async function stopEditor(force = false, projectDir?: string): Promise<{ success: boolean; message: string; state?: EngineState }> {
+  void force;
+
+  const projectPath = uprojectInDir(projectDir);
+  const ownership = await resolveOwnedEditor(projectDir, projectPath);
+  if (!ownership.owned) {
+    return { success: false, message: ownership.message, ...(ownership.state ? { state: ownership.state } : {}) };
+  }
+
+  const port = ownership.port;
   const host = bridgeHost(projectDir);
   const bridgeUp = await isBridgeAvailable(host, port);
   if (!bridgeUp && (await findInteractiveEditors(projectPath)).length === 0) {
@@ -785,7 +862,12 @@ export async function stopEditor(force = false, projectDir?: string): Promise<{ 
   for (let i = 0; i < 20; i++) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
     if (!(await isBridgeAvailable(host, port))) {
-      return { success: true, message: "Editor quit itself via the bridge" };
+      return {
+        success: true,
+        message: ownership.healed
+          ? `Editor quit itself via the bridge. ${ownership.healed}`
+          : "Editor quit itself via the bridge",
+      };
     }
   }
   return {

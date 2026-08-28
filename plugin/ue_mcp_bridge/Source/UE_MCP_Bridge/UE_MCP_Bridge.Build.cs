@@ -154,3 +154,6 @@ public class UE_MCP_Bridge : ModuleRules
 }
 
 // Rescan trigger: level-script handler automation coverage added.
+// Rescan trigger: round 2 added handler translation units.
+// Rescan trigger: Private/Tests/GameThreadGateTests.cpp (#968).
+// Rescan trigger: Private/Tests/AutomationRunnerTests.cpp (#993).

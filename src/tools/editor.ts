@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { categoryTool, bp, directive, type ToolDef, type ToolContext } from "../types.js";
-import { startEditor, stopEditor, restartEditor, buildProject } from "../editor-control.js";
-import { readEngineState } from "../engine-observer.js";
+import { startEditor, stopEditor, restartEditor, buildProject, resolveOwnedEditor } from "../editor-control.js";
+import { readEngineState, withBridgeSnapshot, type EngineSnapshot } from "../engine-observer.js";
 import { progressRenderingNote } from "../client-quirks.js";
 import { pushWorkaround, workaroundCount } from "../workaround-tracker.js";
 import { searchTools } from "../tool-search.js";
@@ -20,10 +20,11 @@ export const editorTool: ToolDef = categoryTool(
   "Editor commands, Python execution, PIE, undo/redo, hot reload, viewport, performance, sequencer, build pipeline, logs, editor control.",
   {
     start_editor: {
-      description: "Launch Unreal Editor and BLOCK until it is fully ready (not merely until the socket answers), rendering a startup progress bar in the terminal. Returns the phase timeline it waited through. Do NOT poll get_engine_state or get_status afterwards: this call already waited, and a ready editor is the only way it returns success. Params: timeout? (seconds, default 300)",
+      description: "Launch Unreal Editor and BLOCK until it is fully ready (not merely until the socket answers), rendering a startup progress bar in the terminal. Returns the phase timeline it waited through. Do NOT poll get_engine_state or get_status afterwards: this call already waited, and a ready editor is the only way it returns success. dialogPolicy answers startup prompts before they can wedge the game thread, which is how the post-crash \"Restore Packages\" modal used to stall a launch (#968). Params: timeout? (seconds, default 300), dialogPolicy? (\"pattern=response;pattern=response\", responses as set_dialog_policy takes them)",
       handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
         const timeout = typeof p?.timeout === "number" && p.timeout > 0 ? p.timeout : 300;
-        const result = await startEditor(ctx.project, timeout, ctx.onProgress);
+        const dialogPolicy = typeof p?.dialogPolicy === "string" && p.dialogPolicy.trim() !== "" ? p.dialogPolicy.trim() : undefined;
+        const result = await startEditor(ctx.project, timeout, ctx.onProgress, { dialogPolicy });
 
         // The call blocks for as long as the editor takes, so when its progress
         // is not visible the user is left to conclude the tool hung. Say which
@@ -49,7 +50,7 @@ export const editorTool: ToolDef = categoryTool(
       },
     },
     get_engine_state: {
-      description: "What the engine is REALLY doing, read from outside the game thread: startup phase from the editor's own log, process table (PID, command line, responding), the plugin's status snapshot (slow-task name and percent, active modal dialog, game-thread stall), and native dialog windows. Call this ONCE when something is already wrong (handlers timing out, an editor that will not come up). Never call it in a wait loop: start_editor blocks until ready on its own, and polling this during startup burns tokens re-reading state that is already tracked. Params: probeWindows? (default true; scans native windows, costs ~2s)",
+      description: "What the engine is REALLY doing, read from outside the game thread: startup phase from the editor's own log, every process holding this project's .uproject open (PID, command line, responding), the plugin's status snapshot (slow-task name and percent, active modal dialog, game-thread stall), and native dialog windows. `running` follows the strongest evidence: an editor that answered over the bridge is running whatever the process table saw, and a probe that could not run is reported as processProbeFailed rather than as an absent editor (#965). Call this ONCE when something is already wrong (handlers timing out, an editor that will not come up). Never call it in a wait loop: start_editor blocks until ready on its own, and polling this during startup burns tokens re-reading state that is already tracked. Params: probeWindows? (default true; scans native windows, costs ~2s)",
       handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
         const probeWindows = p?.probeWindows !== false;
         const state = await readEngineState(ctx.project.projectPath ?? null, { probeWindows });
@@ -58,15 +59,18 @@ export const editorTool: ToolDef = categoryTool(
         // any game-thread work, so it stays reachable while every other handler
         // is timing out. Prefer it over the on-disk snapshot when it replies,
         // and never let it block the rest of the report.
-        let live: unknown = null;
+        let live: EngineSnapshot | null = null;
         if (ctx.bridge.isConnected) {
           try {
-            live = await ctx.bridge.call("get_engine_state", {});
+            const answered = await ctx.bridge.call("get_engine_state", {});
+            live = answered && typeof answered === "object" ? (answered as EngineSnapshot) : null;
           } catch {
             live = null;
           }
         }
-        return live ? { ...state, snapshot: live, snapshotSource: "bridge" } : { ...state, snapshotSource: "status.json" };
+        // An editor served that snapshot, so it exists. Reporting running:false
+        // alongside it is the report contradicting itself (#965).
+        return live ? withBridgeSnapshot(state, live) : state;
       },
     },
     stop_editor: {
@@ -299,8 +303,8 @@ export const editorTool: ToolDef = categoryTool(
     run_stat: bp("Run a stat overlay. Params: name (bare stat name, e.g. 'unit','fps','game','gpu') OR command (full console command). A bare name is prefixed with 'stat ' (#722).", "run_stat_command", (p) => ({ command: p.command, name: p.name })),
     set_scalability: bp("Set rendering quality via the Scalability system (actually applies + persists, not just sg.* cvars). Params: level (Low|Medium|High|Epic|Cinematic). Returns appliedLevels (#591)", "set_scalability"),
     set_cvars: bp("Bulk-set console variables. Params: cvars ({name: value} object OR [{name, value}] array). Returns per-cvar old/new values and any notFound names (#591)", "set_cvars", (p) => ({ cvars: p.cvars })),
-    capture_screenshot: bp("Screenshot. target=pie synchronously captures the selected PIE client game viewport with UMG/Slate UI; target=editor captures the level viewport; target=window synchronously captures a whole Slate window via FSlateApplication::TakeScreenshot - pixel-true for ALL Slate/UMG UI, returns after the PNG is written, and works while the window is unfocused or off-screen. Multi-instance PIE automatically prefers a world with a game viewport; pass pieInstance or worldPath to select explicitly, which for target=window is what picks the PIE client window instead of the active editor window. Every mode captures at the source viewport/window size - use capture_scene_png for a chosen output size. Params: filename?, target? (auto|pie|editor|window), pieInstance?, worldPath?. Returns the resolved PIE instance/world and image dimensions (#226/#724).", "capture_screenshot", (p) => ({ filename: p.filename, target: p.target, pieInstance: p.pieInstance, worldPath: p.worldPath })),
-    capture_scene_png: bp("Headless PNG screenshot via SceneCapture2D (works unfocused, guaranteed RGBA8 LDR). focusActorLabel auto-frames the camera on an actor's bounds; world:pie captures the running game world (#599). Params: outputPath, location?, rotation?, focusActorLabel?, focusDirection?, focusMargin?, world? (editor|pie), width? (default 1280), height? (default 720), fov? (default 90) (#148/#599)", "capture_scene_png", (p) => ({ pieInstance: p.pieInstance, outputPath: p.outputPath, location: p.location, rotation: p.rotation, focusActorLabel: p.focusActorLabel, focusDirection: p.focusDirection, focusMargin: p.focusMargin, world: p.world, width: p.width, height: p.height, fov: p.fov, fullyLoadTextures: p.fullyLoadTextures })),
+    capture_screenshot: bp("Screenshot. target=pie synchronously captures the selected PIE client game viewport with UMG/Slate UI; target=editor captures the level viewport; target=window synchronously captures a whole Slate window via FSlateApplication::TakeScreenshot - pixel-true for ALL Slate/UMG UI, returns after the PNG is written, and works while the window is unfocused or off-screen. Multi-instance PIE automatically prefers a world with a game viewport; pass pieInstance or worldPath to select explicitly, which for target=window is what picks the PIE client window instead of the active editor window. Every mode captures at the source viewport/window size - use capture_scene_png for a chosen output size. Params: filename? (outputPath is accepted for it too, so the two capture actions take the same name; #966), target? (auto|pie|editor|window), pieInstance?, worldPath?. Returns the resolved PIE instance/world and image dimensions (#226/#724).", "capture_screenshot", (p) => ({ filename: p.filename, outputPath: p.outputPath, target: p.target, pieInstance: p.pieInstance, worldPath: p.worldPath })),
+    capture_scene_png: bp("Headless PNG screenshot via SceneCapture2D (works unfocused, guaranteed RGBA8 LDR). focusActorLabel auto-frames the camera on an actor's bounds; world:pie captures the running game world (#599). The capture actor is transient and destroyed before the call returns, and any left by an earlier build is swept, so a capture leaves the level exactly as it found it (#966). Params: outputPath (filename is accepted for it too), location?, rotation?, focusActorLabel?, focusDirection?, focusMargin?, world? (editor|pie), width? (default 1280), height? (default 720), fov? (default 90) (#148/#599)", "capture_scene_png", (p) => ({ pieInstance: p.pieInstance, outputPath: p.outputPath, filename: p.filename, location: p.location, rotation: p.rotation, focusActorLabel: p.focusActorLabel, focusDirection: p.focusDirection, focusMargin: p.focusMargin, world: p.world, width: p.width, height: p.height, fov: p.fov, fullyLoadTextures: p.fullyLoadTextures })),
     set_realtime: bp("Toggle realtime update on the level editor viewports so the editor-world sim (Niagara, anims) ticks - otherwise capture_scene_png renders an unticked, empty sim. Params: enabled (default true) (#537)", "set_realtime", (p) => ({ enabled: p.enabled })),
     get_viewport: bp("Get viewport camera", "get_viewport_info"),
     hit_test_viewport_pixel: bp("Ray-cast from a screen pixel through the active editor viewport and return the first hit. Builds the ray from the live viewport's projection matrix (no FOV/aspect guessing). Returns hit + actorLabel/actorClass/componentName/componentClass/materialPath/location/impactPoint/normal/distance/faceIndex/boneName/physicalMaterial. Params: x, y (pixel coords), width? height? (override viewport size when picking from a different-resolution screenshot), maxDistance? (default 200000), ignoreActors? (array of actor labels) (#418)", "hit_test_viewport_pixel", (p) => ({ x: p.x, y: p.y, width: p.width, height: p.height, maxDistance: p.maxDistance, ignoreActors: p.ignoreActors })),
@@ -338,9 +342,28 @@ export const editorTool: ToolDef = categoryTool(
     get_pie_config: bp("Read current ULevelEditorPlaySettings (numClients, netMode, single-process, separate-server) (#384)", "get_pie_config"),
     pie_set_player_view: bp("Point the running PIE player's view (control rotation) at a pitch/yaw/roll so a capture frames the intended direction. Requires PIE. Params: pitch?, yaw?, roll? (#671)", "pie_set_player_view", (p) => ({ pitch: p.pitch, yaw: p.yaw, roll: p.roll })),
     stage_game_input: bp("Stage input for the running game: set input mode (gameOnly|gameAndUI|uiOnly) and mouse cursor so injected/simulated input reaches the pawn. This only sets the mode - the injection itself lives in the pie category (pie(inject_input*)), not here. Requires PIE. Params: inputMode? (default gameOnly), showMouseCursor? (#671)", "stage_game_input", (p) => ({ inputMode: p.inputMode, showMouseCursor: p.showMouseCursor })),
-    run_automation_tests: bp("Run registered Automation tests matching a filter and return per-test pass/fail plus error lines. Runs them synchronously through the test framework rather than the console queue, and suspends the editor's unfocused-CPU throttle for the duration - otherwise an unfocused editor drops to a few FPS and the framework's interactive-frame-rate gate never opens, leaving tests queued forever (#765). Params: filter?, maxTests? (default 50) (#693)", "run_automation_tests", (p) => ({ filter: p.filter, maxTests: p.maxTests })),
+    run_automation_tests: bp("Run registered Automation tests matching a filter and return per-test pass/fail plus error lines. Runs them synchronously through the test framework rather than the console queue, and suspends the editor's unfocused-CPU throttle for the duration - otherwise an unfocused editor drops to a few FPS and the framework's interactive-frame-rate gate never opens, leaving tests queued forever (#765). A test whose latent commands are still queued when latentTimeoutSeconds runs out is reported as abandoned, with the reason: latent work needs engine frames, and this runs on the game thread, so a test that starts PIE (CQTest multi-client network tests, for instance) belongs in the editor's Automation window or -ExecCmds=\"Automation RunTests <name>\" at launch. Such a test used to terminate the editor outright (#993). Params: filter?, maxTests? (default 50), latentTimeoutSeconds? (default 5, max 120) (#693)", "run_automation_tests", (p) => ({ filter: p.filter, maxTests: p.maxTests, latentTimeoutSeconds: p.latentTimeoutSeconds })),
     list_dirty_packages: bp("Enumerate currently-dirty content + map packages, read from the editor's own dirty-package lists (the same ones Save All uses). Includes a never-saved /Temp world, because an unsaved new map is exactly the unsaved work a caller needs to see before closing or reloading (#340)", "list_dirty_packages"),
-    request_editor_shutdown: bp("Ask the editor to close itself from inside the engine, after it has checked that closing is safe. Refuses by default when any content or map package is dirty (including an unsaved /Temp world) and reports which ones, so nothing is lost to a silent discard. Ends an active PIE/SIE session first and closes only once play has actually stopped. The response is returned before the process exits. Use editor(stop_editor) for the full stop-and-confirm flow; this action is the in-engine half of it. Params: requireClean? (default true), endPIE? (default true)", "request_editor_shutdown", (p) => ({ requireClean: p.requireClean, endPIE: p.endPIE })),
+    request_editor_shutdown: {
+      description: "Ask the editor to close itself from inside the engine, after it has checked that closing is safe. Refuses by default when any content or map package is dirty (including an unsaved /Temp world) and reports which ones, so nothing is lost to a silent discard. Ends an active PIE/SIE session first and closes only once play has actually stopped. The response is returned before the process exits. Aimed at the same editor stop_editor aims at, through the same ownership check, so the two can never disagree about which editor belongs to the loaded project (#967). Use editor(stop_editor) for the full stop-and-confirm flow; this action is the in-engine half of it. Params: requireClean? (default true), endPIE? (default true)",
+      handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
+        // #967/#970: stop_editor refused on an ownership check this action did
+        // not perform at all, so the two actions gave opposite answers about
+        // one editor. They now ask the same question. A refusal here means the
+        // same thing it means there, in the same words.
+        const ownership = await resolveOwnedEditor(ctx.project.projectDir ?? null, ctx.project.projectPath ?? null);
+        if (!ownership.owned) {
+          return { success: false, error: ownership.message };
+        }
+        const result = await ctx.bridge.call("request_editor_shutdown", {
+          requireClean: p.requireClean,
+          endPIE: p.endPIE,
+        });
+        return ownership.healed && result && typeof result === "object"
+          ? { ...(result as Record<string, unknown>), lockfileNote: ownership.healed }
+          : result;
+      },
+    },
   },
   undefined,
   {
@@ -370,6 +393,7 @@ export const editorTool: ToolDef = categoryTool(
     functionName: z.string().optional(),
     timeout: z.number().optional().describe("start_editor: seconds to wait for the bridge (default 120) (#758)"),
     probeWindows: z.boolean().optional().describe("get_engine_state: also enumerate native windows to catch pre-Slate dialogs (default true, costs ~2s)"),
+    dialogPolicy: z.string().optional().describe("start_editor: semicolon-separated pattern=response pairs answered automatically from the first prompt of startup, before the bridge is listening (e.g. \"Restore=no\"). Responses are the ones set_dialog_policy takes (#968)"),
     requireClean: z.boolean().optional().describe("request_editor_shutdown: refuse to close while any content or map package is dirty (default true)"),
     endPIE: z.boolean().optional().describe("request_editor_shutdown: end an active PIE/SIE session before closing (default true); false refuses to close while play is running"),
     pieInstance: z.number().optional().describe("Select which PIE world to target: 0 = server/primary, 1..N = clients. See list_pie_instances (#778)"),
@@ -406,7 +430,7 @@ export const editorTool: ToolDef = categoryTool(
     assetRegistryTimeoutSeconds: z.number().optional().describe("play_in_editor start: wait budget for the AssetRegistry scan (default 180s)"),
     actorLabel: z.string().optional(),
     level: z.string().optional(),
-    filename: z.string().optional(),
+    filename: z.string().optional().describe("Output image path for capture_screenshot. capture_scene_png accepts it as an alias for outputPath, and capture_screenshot accepts outputPath, so the two capture actions never disagree about the name (#966)"),
     location: Vec3.optional(),
     rotation: Rotator.optional(),
     name: z.string().optional(),
@@ -427,6 +451,7 @@ export const editorTool: ToolDef = categoryTool(
     maxLines: z.number().optional(),
     filter: z.string().optional(),
     maxTests: z.number().optional().describe("run_automation_tests: cap on tests to run (default 50) (#693)"),
+    latentTimeoutSeconds: z.number().optional().describe("run_automation_tests: how long one test's latent command queue may take before the test is abandoned and reported rather than stopped mid-queue (default 5, max 120). Latent work needing engine frames cannot finish here whatever the value (#993)"),
     category: z.string().optional(),
     query: z.string().optional(),
     logName: z.string().optional().describe("get_message_log: listing name; omit to enumerate the registered listings"),
@@ -439,7 +464,7 @@ export const editorTool: ToolDef = categoryTool(
     buttonLabel: z.string().optional().describe("Label of button to click in active dialog"),
     factor: z.number().optional().describe("Time-scale factor for set_pie_time_scale (e.g. 500)"),
     includeSectionDetails: z.boolean().optional().describe("Include attach sockets + first-key transform values in get_sequence_info"),
-    outputPath: z.string().optional().describe("Absolute or project-relative output path for capture_scene_png (e.g. \"Saved/Screenshots/cap.png\")"),
+    outputPath: z.string().optional().describe("Absolute or project-relative output path for capture_scene_png (e.g. \"Saved/Screenshots/cap.png\"). capture_screenshot accepts it as an alias for filename (#966)"),
     enabled: z.boolean().optional().describe("set_realtime: enable/disable viewport realtime update (#537)"),
     width: z.number().optional().describe("Capture width in pixels"),
     height: z.number().optional().describe("Capture height in pixels"),
