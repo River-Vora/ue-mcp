@@ -616,6 +616,18 @@ inline TSharedPtr<FJsonValue> MCPAmbiguousActorError(
 	return MakeShared<FJsonValueObject>(Obj);
 }
 
+/** True when a resolver failure was a refusal to choose rather than a miss.
+ *  An action that treats an absent actor as a no-op still has to fail on an
+ *  ambiguous one: "already deleted" is the wrong answer when three actors
+ *  carry the label and none of them was touched. */
+inline bool MCPIsAmbiguousActorError(const TSharedPtr<FJsonValue>& Error)
+{
+	if (!Error.IsValid() || Error->Type != EJson::Object) return false;
+	const TSharedPtr<FJsonObject> Obj = Error->AsObject();
+	bool bAmbiguous = false;
+	return Obj.IsValid() && Obj->TryGetBoolField(TEXT("ambiguous"), bAmbiguous) && bAmbiguous;
+}
+
 // The three pre-#983 finders, now shims over MCPCollectActorsByToken so there
 // is one search in the plugin while the call sites move across to
 // MCPResolveActor. They still answer with the first match on a duplicate
@@ -703,6 +715,10 @@ struct FMCPActorSelector
 	const TCHAR* LabelKey = TEXT("actorLabel");
 	/** Parameter carrying the unambiguous full object path. */
 	const TCHAR* PathKey = TEXT("actorPath");
+	/** A second spelling of the label parameter, for actions that shipped
+	 *  with two (get_relative_transform takes 'target' or 'targetLabel').
+	 *  Read only when LabelKey is absent. */
+	const TCHAR* AltLabelKey = nullptr;
 	/** How far LabelKey's value is allowed to reach. */
 	EMCPActorMatch Match = EMCPActorMatch::Label;
 	/** When false, an absent selector is not an error: the resolver returns
@@ -767,6 +783,10 @@ inline AActor* MCPResolveActor(
 	{
 		Params->TryGetStringField(Selector.PathKey, Path);
 		Params->TryGetStringField(Selector.LabelKey, Token);
+		if (Token.IsEmpty() && Selector.AltLabelKey)
+		{
+			Params->TryGetStringField(Selector.AltLabelKey, Token);
+		}
 	}
 	Path.TrimStartAndEndInline();
 	Token.TrimStartAndEndInline();
