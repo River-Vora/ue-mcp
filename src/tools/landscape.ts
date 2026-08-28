@@ -8,7 +8,7 @@ export const landscapeTool: ToolDef = categoryTool(
   {
     get_info:          bp("Get landscape setup", "get_landscape_info"),
     list_layers:       bp("List paint layers", "list_landscape_layers"),
-    sample:            bp("Sample height/layers. Params: x, y", "sample_landscape"),
+    sample:            bp("Read the surface height AND every paint-layer weight at one world XY. Height and weights come from the landscape's own height and weight data (the merged result of every edit layer), the same data landscape(paint_layer) writes, so they are exact and do not depend on built collision. Layers come back with weight (0..1), weight255 (the weightmap byte the editor shows), the LayerInfo path and its physical material, plus dominantLayer and totalWeight - which is what makes reading a paint weight one call instead of rendering the weightmap to a render target and reading that back. Also returns quad, quadExtent and inBounds, so a zero weight OFF the landscape reads as out of bounds rather than as a measured zero, and traceHeight/normal from a confirmation collision trace (absent when collision is unbuilt or the proxy is streamed out). Position accepts x + y, point {x, y}, or worldX + worldY. Params: x + y (or point, or worldX + worldY), actorLabel? (which landscape, when the map has several), layerName? (one layer only), includeLayers? (default true) (#939)", "sample_landscape", (p) => ({ x: p.x, y: p.y, point: p.point, worldX: p.worldX, worldY: p.worldY, actorLabel: p.actorLabel, layerName: p.layerName, includeLayers: p.includeLayers })),
     sculpt:            bp("Raise, lower or flatten terrain with a circular brush. mode=raise|lower|flatten; amount is world centimetres at full strength (raise/lower), and flatten pulls toward the height under the brush centre. falloff (0..1) is the smoothstepped soft edge. Runs in one transaction and leaves the level dirty and unsaved. Writes into an edit layer (editLayer by name, else editLayerIndex, default 0) - required on UE 5.8, where a write without one is regenerated away by the layer system. Params: center ({x,y} world space), radius (default 500), mode? (default raise), amount? (default 100), falloff? (default 0.5), actorLabel?, editLayer?, editLayerIndex?, maxVertices? (#742)", "sculpt_landscape", (p) => ({ center: p.center, radius: p.radius, mode: p.mode, amount: p.amount, falloff: p.falloff, actorLabel: p.actorLabel, editLayer: p.editLayer, editLayerIndex: p.editLayerIndex, maxVertices: p.maxVertices })),
     paint_layer:       bp("Paint a weight layer with a circular brush. The layer must already have a LayerInfo on this landscape (see add_layer_info) - an unregistered name errors and lists the layers that ARE registered instead of silently painting nothing. Weights are written as given - the engine no longer renormalises other layers for you, so set them explicitly if they must sum to 1. Writes into an edit layer (editLayer by name, else editLayerIndex, default 0). Params: layerName, center ({x,y} world space), radius (default 500), strength? (0..1, default 1), falloff? (default 0.5), actorLabel?, editLayer?, editLayerIndex?, maxVertices? (#742)", "paint_landscape_layer", (p) => ({ layerName: p.layerName, center: p.center, radius: p.radius, strength: p.strength, falloff: p.falloff, actorLabel: p.actorLabel, editLayer: p.editLayer, editLayerIndex: p.editLayerIndex, maxVertices: p.maxVertices })),
     list_splines:      bp("Read landscape splines", "list_landscape_splines"),
@@ -27,9 +27,15 @@ export const landscapeTool: ToolDef = categoryTool(
   },
   undefined,
   {
-    x: z.number().optional(), y: z.number().optional(),
-    worldX: z.number().optional().describe("find_proxy_at: world-space X (#733)"),
-    worldY: z.number().optional().describe("find_proxy_at: world-space Y (#733)"),
+    x: z.number().optional().describe("sample: world-space X of the position to sample (#939)"),
+    y: z.number().optional().describe("sample: world-space Y of the position to sample (#939)"),
+    // Same shape as `center`, deliberately: a caller who has {x, y} should not
+    // have to invent a z, and one who has a full {x, y, z} should not be
+    // rejected for carrying one. Only x and y select the sample.
+    point: z.record(z.number()).optional().describe("sample: world-space position as an object {x, y} (a z is accepted and ignored, since the surface height is what this answers) (#939)"),
+    worldX: z.number().optional().describe("find_proxy_at / sample: world-space X (#733, #939)"),
+    worldY: z.number().optional().describe("find_proxy_at / sample: world-space Y (#733, #939)"),
+    includeLayers: z.boolean().optional().describe("sample: include per-paint-layer weights (default true) (#939)"),
     radius: z.number().optional(), strength: z.number().optional(),
     center: z.record(z.number()).optional().describe("sculpt/paint_layer: brush centre {x, y} in world space (#742)"),
     mode: z.string().optional().describe("sculpt: raise | lower | flatten (#742)"),
