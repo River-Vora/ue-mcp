@@ -227,14 +227,14 @@ bool FMCPBehaviorTreeMoveToFilterClassTest::RunTest(const FString& Parameters)
 			MakeShared<FJsonValueString>(FilterClassPath), Error));
 	TestEqual(TEXT("no error writing FilterClass"), Error, FString());
 
-	TSharedPtr<FJsonValue> Filter = FGameplayHandlers::ReadBTNodeProperty(MoveTo, TEXT("FilterClass"), Error);
-	TestTrue(TEXT("FilterClass reads back as an object"), Filter.IsValid() && Filter->Type == EJson::Object);
-	if (Filter.IsValid() && Filter->Type == EJson::Object)
+	TSharedPtr<FJsonValue> FilterValue = FGameplayHandlers::ReadBTNodeProperty(MoveTo, TEXT("FilterClass"), Error);
+	TestTrue(TEXT("FilterClass reads back as an object"), FilterValue.IsValid() && FilterValue->Type == EJson::Object);
+	if (FilterValue.IsValid() && FilterValue->Type == EJson::Object)
 	{
 		TestEqual(TEXT("FilterClass DefaultValue is the class that was written"),
-			MCPBTTestGetString(Filter->AsObject(), TEXT("defaultValue")), FilterClassPath);
+			MCPBTTestGetString(FilterValue->AsObject(), TEXT("defaultValue")), FilterClassPath);
 		bool bBound = true;
-		Filter->AsObject()->TryGetBoolField(TEXT("isBound"), bBound);
+		FilterValue->AsObject()->TryGetBoolField(TEXT("isBound"), bBound);
 		TestFalse(TEXT("a literal class is not a blackboard binding"), bBound);
 	}
 
@@ -246,13 +246,13 @@ bool FMCPBehaviorTreeMoveToFilterClassTest::RunTest(const FString& Parameters)
 		FGameplayHandlers::WriteBTNodeProperty(MoveTo, TEXT("FilterClass"),
 			MakeShared<FJsonValueObject>(Binding), Error));
 
-	Filter = FGameplayHandlers::ReadBTNodeProperty(MoveTo, TEXT("FilterClass"), Error);
-	if (Filter.IsValid() && Filter->Type == EJson::Object)
+	FilterValue = FGameplayHandlers::ReadBTNodeProperty(MoveTo, TEXT("FilterClass"), Error);
+	if (FilterValue.IsValid() && FilterValue->Type == EJson::Object)
 	{
 		TestEqual(TEXT("bound key name"),
-			MCPBTTestGetString(Filter->AsObject(), TEXT("key")), FString(TEXT("NavFilter")));
+			MCPBTTestGetString(FilterValue->AsObject(), TEXT("key")), FString(TEXT("NavFilter")));
 		bool bBound = false;
-		Filter->AsObject()->TryGetBoolField(TEXT("isBound"), bBound);
+		FilterValue->AsObject()->TryGetBoolField(TEXT("isBound"), bBound);
 		TestTrue(TEXT("a key name reads as bound"), bBound);
 	}
 
@@ -260,11 +260,11 @@ bool FMCPBehaviorTreeMoveToFilterClassTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("FilterClass accepts null to clear the class"),
 		FGameplayHandlers::WriteBTNodeProperty(MoveTo, TEXT("FilterClass"),
 			MakeShared<FJsonValueNull>(), Error));
-	Filter = FGameplayHandlers::ReadBTNodeProperty(MoveTo, TEXT("FilterClass"), Error);
-	if (Filter.IsValid() && Filter->Type == EJson::Object)
+	FilterValue = FGameplayHandlers::ReadBTNodeProperty(MoveTo, TEXT("FilterClass"), Error);
+	if (FilterValue.IsValid() && FilterValue->Type == EJson::Object)
 	{
 		TestEqual(TEXT("cleared DefaultValue"),
-			MCPBTTestGetString(Filter->AsObject(), TEXT("defaultValueName")), FString());
+			MCPBTTestGetString(FilterValue->AsObject(), TEXT("defaultValueName")), FString());
 	}
 
 	// A property the node does not declare is a structured error, never a
