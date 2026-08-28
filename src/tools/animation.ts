@@ -2,6 +2,43 @@ import { z } from "zod";
 import { categoryTool, bp, type ToolDef } from "../types.js";
 import { Vec3, Quat } from "../schemas.js";
 
+/**
+ * Element schemas for the Motion Matching authoring arrays (#936).
+ *
+ * These were `z.array(z.any())`, which serialises to an array schema with no
+ * `items`; VS Code refuses to load a tool that carries one. Each object stays
+ * open (`.passthrough()`) so nothing a caller sends today is dropped, and the
+ * entries that the handler also accepts as a bare string keep that spelling
+ * through a union rather than an untyped element.
+ */
+
+/** set_pose_search_clips: one clip entry. The handler accepts any of the four path spellings. */
+const PoseSearchClipEntry = z.object({
+  sequencePath: z.string().optional().describe("Animation asset path (aliases: asset, assetPath, animationPath)"),
+  asset: z.string().optional().describe("Alias for sequencePath"),
+  assetPath: z.string().optional().describe("Alias for sequencePath"),
+  animationPath: z.string().optional().describe("Alias for sequencePath"),
+  mirror: z.string().optional().describe("'original' | 'mirrored' | 'both'"),
+  disableReselection: z.boolean().optional().describe("Disallow reselecting poses from the same asset"),
+  sampleStart: z.number().optional().describe("Sampling range start in seconds"),
+  sampleEnd: z.number().optional().describe("Sampling range end in seconds"),
+  enabled: z.boolean().optional().describe("Include the clip in the database"),
+}).passthrough();
+
+/** add_pose_search_schema_pose_channel: one sampled bone. */
+const PoseSearchBoneEntry = z.object({
+  bone: z.string().describe("Bone name"),
+  flags: z.array(z.string()).optional().describe("Any of: velocity, position, rotation, phase"),
+  weight: z.number().optional().describe("Per-bone weight (default 1)"),
+}).passthrough();
+
+/** create_mirror_data_table: one find/replace bone-name rule. */
+const MirrorFindReplaceExpression = z.object({
+  find: z.string().describe("Bone-name fragment to match"),
+  replace: z.string().describe("Replacement fragment"),
+  method: z.string().optional().describe("suffix (default) | prefix | regex"),
+}).passthrough();
+
 export const animationTool: ToolDef = categoryTool(
   "animation",
   "Animation assets, skeletons, montages, blendspaces, anim blueprints, physics assets.",
@@ -265,14 +302,14 @@ export const animationTool: ToolDef = categoryTool(
     disableReselection: z.boolean().optional().describe("PoseSearch clip: disallow reselecting poses from the same asset"),
     sampleStart: z.number().optional().describe("PoseSearch clip sampling range start (seconds); [0,0] = whole clip"),
     sampleEnd: z.number().optional().describe("PoseSearch clip sampling range end (seconds); [0,0] = whole clip"),
-    clips: z.array(z.any()).optional().describe("set_pose_search_clips: array of clip entries ({sequencePath, mirror?, disableReselection?, sampleStart?, sampleEnd?, enabled?}) or bare path strings"),
+    clips: z.array(z.union([PoseSearchClipEntry, z.string()])).optional().describe("set_pose_search_clips: array of clip entries ({sequencePath, mirror?, disableReselection?, sampleStart?, sampleEnd?, enabled?}) or bare path strings"),
     // Motion Matching content pipeline (schema / mirror / normalization / tuning)
     sampleRate: z.number().optional().describe("create_pose_search_schema: schema sample rate (default 30)"),
     addDefaultChannels: z.boolean().optional().describe("create_pose_search_schema: add Trajectory+Pose default channels (default true)"),
     mirrorDataTablePath: z.string().optional().describe("create_pose_search_schema: optional MirrorDataTable to bind"),
-    bones: z.array(z.any()).optional().describe("add_pose_search_schema_pose_channel: [{bone, flags?, weight?}] or bone-name strings; also add_pose_search_schema_trajectory_channel reuses 'samples'"),
+    bones: z.array(z.union([PoseSearchBoneEntry, z.string()])).optional().describe("add_pose_search_schema_pose_channel: [{bone, flags?, weight?}] or bone-name strings; also add_pose_search_schema_trajectory_channel reuses 'samples'"),
     weight: z.number().optional().describe("Channel weight for pose/trajectory channels"),
-    expressions: z.array(z.any()).optional().describe("create_mirror_data_table: [{find, replace, method?}] find/replace bone-name rules"),
+    expressions: z.array(MirrorFindReplaceExpression).optional().describe("create_mirror_data_table: [{find, replace, method?}] find/replace bone-name rules"),
     mirrorAxis: z.string().optional().describe("create_mirror_data_table: X, Y or Z (default X)"),
     mirrorRootMotion: z.boolean().optional().describe("create_mirror_data_table: mirror root motion (default true)"),
     databases: z.array(z.string()).optional().describe("create_pose_search_normalization_set: PoseSearchDatabase paths to normalize together"),

@@ -573,6 +573,37 @@
           },
           "bones": {
             "description": "add_pose_search_schema_pose_channel: [{bone, flags?, weight?}] or bone-name strings; also add_pose_search_schema_trajectory_channel reuses 'samples'",
+            "items": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "properties": {
+                    "bone": {
+                      "description": "Bone name",
+                      "type": "string"
+                    },
+                    "flags": {
+                      "description": "Any of: velocity, position, rotation, phase",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "weight": {
+                      "description": "Per-bone weight (default 1)",
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "bone"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
             "type": "array"
           },
           "chains": {
@@ -612,6 +643,55 @@
           },
           "clips": {
             "description": "set_pose_search_clips: array of clip entries ({sequencePath, mirror?, disableReselection?, sampleStart?, sampleEnd?, enabled?}) or bare path strings",
+            "items": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "properties": {
+                    "animationPath": {
+                      "description": "Alias for sequencePath",
+                      "type": "string"
+                    },
+                    "asset": {
+                      "description": "Alias for sequencePath",
+                      "type": "string"
+                    },
+                    "assetPath": {
+                      "description": "Alias for sequencePath",
+                      "type": "string"
+                    },
+                    "disableReselection": {
+                      "description": "Disallow reselecting poses from the same asset",
+                      "type": "boolean"
+                    },
+                    "enabled": {
+                      "description": "Include the clip in the database",
+                      "type": "boolean"
+                    },
+                    "mirror": {
+                      "description": "'original' | 'mirrored' | 'both'",
+                      "type": "string"
+                    },
+                    "sampleEnd": {
+                      "description": "Sampling range end in seconds",
+                      "type": "number"
+                    },
+                    "sampleStart": {
+                      "description": "Sampling range start in seconds",
+                      "type": "number"
+                    },
+                    "sequencePath": {
+                      "description": "Animation asset path (aliases: asset, assetPath, animationPath)",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
             "type": "array"
           },
           "componentName": {
@@ -673,6 +753,28 @@
           },
           "expressions": {
             "description": "create_mirror_data_table: [{find, replace, method?}] find/replace bone-name rules",
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "find": {
+                  "description": "Bone-name fragment to match",
+                  "type": "string"
+                },
+                "method": {
+                  "description": "suffix (default) | prefix | regex",
+                  "type": "string"
+                },
+                "replace": {
+                  "description": "Replacement fragment",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "find",
+                "replace"
+              ],
+              "type": "object"
+            },
             "type": "array"
           },
           "forceRootLock": {
@@ -2360,6 +2462,32 @@
             "type": "string"
           },
           "adjusters": {
+            "description": "create_sound_mix: [{soundClassPath,volumeAdjuster?,pitchAdjuster?,applyToChildren?}]",
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "applyToChildren": {
+                  "description": "Apply to child sound classes (default false)",
+                  "type": "boolean"
+                },
+                "pitchAdjuster": {
+                  "description": "Pitch multiplier (default 1)",
+                  "type": "number"
+                },
+                "soundClassPath": {
+                  "description": "SoundClass asset the adjustment applies to",
+                  "type": "string"
+                },
+                "volumeAdjuster": {
+                  "description": "Volume multiplier (default 1)",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "soundClassPath"
+              ],
+              "type": "object"
+            },
             "type": "array"
           },
           "assetPath": {
@@ -2381,7 +2509,50 @@
             "type": "string"
           },
           "connections": {
-            "description": "author: connection specs",
+            "description": "author: connection specs. metasound_author: [{from,to}]. cue_author: [{child,parent?,index?}]",
+            "items": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "properties": {
+                    "from": {
+                      "description": "Source endpoint: 'nodeId.OutputPin' or 'input.GraphInputName'",
+                      "type": "string"
+                    },
+                    "to": {
+                      "description": "Destination endpoint: 'nodeId.InputPin', 'output.GraphOutputName' or 'audioOut.0'",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "from",
+                    "to"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": true,
+                  "properties": {
+                    "child": {
+                      "description": "Local id of the child node",
+                      "type": "string"
+                    },
+                    "index": {
+                      "description": "Child slot on the parent (default: append)",
+                      "type": "number"
+                    },
+                    "parent": {
+                      "description": "Local id of the parent node; omitted or 'root' wires the cue root",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "child"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
             "type": "array"
           },
           "cuePath": {
@@ -2445,6 +2616,27 @@
           },
           "inputs": {
             "description": "metasound_author: [{name,dataType,default?}]",
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "dataType": {
+                  "description": "MetaSound data type: Float, Int32, Bool, String, Trigger, Audio, Time, ...",
+                  "type": "string"
+                },
+                "default": {
+                  "description": "Literal default for the input"
+                },
+                "name": {
+                  "description": "Graph input name",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "dataType"
+              ],
+              "type": "object"
+            },
             "type": "array"
           },
           "label": {
@@ -2513,7 +2705,68 @@
             "type": "string"
           },
           "nodes": {
-            "description": "author: node specs",
+            "description": "author: node specs. metasound_author: [{id,class,namespace?,variant?,majorVersion?,inputs?}]. cue_author: [{id,type,soundWavePath?,...props}]",
+            "items": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "properties": {
+                    "class": {
+                      "description": "MetaSound node class name, e.g. 'Sine'",
+                      "type": "string"
+                    },
+                    "id": {
+                      "description": "Local id used by 'connections' to address this node",
+                      "type": "string"
+                    },
+                    "inputs": {
+                      "additionalProperties": {},
+                      "description": "Per-node input defaults, keyed by input name",
+                      "type": "object"
+                    },
+                    "majorVersion": {
+                      "description": "Node class major version (default 1)",
+                      "type": "number"
+                    },
+                    "namespace": {
+                      "description": "Node class namespace (default 'UE')",
+                      "type": "string"
+                    },
+                    "variant": {
+                      "description": "Node class variant",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "class"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": true,
+                  "properties": {
+                    "id": {
+                      "description": "Local id used by 'connections' to address this node",
+                      "type": "string"
+                    },
+                    "soundWavePath": {
+                      "description": "wave_player: SoundWave asset to play",
+                      "type": "string"
+                    },
+                    "type": {
+                      "description": "SoundCue node type: wave_player, mixer, random, modulator, ...",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "type"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
             "type": "array"
           },
           "offset": {
@@ -2532,6 +2785,24 @@
           },
           "outputs": {
             "description": "metasound_author: [{name,dataType}]",
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "dataType": {
+                  "description": "MetaSound data type",
+                  "type": "string"
+                },
+                "name": {
+                  "description": "Graph output name",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "dataType"
+              ],
+              "type": "object"
+            },
             "type": "array"
           },
           "packagePath": {
@@ -3197,6 +3468,14 @@
           },
           "cells": {
             "description": "Per-column cell values aligned to column order; each is struct text like '(Value=2)', or a scalar. null/omitted leaves a column at its default.",
+            "items": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            },
             "type": "array"
           },
           "classFilter": {
