@@ -44,9 +44,12 @@
 #include "UObject/Package.h"
 #include "UObject/UnrealType.h"
 #include "UObject/UObjectGlobals.h"
+// UWorldPartition forward-declares both of these, and the reads below convert
+// them to UObject*, which needs the complete type.
 #include "WorldPartition/HLOD/HLODLayer.h"
 #include "WorldPartition/WorldPartition.h"
 #include "WorldPartition/WorldPartitionRuntimeCellTransformer.h"
+#include "WorldPartition/WorldPartitionRuntimeHash.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
@@ -551,12 +554,14 @@ TSharedPtr<FJsonValue> FLevelHandlers::AddRuntimeCellTransformer(const TSharedPt
 	FString ClassName;
 	if (auto Err = RequireStringAlt(Params, TEXT("transformerClass"), TEXT("className"), ClassName)) return Err;
 
+	// The base check and the concrete check both come from the shared guard, so
+	// a wrong class here reads the same way it does everywhere else in the
+	// bridge rather than growing its own phrasing.
 	UClass* TransformerClass = MCPResolveClass(ClassName);
-	if (auto Err = MCPCheckClassUsable(ClassName, TransformerClass)) return Err;
-	if (!TransformerClass->IsChildOf(UWorldPartitionRuntimeCellTransformer::StaticClass()))
+	if (auto Err = MCPCheckClassUsable(
+		ClassName, TransformerClass, UWorldPartitionRuntimeCellTransformer::StaticClass()))
 	{
-		return MCPClassUnusableError(ClassName, TransformerClass, TEXT("wrong_base"),
-			TEXT("a runtime cell transformer must derive from WorldPartitionRuntimeCellTransformer."));
+		return Err;
 	}
 
 	FArrayProperty* ArrayProp = MCPWPTransformerStackProperty();

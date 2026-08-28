@@ -567,7 +567,6 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::SampleLandscape(const TSharedPtr<FJso
 	// them, because a map with two landscapes has no single right default.
 	const FString ActorLabel = OptionalString(Params, TEXT("actorLabel"));
 	TArray<ULandscapeInfo*> Candidates;
-	TArray<FString> CandidateLabels;
 	for (TActorIterator<ALandscapeProxy> It(World); It; ++It)
 	{
 		ALandscapeProxy* Proxy = *It;
@@ -577,7 +576,6 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::SampleLandscape(const TSharedPtr<FJso
 		if (!ProxyInfo) continue;
 		if (Candidates.Contains(ProxyInfo)) continue;
 		Candidates.Add(ProxyInfo);
-		CandidateLabels.Add(Proxy->GetActorLabel());
 	}
 	if (Candidates.Num() == 0)
 	{
@@ -607,8 +605,10 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::SampleLandscape(const TSharedPtr<FJso
 		const FTransform CandidateTransform = Reference->ActorToWorld();
 		const FVector CandidateLocal =
 			CandidateTransform.InverseTransformPosition(FVector(WorldX, WorldY, 0.0));
-		const int32 QuadX = FMath::RoundToInt(CandidateLocal.X);
-		const int32 QuadY = FMath::RoundToInt(CandidateLocal.Y);
+		// RoundToInt32, not RoundToInt: the double overload of the latter
+		// returns int64 and would narrow on the way into these.
+		const int32 QuadX = FMath::RoundToInt32(CandidateLocal.X);
+		const int32 QuadY = FMath::RoundToInt32(CandidateLocal.Y);
 		const bool bCovers =
 			QuadX >= CandidateExtent.Min.X && QuadX <= CandidateExtent.Max.X &&
 			QuadY >= CandidateExtent.Min.Y && QuadY <= CandidateExtent.Max.Y;
@@ -630,8 +630,8 @@ TSharedPtr<FJsonValue> FLandscapeHandlers::SampleLandscape(const TSharedPtr<FJso
 	}
 
 	ALandscapeProxy* ReferenceProxy = Info->GetLandscapeProxy();
-	const int32 QuadX = FMath::RoundToInt(LocalPoint.X);
-	const int32 QuadY = FMath::RoundToInt(LocalPoint.Y);
+	const int32 QuadX = FMath::RoundToInt32(LocalPoint.X);
+	const int32 QuadY = FMath::RoundToInt32(LocalPoint.Y);
 	const bool bInBounds =
 		QuadX >= Extent.Min.X && QuadX <= Extent.Max.X &&
 		QuadY >= Extent.Min.Y && QuadY <= Extent.Max.Y;

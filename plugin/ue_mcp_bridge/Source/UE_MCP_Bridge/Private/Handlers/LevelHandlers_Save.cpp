@@ -39,6 +39,10 @@
 #include "Engine/World.h"
 #include "HAL/FileManager.h"
 #include "Misc/OutputDevice.h"
+// GError and GLog are declared as pointers in CoreGlobals; forwarding a line to
+// either one needs the complete type.
+#include "Misc/OutputDeviceError.h"
+#include "Misc/OutputDeviceRedirector.h"
 #include "Misc/PackageName.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
