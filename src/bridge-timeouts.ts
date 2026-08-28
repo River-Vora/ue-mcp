@@ -67,6 +67,7 @@ export const REGISTERED_HANDLER_TIMEOUT_SECONDS: Readonly<Record<string, number>
   invoke_object_functions: 300,
   live_coding_compile: 300,
   load_actor_descs: 300,
+  mesh_boolean: 300,
   paint_landscape_layer: 120,
   query_components: 300,
   read_blueprint_graph: 180,

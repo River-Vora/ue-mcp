@@ -196,9 +196,9 @@ bool FMCPDeleteAssetRefusesReferencedAssetTest::RunTest(const FString& Parameter
 	{
 		// Nothing here can assert a guard whose only input is empty. Say so
 		// rather than reporting a pass that tested nothing.
-		AddInfo(TEXT("The Asset Registry did not index the private test mount's dependency graph in this "
-			"environment, so the referencer refusal could not be exercised. The unreferenced-delete "
-			"assertion below still ran."));
+		AddInfo(TEXT("The Asset Registry did not index the private test mount's dependency graph in this ")
+			TEXT("environment, so the referencer refusal could not be exercised. The unreferenced-delete ")
+			TEXT("assertion below still ran."));
 	}
 
 	// An asset nothing points at still deletes on the default path: the guard

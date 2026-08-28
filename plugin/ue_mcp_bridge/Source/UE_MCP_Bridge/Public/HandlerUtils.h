@@ -445,6 +445,16 @@ inline bool MCPIsProtectedAssetPath(const FString& Path)
 	return false;
 }
 
+/** The refusal a protected mount produces. Beside the rule it enforces, so a
+ *  handler cannot pair MCPIsProtectedAssetPath with a message of its own that
+ *  says something slightly different. */
+inline TSharedPtr<FJsonValue> MCPProtectedPathError(const FString& Path)
+{
+	return MCPError(FString::Printf(
+		TEXT("Refusing to mutate protected mount: %s. Engine, /Script/, /Memory/, /Temp/ are read-only via the bridge."),
+		*Path));
+}
+
 /** Emit the standard delete_asset rollback record on a create result. */
 inline void MCPSetDeleteAssetRollback(TSharedPtr<FJsonObject> Result, const FString& AssetPath)
 {

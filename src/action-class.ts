@@ -220,6 +220,11 @@ const OVERRIDES: Readonly<Record<string, ActionClass>> = {
   // (#908). "fixup" is not a verb the lexicon knows, and this is about as far
   // from a read as an asset action gets.
   "asset.fixup_redirectors": "mutate",
+  // Runs a CSG boolean over two StaticMeshes and writes the result to an
+  // asset. "mesh" is not a verb at all, so the lexicon cannot see it, and this
+  // is as far from a read as an asset action gets: it creates or overwrites a
+  // StaticMesh package (#916).
+  "asset.mesh_boolean": "mutate",
   // Posts to a public issue tracker.
   "feedback.submit": "mutate",
   // #956: reads an attribute value, but by default it first registers the

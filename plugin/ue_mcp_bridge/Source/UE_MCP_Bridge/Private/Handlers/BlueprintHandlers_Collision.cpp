@@ -321,8 +321,8 @@ TSharedPtr<FJsonValue> FCollisionQueryHandlers::GetComponentCollision(const TSha
 		// and saying "not a PrimitiveComponent" is the difference between an
 		// answerable question and an empty response.
 		return MCPError(FString::Printf(
-			TEXT("Component '%s' on '%s' is a %s, which carries no collision. Only PrimitiveComponent "
-				"subclasses (capsules, boxes, spheres, meshes) have a collision profile and per-channel responses."),
+			TEXT("Component '%s' on '%s' is a %s, which carries no collision. Only PrimitiveComponent ")
+				TEXT("subclasses (capsules, boxes, spheres, meshes) have a collision profile and per-channel responses."),
 			*ComponentName, *AssetPath, *Component->GetClass()->GetName()));
 	}
 
@@ -335,8 +335,8 @@ TSharedPtr<FJsonValue> FCollisionQueryHandlers::GetComponentCollision(const TSha
 		if (SingleChannel == INDEX_NONE)
 		{
 			return MCPError(FString::Printf(
-				TEXT("Unknown collision channel '%s'. Pass a configured channel name, a C++ enumerator "
-					"(ECC_Camera), or a container index. Known channels: %s"),
+				TEXT("Unknown collision channel '%s'. Pass a configured channel name, a C++ enumerator ")
+					TEXT("(ECC_Camera), or a container index. Known channels: %s"),
 				*RequestedChannel, *DescribeKnownChannels(Table)));
 		}
 	}
@@ -452,8 +452,8 @@ TSharedPtr<FJsonValue> FCollisionQueryHandlers::ResolveCollisionProfile(const TS
 		if (SingleChannel == INDEX_NONE)
 		{
 			return MCPError(FString::Printf(
-				TEXT("Unknown collision channel '%s'. Pass a configured channel name, a C++ enumerator "
-					"(ECC_Camera), or a container index. Known channels: %s"),
+				TEXT("Unknown collision channel '%s'. Pass a configured channel name, a C++ enumerator ")
+					TEXT("(ECC_Camera), or a container index. Known channels: %s"),
 				*RequestedChannel, *DescribeKnownChannels(Table)));
 		}
 	}
