@@ -2634,6 +2634,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ReparentComponent(const TSharedPtr<FJ
 
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint) return MCPError(TEXT("Blueprint not found"));
+	if (auto Blocked = MCPAssetWriteBlockedError(Blueprint, AssetPath, TEXT("reparent this component"))) return Blocked;
 	USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
 	if (!SCS) return MCPError(TEXT("Blueprint has no SCS"));
 
@@ -2651,12 +2652,15 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ReparentComponent(const TSharedPtr<FJ
 	Parent->AddChildNode(Child);
 
 	FKismetEditorUtilities::CompileBlueprint(Blueprint);
-	SaveAssetPackage(Blueprint);
+
+	FString SaveReason;
+	const bool bSaved = SaveAssetPackageChecked(Blueprint, SaveReason);
 
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
 	Result->SetStringField(TEXT("componentName"), ComponentName);
 	Result->SetStringField(TEXT("newParent"), NewParent);
+	MCPNoteSaveOutcome(Result, AssetPath, bSaved, SaveReason);
 	return MCPResult(Result);
 }
 
@@ -2672,6 +2676,15 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ReparentBlueprint(const TSharedPtr<FJ
 
 	UBlueprint* Blueprint = LoadBlueprint(AssetPath);
 	if (!Blueprint) return BlueprintNotFoundError(AssetPath);
+
+	// #932: reparenting reparents, recompiles AND saves, and the save is not
+	// optional. A .uasset that was never checked out of source control is
+	// read-only on disk, and asking the engine to write it turned the failed
+	// save into a FATAL error that took the whole editor process down. The
+	// asset itself was fine and the call replayed cleanly after a checkout, so
+	// the only thing missing was this question, asked before the Blueprint is
+	// touched rather than after it has already been reparented and recompiled.
+	if (auto Blocked = MCPAssetWriteBlockedError(Blueprint, AssetPath, TEXT("reparent this Blueprint"))) return Blocked;
 
 	// Resolve parent class: full path > short name > engine-module implicit.
 	UClass* NewParent = nullptr;
@@ -2717,7 +2730,8 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ReparentBlueprint(const TSharedPtr<FJ
 	UBlueprintEditorLibrary::ReparentBlueprint(Blueprint, NewParent);
 	FKismetEditorUtilities::CompileBlueprint(Blueprint);
 
-	SaveAssetPackage(Blueprint);
+	FString SaveReason;
+	const bool bSaved = SaveAssetPackageChecked(Blueprint, SaveReason);
 
 	auto Result = MCPSuccess();
 	MCPSetUpdated(Result);
@@ -2727,6 +2741,7 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::ReparentBlueprint(const TSharedPtr<FJ
 	{
 		Result->SetStringField(TEXT("previousParent"), OldParent->GetPathName());
 	}
+	MCPNoteSaveOutcome(Result, AssetPath, bSaved, SaveReason);
 	return MCPResult(Result);
 }
 

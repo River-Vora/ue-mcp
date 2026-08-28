@@ -749,36 +749,14 @@ static bool MCPPersistAssetWrite(UObject* Asset, UBlueprint* OwningBlueprint, bo
 			*PackageName);
 		return false;
 	}
-	if (MCPIsProtectedAssetPath(PackageName))
-	{
-		OutReason = FString::Printf(
-			TEXT("'%s' is on a protected mount, which the bridge never writes to. The change is in memory only."),
-			*PackageName);
-		return false;
-	}
-
-	// A read-only package file is a real and common failure, and asking the
-	// engine to write a file it cannot open is the case #932 reported as a
-	// crash elsewhere. Answer it before the save rather than after.
-	FString PackageFileName;
-	if (FPackageName::DoesPackageExist(PackageName, &PackageFileName)
-		&& IFileManager::Get().IsReadOnly(*PackageFileName))
-	{
-		OutReason = FString::Printf(
-			TEXT("'%s' is read-only on disk. Check it out of source control or clear the read-only flag, then save."),
-			*PackageFileName);
-		return false;
-	}
-
+	// Protected mounts and read-only package files are both answered before the
+	// engine is asked to write, by the one shared guard (#932): asking it to
+	// open a file it cannot is what took the editor down with a fatal error.
 	// For a Blueprint the package's asset is the UBlueprint; the CDO is one of
-	// its exports and rides along.
-	if (SaveAssetPackage(OwningBlueprint ? static_cast<UObject*>(OwningBlueprint) : Asset))
-	{
-		return true;
-	}
-	OutReason = FString::Printf(
-		TEXT("The editor refused to write '%s'. The output log carries the reason."), *PackageName);
-	return false;
+	// its exports and rides along, so the guard and the save see the same
+	// object.
+	UObject* WriteTarget = OwningBlueprint ? static_cast<UObject*>(OwningBlueprint) : Asset;
+	return SaveAssetPackageChecked(WriteTarget, OutReason);
 }
 
 // A CDO write is a genuine package export and survives both the save and a
