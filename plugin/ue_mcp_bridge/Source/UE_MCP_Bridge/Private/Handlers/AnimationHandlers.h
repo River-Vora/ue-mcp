@@ -176,4 +176,17 @@ private:
 	static TSharedPtr<FJsonValue> ListBones(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> RebindLeaderPose(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> PreviewAnimation(const TSharedPtr<FJsonObject>& Params);
+
+	// #922/#926 - the evaluated pose off a live SkeletalMeshComponent, for a set
+	// of bones at once. Lives in AnimationHandlers_SkeletalLive.cpp.
+	static TSharedPtr<FJsonValue> GetLiveBoneTransforms(const TSharedPtr<FJsonObject>& Params);
+
+	// #923/#926/#922 - evaluated pose reads off an asset. Live in
+	// AnimationHandlers_Pose.cpp.
+	// Evaluate an AnimSequence (or a BlendSpace at a blend position) at given
+	// frames or times and return composed transforms.
+	static TSharedPtr<FJsonValue> SamplePose(const TSharedPtr<FJsonObject>& Params);
+	// Planted-foot speed of a clip, which every retarget changes by the target
+	// skeleton's leg-length ratio and so has to be re-measured per clip.
+	static TSharedPtr<FJsonValue> MeasureNaturalSpeed(const TSharedPtr<FJsonObject>& Params);
 };

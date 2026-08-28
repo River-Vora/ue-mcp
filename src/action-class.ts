@@ -149,6 +149,10 @@ const OVERRIDES: Readonly<Record<string, ActionClass>> = {
   "widget.extract_subtree": "read",
   // Cache metadata about the Fab library, not a cache write.
   "fab.cache_info": "read",
+  // Computes bounds, area, volume and topology over mesh data already in the
+  // editor. "measure" is not in the read lexicon, and deliberately stays out of
+  // it: a verb there is a licence for every future action that starts with it.
+  "asset.measure_mesh_geometry": "read",
   // Reads a mirror data table. "mirror" is a mutate verb because the wrapped
   // engine surface uses it as one (mirror_selected_controls), and a mutate verb
   // anywhere in the name wins, which is wrong for exactly this action.
@@ -159,6 +163,10 @@ const OVERRIDES: Readonly<Record<string, ActionClass>> = {
   // Reads animation data, but optionally writes validation artifacts under
   // the addressed project's Saved directory.
   "animation.analyze_animation": "unknown",
+  // Evaluates a clip's pose to derive its planted-foot speed. Reads only.
+  // "measure" is in the read lexicon, so this entry is belt and braces rather
+  // than load bearing, and it documents the intent at the point of use.
+  "animation.measure_natural_speed": "read",
   // Reads whose first segment is not a verb at all.
   "level.line_trace": "read",
   // Batch of the same collision queries. `bulk` is a mutate verb because most

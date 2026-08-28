@@ -25,6 +25,10 @@ public class UE_MCP_Bridge : ModuleRules
 	// Private/Tests/RuntimeVisibilityTests.cpp: same reason.
 	// Private/Handlers/MaterialHandlers_Build.cpp and
 	// Private/Tests/MaterialBuildTests.cpp: same reason.
+	// Private/Handlers/AssetHandlers_Geometry.cpp,
+	// Private/Handlers/AnimationHandlers_Pose.cpp,
+	// Private/Tests/MeshGeometryTests.cpp and
+	// Private/Tests/AnimationPoseTests.cpp: same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
@@ -49,6 +53,9 @@ public class UE_MCP_Bridge : ModuleRules
 				"AnimationCore",
 				"AnimGraph",
 				"AnimationEditor",
+				// UAnimPoseExtensions / FAnimPoseEvaluationOptions (AnimPose.h),
+				// the engine's own pose evaluator, used by animation(sample_pose)
+				// and animation(measure_natural_speed).
 				"AnimationBlueprintLibrary",
 				"AnimationModifiers",
 				"AssetRegistry",
