@@ -157,12 +157,43 @@ describe("animation Control Rig edit workflow", () => {
     expect(source).toContain('SetStringField(TEXT("controlType"), ControlType)');
     expect(source).toContain('SetArrayField(TEXT("enumOptions"), Options)');
     expect(source).toContain("ControlRigSequencerIsValidEnumValue(ControlEnum, Write.IntValue)");
-    expect(source).toContain('FString::Printf(TEXT("%s|%d"), *ControlName.ToString().ToLower(), Frame.Value)');
+    expect(source).toContain("ControlRigSequencerRegisterWriteFrames(WrittenKeys");
     expect(source).toContain("SourceAnimation->GetAdditiveAnimType() != AAT_None");
     expect(source).toContain("ControlRigSequencerReadNormalizedQuaternion");
     expect(source).toContain("PreviousRotation | Rotation");
     expect(source).toContain("does not change a channel supported by");
     expect(source).toContain("ControlRigSequencerTransformMatches");
+  });
+
+  it("implements component-space contact locking with transactional key QA", () => {
+    const source = readFileSync(
+      new URL(
+        "../../plugin/ue_mcp_bridge/Source/UE_MCP_Bridge/Private/Handlers/AnimationHandlers_ControlRigSequencer.cpp",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+
+    expect(source).toContain('Op == TEXT("contact_lock")');
+    expect(source).toContain("ControlRigSequencerSmoothStep");
+    expect(source).toContain("Skeleton->GetBoneTranslationRetargetingMode(SkeletonDriverIndex)");
+    expect(source).toContain("AnimationCore::SolveFabrik(");
+    expect(source).toContain("DesiredLocal.SetTranslation(SourceLocal.GetTranslation())");
+    expect(source).toContain("GetControlOffsetTransform(");
+    expect(source).toContain("FkChainControls.Num() - 1");
+    expect(source).toContain('SetStringField(TEXT("solver"), TEXT("fk_rotation_chain"))');
+    expect(source).toContain("UAnimPoseExtensions::GetAnimPoseAtTime(");
+    expect(source).toContain("SourceSection->MapTimeToAnimation(");
+    expect(source).toContain("GetRelativeTransformReverse(");
+    expect(source).toContain("CellCount > ControlRigSequencerMaxFrames");
+    expect(source).toContain("contact_constraint_tolerance_exceeded");
+    expect(source).toContain('TEXT("bake_and_analyze_required")');
+    expect(source).toContain('SetArrayField(TEXT("contactQa"), ContactResults)');
+    expect(source).toContain("MCPIsProtectedAssetPath(SequencePath)");
+    expect(source.indexOf("for (FControlRigPreparedContactQA& Contact : PreparedContacts)")).toBeGreaterThan(
+      source.indexOf("BatchSetControlTransforms("),
+    );
+    expect(animationTool.actions.contact_lock).toBeUndefined();
   });
 
   it("makes partial IK retarget mappings explicit in batch results", () => {
@@ -176,6 +207,13 @@ describe("animation Control Rig edit workflow", () => {
 
     expect(source).toContain('SetArrayField(TEXT("unmappedTargetChains"), UnmappedTargetChains)');
     expect(source).toContain('SetBoolField(TEXT("mappingComplete"), UnmappedTargetChains.IsEmpty())');
+    expect(source).toContain("SourceMesh->GetSkeleton()->IsCompatibleForEditor(Anim->GetSkeleton())");
+    expect(source).toContain("FIKRetargetProcessor ValidationProcessor");
+    expect(source).toContain("ValidationProcessor.IsInitialized()");
+    expect(source).toContain("FScopedBatchRetargetEditorInstanceRestore RestoreEditorInstances");
+    expect(source.indexOf("ValidationProcessor.Initialize(ValidationParameters)")).toBeLessThan(
+      source.indexOf("UIKRetargetBatchOperation::RunBatchRetarget(Inputs)"),
+    );
     expect(animationTool.actions.batch_retarget_animations.description).toContain("partial retargets are explicit");
   });
 
@@ -288,6 +326,22 @@ describe("animation Control Rig edit workflow", () => {
         blendOutFrames: 3,
       },
       {
+        op: "contact_lock",
+        control: "foot_l_ik_ctrl",
+        drivenReference: "ball_l",
+        startFrame: 4,
+        endFrame: 18,
+        target: {
+          translation: { x: 12, y: -8, z: 1.5 },
+          rotationQuaternion: { x: 0, y: 0, z: 0, w: 1 },
+        },
+        blendInFrames: 2,
+        blendOutFrames: 3,
+        stabilizeControls: ["knee_pole_l_ctrl"],
+        positionToleranceCm: 0.1,
+        rotationToleranceDegrees: 0.5,
+      },
+      {
         op: "set_bool",
         control: "arm_r_fk_ik_switch",
         frames: [0, 12, 30],
@@ -316,6 +370,15 @@ describe("animation Control Rig edit workflow", () => {
     expect(operations.safeParse([{ op: "set", control: "root_ctrl", frame: 0, frames: [0], transform: completeTransform }]).success).toBe(false);
     expect(operations.safeParse([{ op: "offset", control: "root_ctrl", startFrame: 10, endFrame: 2, translationCm: { x: 1, y: 0, z: 0 } }]).success).toBe(false);
     expect(operations.safeParse([{ op: "offset", control: "root_ctrl", startFrame: 0, endFrame: 2 }]).success).toBe(false);
+    const contactTarget = { translation: { x: 0, y: 0, z: 0 } };
+    expect(operations.safeParse([{ op: "contact_lock", control: "foot_ik", startFrame: 10, endFrame: 2, target: contactTarget }]).success).toBe(false);
+    expect(operations.safeParse([{ op: "contact_lock", control: "foot_ik", startFrame: 0, endFrame: 4, target: contactTarget, blendInFrames: 3, blendOutFrames: 2 }]).success).toBe(false);
+    expect(operations.safeParse([{ op: "contact_lock", control: "foot_ik", startFrame: 0, endFrame: 4, target: contactTarget, stabilizeControls: ["pole", "POLE"] }]).success).toBe(false);
+    expect(operations.safeParse([{ op: "contact_lock", control: "foot_ik", startFrame: 0, endFrame: 4, target: contactTarget, stabilizeControls: ["FOOT_IK"] }]).success).toBe(false);
+    expect(operations.safeParse([{ op: "contact_lock", control: "foot_ik", startFrame: 0, endFrame: 50_000, target: contactTarget, stabilizeControls: ["pole"] }]).success).toBe(false);
+    expect(operations.safeParse([{ op: "contact_lock", control: "foot_ik", startFrame: 0, endFrame: 4, target: { ...contactTarget, rotationQuaternion: { x: 0, y: 0, z: 0, w: 2 } } }]).success).toBe(false);
+    expect(operations.safeParse([{ op: "contact_lock", control: "foot_ik", startFrame: 0, endFrame: 4, target: { ...contactTarget, scale: { x: 1, y: 1, z: 1 } } }]).success).toBe(false);
+    expect(operations.safeParse([{ op: "contact_lock", control: "foot_ik", startFrame: 0, endFrame: 4, target: contactTarget, positionToleranceCm: 0 }]).success).toBe(false);
     expect(operations.safeParse([{ op: "set_bool", control: "arm_r_fk_ik_switch", frame: 0, value: 1 }]).success).toBe(false);
     expect(operations.safeParse([{ op: "set_bool", control: "arm_r_fk_ik_switch", frame: 0, frames: [0], value: true }]).success).toBe(false);
     expect(operations.safeParse([{ op: "set_float", control: "blend", frame: 0, value: Number.POSITIVE_INFINITY }]).success).toBe(false);

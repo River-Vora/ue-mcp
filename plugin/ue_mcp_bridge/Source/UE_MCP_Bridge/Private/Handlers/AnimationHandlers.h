@@ -96,6 +96,8 @@ private:
 	// IK Rig (#93)
 	static TSharedPtr<FJsonValue> CreateIKRig(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadIKRig(const TSharedPtr<FJsonObject>& Params);
+	// UE 5.8 full-body IK definition authoring over an existing IK Rig.
+	static TSharedPtr<FJsonValue> ConfigureIKRig(const TSharedPtr<FJsonObject>& Params);
 
 	// Control Rig (#11)
 	static TSharedPtr<FJsonValue> ListControlRigVariables(const TSharedPtr<FJsonObject>& Params);
@@ -122,6 +124,8 @@ private:
 	// v0.7.11 - issue fixes
 	static TSharedPtr<FJsonValue> CreateIKRetargeter(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> ReadIKRetargeter(const TSharedPtr<FJsonObject>& Params);
+	// UE 5.8 retarget op, chain-map, preview-mesh and retarget-pose authoring.
+	static TSharedPtr<FJsonValue> ConfigureIKRetargeter(const TSharedPtr<FJsonObject>& Params);
 	// #701/#703: IK rig/retargeter authoring tail + batch retarget bake.
 	static TSharedPtr<FJsonValue> SetIKRigMesh(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SetIKRetargeterRig(const TSharedPtr<FJsonObject>& Params);

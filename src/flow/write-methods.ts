@@ -67,6 +67,14 @@ const EXPLICIT: Record<string, Extractor> = {
     const path = str(p.outputAssetPath);
     return path ? [path] : [];
   },
+  // IK and retargeter mutations use domain-specific target path names. Only
+  // the edited asset is guardable; mesh and rig references are read inputs.
+  configure_ik_rig: (p) => strArray([p.rigPath]),
+  configure_ik_retargeter: (p) => strArray([p.retargeterPath]),
+  set_ik_rig_mesh: (p) => strArray([p.rigPath]),
+  set_ik_retargeter_rig: (p) => strArray([p.retargeterPath]),
+  auto_align_retarget_pose: (p) => strArray([p.retargeterPath]),
+  reset_retarget_pose: (p) => strArray([p.retargeterPath]),
   // Batch rename: each entry is {sourcePath, destinationPath} or {assetPath, newName}.
   bulk_rename_assets: (p) => {
     const out: string[] = [];

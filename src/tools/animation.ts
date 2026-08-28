@@ -4,7 +4,11 @@ import { Vec3, Quat } from "../schemas.js";
 
 // Keep the Control Rig operation schema self-contained so adding it does not
 // redirect JSON-schema references used by older animation actions.
-const ControlRigVec3 = z.object({ x: z.number(), y: z.number(), z: z.number() }).strict();
+const ControlRigVec3 = z.object({
+  x: z.number().finite(),
+  y: z.number().finite(),
+  z: z.number().finite(),
+}).strict();
 const ControlRigRotator = z.object({ pitch: z.number(), yaw: z.number(), roll: z.number() }).strict();
 const ControlRigQuaternion = z.object({
   x: z.number().finite(),
@@ -73,6 +77,67 @@ const ControlRigOffsetEdit = z.object({
     { message: "offset operations require translationCm, rotationDegrees, or scaleMultiplier" },
   );
 
+const ControlRigContactTarget = z.object({
+  translation: ControlRigVec3,
+  rotationQuaternion: ControlRigQuaternion.optional(),
+}).strict();
+
+const ControlRigContactLockEdit = z.object({
+  op: z.literal("contact_lock"),
+  control: z.string().min(1),
+  drivenReference: z.string().min(1).optional(),
+  startFrame: z.number().int(),
+  endFrame: z.number().int(),
+  target: ControlRigContactTarget,
+  blendInFrames: z.number().int().nonnegative().optional(),
+  blendOutFrames: z.number().int().nonnegative().optional(),
+  stabilizeControls: z.array(z.string().min(1)).max(8).optional(),
+  positionToleranceCm: z.number().finite().positive().max(100).optional(),
+  rotationToleranceDegrees: z.number().finite().positive().max(180).optional(),
+}).strict().superRefine((edit, context) => {
+  if (edit.endFrame < edit.startFrame) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["endFrame"], message: "contact_lock endFrame must be at least startFrame" });
+    return;
+  }
+
+  const intervalCount = edit.endFrame - edit.startFrame;
+  const blendIn = edit.blendInFrames ?? 0;
+  const blendOut = edit.blendOutFrames ?? 0;
+  if (blendIn + blendOut > intervalCount) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["blendOutFrames"],
+      message: "contact_lock blends must leave at least one fully constrained frame",
+    });
+  }
+
+  const controlKey = edit.control.toLowerCase();
+  const stabilizerKeys = (edit.stabilizeControls ?? []).map((control) => control.toLowerCase());
+  if (stabilizerKeys.includes(controlKey)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["stabilizeControls"],
+      message: "contact_lock control cannot also be a stabilizer",
+    });
+  }
+  if (new Set(stabilizerKeys).size !== stabilizerKeys.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["stabilizeControls"],
+      message: "contact_lock stabilizers must be unique",
+    });
+  }
+
+  const frameCount = intervalCount + 1;
+  if (frameCount * (stabilizerKeys.length + 1) > 100_000) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["endFrame"],
+      message: "contact_lock is limited to 100000 control-frame cells",
+    });
+  }
+});
+
 const ControlRigSetBoolEdit = z.object({
   op: z.literal("set_bool"),
   control: z.string().min(1),
@@ -110,10 +175,64 @@ const ControlRigEditOperation = z.union([
   ControlRigSetEdit,
   ControlRigSetKeysEdit,
   ControlRigOffsetEdit,
+  ControlRigContactLockEdit,
   ControlRigSetBoolEdit,
   ControlRigSetFloatEdit,
   ControlRigSetIntEdit,
 ]);
+
+const IKRigAuthoringChain = z.object({
+  name: z.string().min(1),
+  startBone: z.string().min(1),
+  endBone: z.string().min(1),
+  goal: z.string().min(1).optional(),
+}).strict();
+
+const IKRigFullBodyGoal = z.object({
+  name: z.string().min(1),
+  bone: z.string().min(1),
+  positionAlpha: z.number().finite().min(0).max(1).optional(),
+  rotationAlpha: z.number().finite().min(0).max(1).optional(),
+  chainDepth: z.number().int().nonnegative().optional(),
+  strengthAlpha: z.number().finite().min(0).max(1).optional(),
+  pullChainAlpha: z.number().finite().min(0).max(1).optional(),
+  pinRotation: z.number().finite().min(0).max(1).optional(),
+}).strict();
+
+const IKRigFullBodySettings = z.object({
+  solverIndex: z.number().int().nonnegative().optional(),
+  rootBone: z.string().min(1),
+  enabled: z.boolean().optional(),
+  goals: z.array(IKRigFullBodyGoal).min(1).max(256),
+}).strict();
+
+const IKRigExclusion = z.object({
+  bone: z.string().min(1),
+  excluded: z.boolean(),
+}).strict();
+
+const IKRetargetChainMapping = z.object({
+  targetChain: z.string().min(1),
+  sourceChain: z.string().min(1).nullable().optional(),
+}).strict();
+
+const IKRetargetPose = z.object({
+  side: z.enum(["source", "target"]),
+  name: z.string().min(1),
+  create: z.boolean().optional(),
+  reset: z.boolean().optional(),
+  autoAlign: z.enum(["chain_to_chain", "mesh_to_mesh", "local_axes", "global_axes"]).optional(),
+  bones: z.array(z.string().min(1)).max(10_000).optional(),
+  rotationOffsets: z.array(z.object({
+    bone: z.string().min(1),
+    rotationQuaternion: ControlRigQuaternion,
+  }).strict()).max(10_000).optional(),
+  rootOffsetZ: z.number().finite().optional(),
+  snapBoneToGround: z.string().min(1).optional(),
+}).strict().refine(
+  (pose) => pose.rootOffsetZ === undefined || pose.snapBoneToGround === undefined,
+  { message: "retarget pose rootOffsetZ and snapBoneToGround are mutually exclusive" },
+);
 
 export const animationTool: ToolDef = categoryTool(
   "animation",
@@ -164,13 +283,14 @@ export const animationTool: ToolDef = categoryTool(
     remove_montage_segment: bp("Remove a segment from a montage slot by index, then relay out the remaining segments and rewrite the montage length. Idempotent: alreadyDeleted=true when the slot already holds no segments. Params: assetPath, segmentIndex, slotName?, slotIndex? (default 0) (#826)", "remove_montage_segment", (p) => ({ assetPath: p.assetPath, segmentIndex: p.segmentIndex, slotName: p.slotName, slotIndex: p.slotIndex })),
     list_montage_segments: bp("List every slot's segments on a montage so a caller can address them by index: animation path, startPos/endPos trim, playRate, loopCount, track position and length per segment, plus the sections with the slot and segment each one links to. Params: assetPath, slotName? (filter to one slot) (#826)", "list_montage_segments", (p) => ({ assetPath: p.assetPath, slotName: p.slotName })),
     create_ik_rig:        bp("Create IKRigDefinition asset, optionally with retargetRoot + chains[]. Params: name, skeletalMeshPath, packagePath?, retargetRoot?, chains?: [{name, startBone, endBone, goal?}]", "create_ik_rig"),
-    read_ik_rig:          bp("Read IK Rig chains, solvers, skeleton. Params: assetPath", "read_ik_rig"),
+    read_ik_rig:          bp("Read an IK Rig's preview mesh, skeleton roots/bones, ancestry-validated chains and goal assignments, concrete goals, exclusions, and structured solver/FBIK effector state. Params: assetPath", "read_ik_rig"),
+    configure_ik_rig:     bp("UE 5.8 only. Author an existing IK Rig through UIKRigController with strict bone, ancestry, goal, and setting validation, native readback, one transaction, and checked save; older engines return unsupported_engine_version. autoSetup='retarget' installs the native retarget definition; 'full_body' installs the retarget definition then Full Body IK before requested desired-state upserts. Params: rigPath, autoSetup? ('retarget'|'full_body'), retargetRoot?, rootMotionBone?, chains?: [{name,startBone,endBone,goal?}], fullBodyIK?: {solverIndex?,rootBone,enabled?,goals:[{name,bone,positionAlpha?,rotationAlpha?,chainDepth?,strengthAlpha?,pullChainAlpha?,pinRotation?}]}, exclusions?: [{bone,excluded}].", "configure_ik_rig", (p) => ({ rigPath: p.rigPath, autoSetup: p.autoSetup, retargetRoot: p.retargetRoot, rootMotionBone: p.rootMotionBone, chains: p.chains, fullBodyIK: p.fullBodyIK, exclusions: p.exclusions })),
     list_control_rig_variables: bp("List ControlRig variables and hierarchy. Params: assetPath", "list_control_rig_variables"),
     read_control_rig_graph: bp("Read a Control Rig's RigVM models: every graph with its nodes (name, node path, class), each node's pins (name, pin path, cppType, direction, execute flag, default value, nested sub-pins) and the links between them, plus full member-variable metadata (type, subtype, array-ness, default, public/read-only). list_control_rig_variables only ever reported a node COUNT, which is not enough to verify solver wiring (#774). Params: assetPath, graphName? (substring filter), includePins? (default true), includeDefaults? (default true), includeLinks? (default true), limit? (nodes per graph, default 200)", "read_control_rig_graph", (p) => ({ assetPath: p.assetPath, graphName: p.graphName, includePins: p.includePins, includeDefaults: p.includeDefaults, includeLinks: p.includeLinks, limit: p.limit })),
     read_control_rig_hierarchy: bp("Read a Control Rig's per-element hierarchy metadata: each element's name, type (Bone|Control|Null|Curve...), index, and parent. Params: assetPath (#619)", "read_control_rig_hierarchy", (p) => ({ assetPath: p.assetPath })),
     begin_control_rig_edit: bp("UE 5.8 only. Create a Sequencer Control Rig editing session over a source AnimSequence; native returns unsupported_engine_version on older engines. Baseline first: before this call, reuse or create a Control Rig for the target character, bind/import the exact target skeleton, add the intended controls, author Forward Solve, add Backward/Inverse Solve, verify it with read_control_rig_hierarchy/read_control_rig_graph, and pass an unchanged source round-trip. For a new baseline, the bundled Epic 5.8 controlrig actions include epic_create, epic_import_bones_from_asset, epic_add_control, and epic_add_backward_solve_graph; epic_create alone is not a usable rig. There is no silent fallback to raw bone-key authoring. rigMode='fk' uses UFKControlRig only when generated FK controls are sufficient; rigMode='asset' requires the verified controlRigPath and rejects rigs without inverse execution. bindingTag is the stable natural key for replay. onConflict is skip|error (default error); existing sessions are never modified. layered defaults false. startFrame is inclusive and endFrame is exclusive. Params: sequencePath, skeletalMeshPath, sourceAnimationPath, rigMode ('fk'|'asset'), controlRigPath?, layered?, startFrame?, endFrame?, displayRate?, bindingTag?, onConflict?. Returns the resolved bindingTag/binding GUID, rig, frame range, controls and created/existed status.", "begin_control_rig_edit", (p) => ({ sequencePath: p.sequencePath, skeletalMeshPath: p.skeletalMeshPath, sourceAnimationPath: p.sourceAnimationPath, rigMode: p.rigMode, controlRigPath: p.controlRigPath, layered: p.layered, startFrame: p.startFrame, endFrame: p.endFrame, displayRate: p.displayRate, bindingTag: p.bindingTag, onConflict: p.onConflict })),
     read_control_rig_edit: bp("UE 5.8 only. Read transform, bool, float/scale-float, and integer/enum controls from a Control Rig editing session without changing editor state; native returns unsupported_engine_version on older engines and has no silent fallback. Params: sequencePath, bindingTag, controlNames?, frames?, space? ('local'|'global'). Scalar samples return value instead of transform. Control metadata includes native controlType, animatable, and enum path/options where applicable. Returns session identity, layered mode, range/rate, filtered control metadata, and requested frame samples.", "read_control_rig_edit", (p) => ({ sequencePath: p.sequencePath, bindingTag: p.bindingTag, controlNames: p.controlNames, frames: p.frames, space: p.space })),
-    apply_control_rig_edits: bp("UE 5.8 only. Apply typed Control Rig edits in one transaction; native returns unsupported_engine_version on older engines. There is no silent fallback to raw bone tracks. set_keys writes strictly ordered full per-frame transforms from normalized quaternions and preserves shortest-arc quaternion continuity. A set operation writes one full absolute transform at frame or frames. An offset operation applies translation/rotation/scale deltas across an inclusive frame range with optional edge blends. set_bool, set_float, and set_int key matching scalar controls; enum controls use set_int with one of the integer values reported in enumOptions. Params: sequencePath, bindingTag, operations[] where set_keys={op:'set_keys',control,keys:[{frame,transform:{translation,rotationQuaternion,scale}}],space?}, set={op:'set',control,frame|frames,transform:{translation,rotationDegrees,scale},space?}, offset={op:'offset',control,startFrame,endFrame,translationCm?,rotationDegrees?,scaleMultiplier?,space?,blendInFrames?,blendOutFrames?}, set_bool={op:'set_bool',control,frame|frames,value}, set_float={op:'set_float',control,frame|frames,value}, or set_int={op:'set_int',control,frame|frames,value}. Sequencer's current interpolation mode is retained. Returns per-operation counts and affected controls/frames; a failed batch is undone.", "apply_control_rig_edits", (p) => ({ sequencePath: p.sequencePath, bindingTag: p.bindingTag, operations: p.operations })),
+    apply_control_rig_edits: bp("UE 5.8 only. Apply typed Control Rig edits in one transaction; native returns unsupported_engine_version on older engines. There is no silent fallback to raw bone tracks. set_keys writes strictly ordered full per-frame transforms from normalized quaternions and preserves shortest-arc quaternion continuity. A set operation writes one full absolute transform at frame or frames. An offset operation applies translation/rotation/scale deltas across an inclusive frame range with optional edge blends. contact_lock densely constrains a translatable driver control, or an optional driven bone/socket reference, to a fixed component-space target with smooth edge blends and optional pole/control stabilization. Driver and stabilizer keys are read back transactionally. A drivenReference contact returns verification='bake_and_analyze_required'; bake it and analyze every constrained frame before accepting the bone/socket result. set_bool, set_float, and set_int key matching scalar controls; enum controls use set_int with one of the integer values reported in enumOptions. Params: sequencePath, bindingTag, operations[] where set_keys={op:'set_keys',control,keys:[{frame,transform:{translation,rotationQuaternion,scale}}],space?}, set={op:'set',control,frame|frames,transform:{translation,rotationDegrees,scale},space?}, offset={op:'offset',control,startFrame,endFrame,translationCm?,rotationDegrees?,scaleMultiplier?,space?,blendInFrames?,blendOutFrames?}, contact_lock={op:'contact_lock',control,drivenReference?,startFrame,endFrame,target:{translation,rotationQuaternion?},blendInFrames?,blendOutFrames?,stabilizeControls?,positionToleranceCm?,rotationToleranceDegrees?}, set_bool={op:'set_bool',control,frame|frames,value}, set_float={op:'set_float',control,frame|frames,value}, or set_int={op:'set_int',control,frame|frames,value}. Sequencer's current interpolation mode is retained. Returns per-operation counts, affected controls/frames, and contactQa summaries; a failed key/readback batch is undone.", "apply_control_rig_edits", (p) => ({ sequencePath: p.sequencePath, bindingTag: p.bindingTag, operations: p.operations })),
     bake_control_rig_edit: bp("UE 5.8 only. Bake the evaluated Control Rig session to a new AnimSequence asset; native returns unsupported_engine_version on older engines and has no raw-track fallback. The source LevelSequence remains unchanged. outputAssetPath is the output natural key; onConflict is skip|error (default error), never overwrite. Key reduction and Sequencer links are not supported yet, so reduceKeys/createLink must be false or omitted. Params: sequencePath, bindingTag, outputAssetPath, frameRate?, reduceKeys?, tolerance?, createLink?, onConflict?. Returns output asset metadata, frame/rate counts, status, and delete-created-asset rollback.", "bake_control_rig_edit", (p) => ({ sequencePath: p.sequencePath, bindingTag: p.bindingTag, outputAssetPath: p.outputAssetPath, frameRate: p.frameRate, reduceKeys: p.reduceKeys, tolerance: p.tolerance, createLink: p.createLink, onConflict: p.onConflict })),
     analyze_animation: bp("Cross-version, data-driven AnimSequence inspection using the native animation APIs available in the compiled engine. Samples an AnimSequence and reports deterministic numeric motion diagnostics without Python or viewport inference. Params: assetPath (required AnimSequence), skeletalMeshPath?, boneNames?, frames?, sampleRate?, loop?, outputDirectory? (must resolve under Project/Saved/Codex/AnimationQA and must not already contain artifacts). Returns source/rate/range metadata, sampled local/component transforms, root-motion and continuity metrics, and any written analysis artifacts.", "analyze_animation", (p) => ({ assetPath: p.assetPath, skeletalMeshPath: p.skeletalMeshPath, boneNames: p.boneNames, frames: p.frames, sampleRate: p.sampleRate, loop: p.loop, outputDirectory: p.outputDirectory })),
     set_root_motion:    bp("Set root motion settings on AnimSequence. Params: assetPath, enableRootMotion?, forceRootLock?, useNormalizedRootMotionScale?, rootMotionRootLock?", "set_root_motion_settings", (p) => ({ path: p.assetPath, enableRootMotion: p.enableRootMotion, forceRootLock: p.forceRootLock, useNormalizedRootMotionScale: p.useNormalizedRootMotionScale, rootMotionRootLock: p.rootMotionRootLock })),
@@ -179,12 +299,13 @@ export const animationTool: ToolDef = categoryTool(
     create_composite:   bp("Create AnimComposite. Params: name, skeletonPath, packagePath?", "create_anim_composite"),
     list_modifiers:     bp("List applied animation modifiers. Params: assetPath", "list_anim_modifiers", (p) => ({ path: p.assetPath })),
     create_ik_retargeter: bp("Create IKRetargeter asset and (default) initialize the UE 5.7 ops stack: assigns sourceRig+targetRig to all ops, runs AutoMapChains. Returns chainsMapped count. Params: name, packagePath?, sourceRig?, targetRig?, autoMapChains? (default true) (#246)", "create_ik_retargeter", (p) => ({ name: p.name, packagePath: p.packagePath, sourceRig: p.sourceRig, targetRig: p.targetRig, autoMapChains: p.autoMapChains, onConflict: p.onConflict })),
-    read_ik_retargeter: bp("Read IKRetargeter: source/target rigs and chain mappings. Params: assetPath (#246)", "read_ik_retargeter", (p) => ({ assetPath: p.assetPath })),
+    read_ik_retargeter: bp("Read an IK Retargeter's source/target rigs and preview meshes, flattened and per-op chain mappings, typed op stack, and all named/current pose offsets when the compiled engine exposes them. Params: assetPath (#246)", "read_ik_retargeter", (p) => ({ assetPath: p.assetPath })),
+    configure_ik_retargeter: bp("UE 5.8 only. Configure an existing IK Retargeter through UIKRetargeterController with the correct default-op and per-op rig assignment order, auto/manual chain mappings, named pose authoring, processor validation, native readback, transaction rollback, and checked save; older engines return unsupported_engine_version. Whole-pose auto-align resets that pose first: create a new pose or pass pose.reset=true to acknowledge replacement, then manual offsets are applied. Params: retargeterPath, sourceRig?, targetRig?, sourcePreviewMesh?, targetPreviewMesh?, ensureDefaultOps? (default true), autoMapMode? ('exact'|'fuzzy'|'clear'), forceRemap? (default false), chainMappings?: [{targetChain,sourceChain?:string|null}], pose?: {side,name,create?,reset?,autoAlign?,bones?,rotationOffsets?:[{bone,rotationQuaternion}],rootOffsetZ?,snapBoneToGround?}.", "configure_ik_retargeter", (p) => ({ retargeterPath: p.retargeterPath, sourceRig: p.sourceRig, targetRig: p.targetRig, sourcePreviewMesh: p.sourcePreviewMesh, targetPreviewMesh: p.targetPreviewMesh, ensureDefaultOps: p.ensureDefaultOps, autoMapMode: p.autoMapMode, forceRemap: p.forceRemap, chainMappings: p.chainMappings, pose: p.pose })),
     set_ik_rig_mesh:      bp("Set the preview/source skeletal mesh on an EXISTING IK Rig. Params: rigPath, meshPath (#701)", "set_ik_rig_mesh", (p) => ({ rigPath: p.rigPath, meshPath: p.meshPath })),
     set_ik_retargeter_rig: bp("Set the source or target IK Rig on an EXISTING IK Retargeter. Params: retargeterPath, rigPath, side? (source|target, default target) (#703)", "set_ik_retargeter_rig", (p) => ({ retargeterPath: p.retargeterPath, rigPath: p.rigPath, side: p.side })),
     auto_align_retarget_pose: bp("Auto-align all bones of the source/target retarget pose (chain-to-chain) - fixes a retargeter that outputs a static reference pose. Params: retargeterPath, side? (source|target, default target) (#701)", "auto_align_retarget_pose", (p) => ({ retargeterPath: p.retargeterPath, side: p.side })),
     reset_retarget_pose:  bp("Reset the current retarget pose (all bones) to the reference pose. Params: retargeterPath, side? (source|target, default target) (#701)", "reset_retarget_pose", (p) => ({ retargeterPath: p.retargeterPath, side: p.side })),
-    batch_retarget_animations: bp("Bake a set of source AnimSequences onto the target skeleton through an IK Retargeter (RunBatchRetarget). Returns mapping completeness and every unmapped target chain so partial retargets are explicit. Params: retargeterPath, sourceMesh, targetMesh, animPaths[], outputPath? (default: alongside source), prefix?, suffix? (default _Retargeted), overwrite? (#701)", "batch_retarget_animations", (p) => ({ retargeterPath: p.retargeterPath, sourceMesh: p.sourceMesh, targetMesh: p.targetMesh, animPaths: p.animPaths, outputPath: p.outputPath, prefix: p.prefix, suffix: p.suffix, overwrite: p.overwrite })),
+    batch_retarget_animations: bp("Bake validated source AnimSequences onto the target skeleton through an IK Retargeter (RunBatchRetarget), save every output, and roll back newly created outputs if the batch is incomplete or unsavable. Overwrite is rejected. Returns mapping completeness and every unmapped target chain so partial retargets are explicit; pass requireCompleteMapping=true only when the target should have no intentional extra chains. Params: retargeterPath, sourceMesh, targetMesh, animPaths[], outputPath? (default: alongside source), prefix?, suffix? (default _Retargeted), overwrite? (must be false), requireCompleteMapping? (default false) (#701)", "batch_retarget_animations", (p) => ({ retargeterPath: p.retargeterPath, sourceMesh: p.sourceMesh, targetMesh: p.targetMesh, animPaths: p.animPaths, outputPath: p.outputPath, prefix: p.prefix, suffix: p.suffix, overwrite: p.overwrite, requireCompleteMapping: p.requireCompleteMapping })),
     set_anim_blueprint_skeleton: bp("Set target skeleton on AnimBP. Params: assetPath, skeletonPath", "set_anim_blueprint_skeleton"),
     read_bone_track:    bp("Read bone transform samples from AnimSequence. Params: assetPath, boneName, frames?: [int]", "read_bone_track"),
     create_pose_search_database: bp("Create a PoseSearchDatabase asset (motion matching). Params: name, packagePath?, schemaPath?", "create_pose_search_database"),
@@ -336,11 +457,22 @@ export const animationTool: ToolDef = categoryTool(
     targetBone: z.string().optional(),
     virtualBoneName: z.string().optional(),
     retargetRoot: z.string().optional().describe("Retarget root bone name for IK Rig"),
+    rootMotionBone: z.string().min(1).optional().describe("configure_ik_rig: root-motion bone name"),
+    autoSetup: z.enum(["retarget", "full_body"]).optional().describe("configure_ik_rig: optional native rig setup pass"),
+    fullBodyIK: IKRigFullBodySettings.optional().describe("configure_ik_rig: Full Body IK solver and desired goal/effector settings"),
+    exclusions: z.array(IKRigExclusion).max(2_048).optional().describe("configure_ik_rig: desired per-bone solver exclusions"),
     sourceRig: z.string().optional().describe("Source IKRig path for create_ik_retargeter"),
     targetRig: z.string().optional().describe("Target IKRig path for create_ik_retargeter"),
     rigPath: z.string().optional().describe("IK Rig path for set_ik_rig_mesh / set_ik_retargeter_rig (#701/#703)"),
     meshPath: z.string().optional().describe("Skeletal mesh path for set_ik_rig_mesh (#701)"),
     retargeterPath: z.string().optional().describe("IK Retargeter path (#701/#703)"),
+    sourcePreviewMesh: z.string().min(1).optional().describe("configure_ik_retargeter: source preview SkeletalMesh path"),
+    targetPreviewMesh: z.string().min(1).optional().describe("configure_ik_retargeter: target preview SkeletalMesh path"),
+    ensureDefaultOps: z.boolean().optional().describe("configure_ik_retargeter: ensure the complete UE 5.8 default operation stack; defaults true"),
+    autoMapMode: z.enum(["exact", "fuzzy", "clear"]).optional().describe("configure_ik_retargeter: native chain auto-map mode"),
+    forceRemap: z.boolean().optional().describe("configure_ik_retargeter: replace existing mappings during auto-map; defaults false"),
+    chainMappings: z.array(IKRetargetChainMapping).max(10_000).optional().describe("configure_ik_retargeter: explicit target-to-source chain overrides; null or omitted source clears"),
+    pose: IKRetargetPose.optional().describe("configure_ik_retargeter: named source or target pose authoring"),
     side: z.string().optional().describe("source|target for retargeter rig/pose actions (#701/#703)"),
     sourceMesh: z.string().optional().describe("batch_retarget_animations: source skeletal mesh (#701)"),
     targetMesh: z.string().optional().describe("batch_retarget_animations: target skeletal mesh (#701)"),
@@ -348,6 +480,7 @@ export const animationTool: ToolDef = categoryTool(
     prefix: z.string().optional().describe("batch_retarget_animations: output name prefix (#701)"),
     suffix: z.string().optional().describe("batch_retarget_animations: output name suffix (#701)"),
     overwrite: z.boolean().optional().describe("batch_retarget_animations: overwrite existing outputs (#701)"),
+    requireCompleteMapping: z.boolean().optional().describe("batch_retarget_animations: reject any unmapped target chain; default false"),
     outputPath: z.string().optional().describe("batch_retarget_animations: destination folder for baked assets (#701)"),
     autoMapChains: z.boolean().optional().describe("create_ik_retargeter: assign rigs to ops + AutoMapChains after creation (default true)"),
     onConflict: z.string().optional().describe("Conflict policy. Existing asset actions use skip|error|overwrite; Control Rig begin/bake use skip|error and never overwrite."),
@@ -369,12 +502,7 @@ export const animationTool: ToolDef = categoryTool(
     createLink: z.literal(false).optional().describe("bake_control_rig_edit: Sequencer links are not supported yet; omit or pass false."),
     loop: z.boolean().optional().describe("analyze_animation: include end-to-start loop continuity metrics."),
     outputDirectory: z.string().optional().describe("analyze_animation: optional directory under Project/Saved/Codex/AnimationQA for deterministic artifacts; relative values resolve under that root."),
-    chains: z.array(z.object({
-      name: z.string(),
-      startBone: z.string(),
-      endBone: z.string(),
-      goal: z.string().optional(),
-    })).optional().describe("IK retarget chains for create_ik_rig"),
+    chains: z.array(IKRigAuthoringChain).max(256).optional().describe("IK retarget chains for create_ik_rig or configure_ik_rig"),
     keyframes: z.array(z.object({
       frame: z.number(),
       location: Vec3.optional(),

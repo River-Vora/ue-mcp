@@ -1,6 +1,6 @@
 ---
 name: ue-mcp-animation
-description: Use when creating, modifying, retargeting, rigging, or validating skeletal animation through UE-MCP. Covers the native UE 5.8 Control Rig begin/read/apply/bake loop, per-rig anatomical and mirrored-axis discovery, quaternion keying, deterministic bone analysis, and exact fixed-frame Unreal capture.
+description: Use when creating, modifying, retargeting, rigging, constraining, or validating skeletal animation through UE-MCP. Covers native UE 5.8 IK Rig and Retargeter authoring, the Control Rig begin/read/apply/bake loop, generic contact locks, per-rig anatomical and mirrored-axis discovery, quaternion keying, deterministic bone analysis, and exact fixed-frame Unreal capture.
 ---
 
 # UE-MCP native animation workflow
@@ -28,6 +28,13 @@ right-side pose.
    begin production work on an unverified or merely name-compatible rig.
 3. Resolve the source AnimSequence, mesh, skeleton, verified Control Rig, and
    frame rate.
+   When IK/retarget assets are part of the job, use `read_ik_rig` and
+   `read_ik_retargeter` first. On UE 5.8 use `configure_ik_rig` for validated
+   roots, ancestry-valid chains, concrete goals, solver connections and
+   effectors; use `configure_ik_retargeter` for the default op stack, source and
+   target rig assignment to every op, auto/manual mappings, preview meshes, and
+   a named retarget pose. Read both assets back after saving. A chain's goal
+   string is not proof that a goal or solver exists.
 4. Create a versioned session with `begin_control_rig_edit`. Use a unique
    LevelSequence path and `bindingTag`, an end-exclusive frame range, and
    `onConflict="error"`. Use `rigMode="asset"` for a project rig or `"fk"` only
@@ -59,6 +66,20 @@ right-side pose.
    editing them. If the source bake has dense keys, key every affected frame;
    sparse keys will not replace the intervening source motion. Apply related
    controls and scalar switches in one transaction.
+   For a fixed contact, use `contact_lock` in the same operation batch. Supply a
+   keyable translatable driver, optional driven bone/socket, inclusive frame
+   range, component-space target, optional pole/stabilizer controls, and
+   position/rotation tolerances. The session must contain one source animation
+   section. The bridge samples it per frame, writes dense smooth-edged keys, and
+   transactionally reads back the driver and stabilizers. A driven bone/socket
+   returns `verification=bake_and_analyze_required`; bake, analyze every
+   constrained frame, and reject the output if its residual misses the motion's
+   acceptance tolerance. FK contacts whose translation is ignored by skeleton
+   retargeting use a local rotation-chain solve and report
+   `solver=fk_rotation_chain`; that path requires a driven bone and does not
+   accept stabilizers. Position-only locks leave the driven control orientation
+   unkeyed. The bridge does not guess the driver, pole, foot roll, friction,
+   joint limits, or pelvis compensation.
 10. Read back the edited frames in local and global space. Reject elbow flips,
    discontinuities, wrong forearm direction, wrong palm normal, or unexpected
    changes outside the edited chain before baking.
@@ -100,11 +121,12 @@ For an exact native frame capture, without Computer Use or Python:
    `editor(action="capture_screenshot", target="window")`.
 5. Capture start, entry, both extrema, exit, and end with a consistent view.
 
-Keep four versioned V&V fixtures: a from-scratch gesture, a retarget between
-known skeletons, a copied animation modified through IK plus its pole target,
-and an edge-case pack covering mirrored/negative scale, dense keys,
-additive-source rejection/flattening, layered sessions, scalar enums, root
-motion, loops, and short clips.
+Keep versioned V&V fixtures for a from-scratch gesture, full-body IK authoring,
+a retarget between known skeletons, a copied animation modified through IK plus
+its pole target, a bone/socket contact with an unrelated simultaneous edit, and
+edge cases covering mirrored/negative scale, dense keys, additive-source
+rejection/flattening, layered sessions, scalar enums, root motion, loops, and
+short clips.
 
 The loop generalizes beyond humanoid arms. Re-discover the rig mapping, then
 express legs as hip/knee-pole/foot/contact constraints; spine and head as
@@ -115,10 +137,12 @@ mirrored scale, limits, and motion constraints are rig-specific.
 
 ## Compatibility and endpoint rule
 
-The four Control Rig session actions are UE 5.8 only and return
-`unsupported_engine_version` on older engines; do not invent a raw-bone
-fallback. `analyze_animation` is cross-version through the native APIs in the
-compiled engine. See the public
+The four Control Rig session actions, `configure_ik_rig`,
+`configure_ik_retargeter`, and `contact_lock` are UE 5.8 only and return
+`unsupported_engine_version` on older engines; do not invent a reflected or
+raw-bone fallback. Legacy IK create/read behavior is unchanged.
+`analyze_animation` is cross-version through the native APIs in the compiled
+engine. See the public
 [Native Control Rig Animation](https://ue-mcp.com/docs/control-rig-animation/)
 guide for full call shapes and fixture guidance.
 
