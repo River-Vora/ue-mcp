@@ -2,7 +2,7 @@
 
 This page lists ue-mcp's own category tools and actions. For the official Unreal 5.8 tools that ue-mcp wraps (surfaced inside these same categories), see [Native Tools](native-tools.md).
 
-UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->783+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
+UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering **<!-- count:actions -->790+<!-- /count --> actions**, plus a `flow` tool for running multi-step YAML workflows. Every category tool takes an `action` parameter that selects the operation, plus action-specific parameters.
 
 !!! tip "First call in any session"
     Start with `project(action="get_status")` to check the connection, then `level(action="get_outliner")` or `asset(action="list")` to explore.
@@ -809,6 +809,9 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `list_bt_tasks` | Inventory BTTask nodes with name, class, parent path and FilterClass, across one asset or a directory sweep. Params: `assetPath?, directory?, recursive?, taskClass?, filterClassOnly?, limit? (#940)` |
 | `set_bt_node_property` | Scoped write onto one owned BT node subobject, selected by nodePath, nodeName, nodeClass or kind, using a dotted/indexed property path. Every target is read back and reported with its previous value. Params: `assetPath, nodePath?, nodeName?, nodeClass?, kind?, property?, value?, properties? (#919)` |
 | `set_bt_task_property` | Write a property on one BT task node, FilterClass included. Same selector and dotted-path rules as set_bt_node_property. Params: `assetPath, nodePath?, nodeName?, nodeClass?, property?, value?, properties? (#940)` |
+| `list_bt_graph_nodes` | List the EDITOR-GRAPH nodes the authoring actions address: guid (the primary key), category, class, parentGuid, indexInParent, childGuids in execution order, decoratorGuids, serviceGuids, position, and the runtimePath that cross-references the read surface's address. Params: `assetPath (#889)` |
+| `add_bt_node` | Add a composite, task, decorator or service to a BehaviorTree's editor graph and recompile it into the runnable tree. Decorators and services attach as subnodes rather than children. index places the node among its siblings, which is the execution order a Selector or Sequence follows. Params: `assetPath, nodeClass, nodeCategory?, parent?, index?, nodeName?, properties?, blackboardKeys? (#889)` |
+| `remove_bt_node` | Delete a node from a BehaviorTree's editor graph and recompile. A composite takes its branch with it. Params: `assetPath, node (#889)` |
 | `create_blackboard` | Create Blackboard. Params: `name, packagePath?` |
 | `add_blackboard_key` | Add a typed key to a Blackboard asset. baseClass types an Object/Class key - Behaviour Tree nodes filter on it, so an untyped key silently will not bind. For keyType=Enum pass the enum via enumType (or baseClass). Params: `blackboardPath, keyName, keyType (Bool\|Int\|Float\|String\|Name\|Vector\|Rotator\|Object\|Class\|Enum), baseClass? (e.g. /Script/Engine.Actor), enumType? (#250)` |
 | `remove_blackboard_key` | Remove a key from a Blackboard asset by name. Idempotent. Params: `blackboardPath, keyName (#469)` |

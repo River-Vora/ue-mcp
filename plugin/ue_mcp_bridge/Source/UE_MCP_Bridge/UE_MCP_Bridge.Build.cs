@@ -30,6 +30,17 @@ public class UE_MCP_Bridge : ModuleRules
 			new string[]
 			{
 				"AIModule",
+				// #889: authoring a BehaviorTree means driving UBehaviorTreeGraph
+				// and its node classes, then calling UpdateAsset to compile the
+				// graph into the runnable UBTCompositeNode tree. That orchestration
+				// lives only in BehaviorTreeEditor (with FGraphNodeClassData and
+				// UAIGraphNode::AddSubNode coming from AIGraph beneath it) and is
+				// not exposed to script, so no reflected runtime API can stand in
+				// for it. Both are editor modules, which this plugin already is:
+				// its .uplugin declares Type "Editor" and UnrealEd, UMGEditor and
+				// MaterialEditor are already linked the same way.
+				"AIGraph",
+				"BehaviorTreeEditor",
 				"MessageLog",
 				"AnimGraph",
 				"AnimationEditor",
@@ -142,3 +153,5 @@ public class UE_MCP_Bridge : ModuleRules
 // Rescan trigger: round 2 added handler translation units.
 // Round 3: Private/Handlers/GameplayHandlers_BehaviorTree.cpp and
 // Private/Tests/BehaviorTreeNodeTests.cpp.
+// Round 4: Private/Handlers/GameplayHandlers_BTAuthoring.cpp and
+// Private/Tests/BehaviorTreeAuthoringTests.cpp.
