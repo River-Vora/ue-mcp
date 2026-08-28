@@ -20,6 +20,15 @@ export const gasTool: ToolDef = categoryTool(
     get_attribute:       bp("Read gameplay attribute base + current values on a live actor's ASC. Omit attribute to list all. Params: actorLabel, attribute?, world?", "get_attribute"),
     init_asc:            bp("Initialize a live actor's ASC (InitAbilityActorInfo) and optionally instantiate an AttributeSet so attributes are live - the runtime setup step for testing a bridge-authored GAS actor. Params: actorLabel, attributeSet? (content path or class name), world?", "init_asc"),
     get_asc_state:       bp("Introspect a live actor's ASC: granted ability specs (class, level, inputID, active, dynamicTags) + owned gameplay tags. Params: actorLabel, world? (auto|pie|editor) (#587)", "get_asc_state", (p) => ({ actorLabel: p.actorLabel, world: p.world })),
+    // #956: get_attribute / set_attribute above only see attribute sets the ASC
+    // has already registered, and an actor spawned into the editor world has
+    // none: the DSO scan that registers them runs in InitializeComponent, which
+    // a world that has not begun play never reaches. These two name the set,
+    // resolve the instance through the ASC (never the actor's own pointer, which
+    // is not proof the ASC knows about it), and register the actor's own
+    // subobject when the ASC has not.
+    get_live_attribute_value: bp("Read the live value of one FGameplayAttributeData on the attribute set instance actually REGISTERED on an actor's AbilitySystemComponent - equivalent to ASC->GetSet<T>(), not the actor's own subobject pointer. Works in the editor world, where no set is registered yet, by first registering the actor's own sets the way BeginPlay would (set registerOwnerSets=false for a strict read). Returns currentValue and baseValue off the instance plus the aggregator's view of both, and the instance's object path so you can prove which object was read. Params: actorLabel (label, name or path), attributeSet (content path or class name), attribute (property name, or Set.Property), registerOwnerSets?, world? (#956)", "get_live_attribute_value", (p) => ({ actorLabel: p.actorLabel ?? p.actorPath, attributeSet: p.attributeSet, attribute: p.attribute, registerOwnerSets: p.registerOwnerSets, world: p.world })),
+    set_live_attribute_value: bp("Write the live value of one FGameplayAttributeData on the REGISTERED attribute set instance on an actor's AbilitySystemComponent. valueType=\"current\" (default) writes the attribute data in place, which is what staging a mid-combat state needs; valueType=\"base\" writes through the ASC so the aggregator recomputes the current value, which is what a durable change needs. The set's PreAttributeChange may clamp, so the result reports what was actually stored alongside the previous values and the instance's object path. Params: actorLabel (label, name or path), attributeSet, attribute, value, valueType?, registerOwnerSets?, world? (#956)", "set_live_attribute_value", (p) => ({ actorLabel: p.actorLabel ?? p.actorPath, attributeSet: p.attributeSet, attribute: p.attribute, value: p.value, valueType: p.valueType, registerOwnerSets: p.registerOwnerSets, world: p.world })),
   },
   undefined,
   {
@@ -52,5 +61,8 @@ export const gasTool: ToolDef = categoryTool(
     world: z.string().optional().describe("Runtime world scope: auto (default) | pie | editor"),
     attributeSet: z.string().optional().describe("set_asc_defaults / init_asc: AttributeSet content path or class name"),
     initDataTable: z.string().optional().describe("set_asc_defaults: optional DataTable of starting attribute values"),
+    actorPath: z.string().optional().describe("get/set_live_attribute_value: full actor object path, when a label is ambiguous or absent (#956)"),
+    valueType: z.enum(["current", "base"]).optional().describe("set_live_attribute_value: \"current\" (default) writes the attribute data in place; \"base\" writes through the ASC aggregator (#956)"),
+    registerOwnerSets: z.boolean().optional().describe("get/set_live_attribute_value: register the actor's own attribute set subobjects on its ASC when it has none, the way BeginPlay would. Default true; false makes the call a strict read of what is already registered (#956)"),
   },
 );

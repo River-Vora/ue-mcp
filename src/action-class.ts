@@ -197,6 +197,12 @@ const OVERRIDES: Readonly<Record<string, ActionClass>> = {
   "asset.reindex_fts": "mutate",
   // Posts to a public issue tracker.
   "feedback.submit": "mutate",
+  // #956: reads an attribute value, but by default it first registers the
+  // actor's own attribute sets on its AbilitySystemComponent when nothing is
+  // registered yet, which is a change to the addressed editor's live world.
+  // The verb says read; what it can do says mutate, and the gate follows what
+  // it can do.
+  "gas.get_live_attribute_value": "mutate",
 };
 
 /** Split `category.action`, tolerating an action name that contains a dot. */

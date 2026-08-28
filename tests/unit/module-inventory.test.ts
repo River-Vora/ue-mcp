@@ -58,6 +58,7 @@ const PER_SESSION: Record<string, string> = {
   "privacy-scrub.ts": "Redacts the other registered roots and session names.",
   "feedback-routing.ts": "Routes using the addressed session's plugin set.",
   "feedback-deferred.ts": "Deferred entries record the editor they came from and are filtered by it.",
+  "feedback-fallback.ts": "Writes the saved report into the same per-editor deferred store, tagged with the submitting project.",
   "user-state.ts": "Keyed by absolute project root: installed hooks, and the per-project feedback mode.",
   "mcp-client-config.ts": "Writes the project positionals a server is started with.",
   "doctor.ts": "Reports every project the configured invocation names.",
