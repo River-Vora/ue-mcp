@@ -893,13 +893,18 @@ TSharedPtr<FJsonValue> FGameplayHandlers::CreateStateTree(const TSharedPtr<FJson
 TSharedPtr<FJsonValue> FGameplayHandlers::GetStateTreeRuntime(const TSharedPtr<FJsonObject>& Params)
 {
 	FString ActorLabel;
-	if (auto Err = RequireString(Params, TEXT("actorLabel"), ActorLabel)) return Err;
+	if (auto Err = RequireStringAlt(Params, TEXT("actorLabel"), TEXT("actorPath"), ActorLabel)) return Err;
 	const FString WorldScope = OptionalString(Params, TEXT("world"), TEXT("pie"));
 	UWorld* World = ResolveWorldFromParams(Params, *WorldScope);
 	if (!World) return MCPError(FString::Printf(TEXT("World not available for scope '%s'"), *WorldScope));
 
-	AActor* Actor = FindActorByLabelNameOrPath(World, ActorLabel);
-	if (!Actor) return MCPError(FString::Printf(TEXT("Actor not found: %s"), *ActorLabel));
+	FMCPActorSelector ActorSel;
+	ActorSel.Match = EMCPActorMatch::LabelNameOrPath;
+	ActorSel.WorldLabel = World->IsGameWorld() ? TEXT("PIE") : TEXT("editor");
+	TSharedPtr<FJsonValue> ActorErr;
+	AActor* Actor = MCPResolveActor(World, Params, ActorErr, ActorSel);
+	if (!Actor) return ActorErr;
+	ActorLabel = Actor->GetActorLabel();
 
 	// Find a component that carries StateTree runtime data (by having an
 	// InstanceData property of type FStateTreeInstanceData + a StateTreeRef).
@@ -1248,7 +1253,18 @@ TSharedPtr<FJsonValue> FGameplayHandlers::FindNavPath(const TSharedPtr<FJsonObje
 	// matching navigation filter / agent.
 	AActor* Context = nullptr;
 	FString ContextLabel = OptionalString(Params, TEXT("pathfindingContext"));
-	if (!ContextLabel.IsEmpty()) Context = FindActorByLabel(World, ContextLabel);
+	if (!ContextLabel.IsEmpty() || Params->HasField(TEXT("pathfindingContextPath")))
+	{
+		// #983: the context actor decides which navigation filter and agent
+		// answer the query, so picking the wrong namesake changes the path.
+		FMCPActorSelector ContextSel;
+		ContextSel.LabelKey = TEXT("pathfindingContext");
+		ContextSel.PathKey = TEXT("pathfindingContextPath");
+		ContextSel.Match = EMCPActorMatch::LabelNameOrPath;
+		TSharedPtr<FJsonValue> ContextErr;
+		Context = MCPResolveActor(World, Params, ContextErr, ContextSel);
+		if (!Context && MCPIsAmbiguousActorError(ContextErr)) return ContextErr;
+	}
 
 	UNavigationPath* Path = NavSys->FindPathToLocationSynchronously(World, Start, End, Context);
 	auto Result = MCPSuccess();

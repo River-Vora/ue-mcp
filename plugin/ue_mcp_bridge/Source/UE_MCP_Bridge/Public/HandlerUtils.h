@@ -628,37 +628,12 @@ inline bool MCPIsAmbiguousActorError(const TSharedPtr<FJsonValue>& Error)
 	return Obj.IsValid() && Obj->TryGetBoolField(TEXT("ambiguous"), bAmbiguous) && bAmbiguous;
 }
 
-// The three pre-#983 finders, now shims over MCPCollectActorsByToken so there
-// is one search in the plugin while the call sites move across to
-// MCPResolveActor. They still answer with the first match on a duplicate
-// label, which is the behaviour #983 is removing, so nothing new may call
-// them: they are deleted with the last converted call site.
-inline AActor* FindActorByLabel(UWorld* World, const FString& Label)
-{
-	TArray<AActor*> Matches;
-	MCPCollectActorsByToken(World, Label, EMCPActorMatch::Label, Matches);
-	return Matches.Num() > 0 ? Matches[0] : nullptr;
-}
-
-inline AActor* FindActorByLabelOrName(UWorld* World, const FString& LabelOrName)
-{
-	TArray<AActor*> Matches;
-	MCPCollectActorsByToken(World, LabelOrName, EMCPActorMatch::LabelOrName, Matches);
-	return Matches.Num() > 0 ? Matches[0] : nullptr;
-}
-
-inline AActor* FindActorByLabelOrPath(UWorld* World, const FString& Label, const FString& Path)
-{
-	if (AActor* ByPath = MCPFindActorByPath(World, Path)) return ByPath;
-	return FindActorByLabel(World, Label);
-}
-
-inline AActor* FindActorByLabelNameOrPath(UWorld* World, const FString& Token)
-{
-	TArray<AActor*> Matches;
-	MCPCollectActorsByToken(World, Token, EMCPActorMatch::LabelNameOrPath, Matches);
-	return Matches.Num() > 0 ? Matches[0] : nullptr;
-}
+// FindActorByLabel, FindActorByLabelOrName, FindActorByLabelOrPath and
+// FindActorByLabelNameOrPath are gone. They each answered a duplicate label
+// with the first match the actor iterator produced, which is the silent wrong
+// write #983 reported, and four spellings of one search is how the rules drift
+// apart. Everything goes through MCPResolveActor, or MCPCollectActorsByToken
+// where the plural answer is the correct one.
 
 /** Build the "no such actor" message for a failed label/name/path lookup.
  *  Names what was searched and offers the labels that contain the token, so a
