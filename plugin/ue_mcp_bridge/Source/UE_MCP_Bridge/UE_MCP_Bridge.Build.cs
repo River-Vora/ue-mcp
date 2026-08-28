@@ -21,6 +21,8 @@ public class UE_MCP_Bridge : ModuleRules
 	// Private/Handlers/AnimationHandlers_IKRetargeterAuthoring.cpp plus
 	// Private/Tests/AnimationControlRigTimelineTests.cpp: same reason.
 	// Private/Tests/DataTableRowWriteTests.cpp: same reason.
+	// Private/Handlers/EditorHandlers_RuntimeVisibility.cpp and
+	// Private/Tests/RuntimeVisibilityTests.cpp: same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
