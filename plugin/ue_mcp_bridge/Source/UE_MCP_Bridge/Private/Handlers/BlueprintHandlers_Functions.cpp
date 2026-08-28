@@ -13,6 +13,10 @@
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
+// #894: an animation layer override must be created as an AnimationGraph on
+// the animation schema, not as a K2 function graph.
+#include "AnimationGraph.h"
+#include "AnimationGraphSchema.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_EditablePinBase.h"
 #include "K2Node_CustomEvent.h"
@@ -850,12 +854,55 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::OverrideFunction(const TSharedPtr<FJs
 		return MCPResult(Result);
 	}
 
+	// #894: an animation layer override has to be an AnimationGraph. Creating a
+	// plain K2 function graph for one produces a graph the anim compiler never
+	// evaluates, so the override binds to nothing and the layer is inert while
+	// every read of the Blueprint says the override is there.
+	//
+	// The declaration is the authority on the graph's type, so mirror it rather
+	// than keeping a list of which functions happen to be layers: find the graph
+	// the override function was declared in and reuse its graph class and
+	// schema. One rule covers a layer declared on an Animation Layer Interface
+	// and one inherited from a parent Anim Blueprint, and it stays correct if
+	// Epic adds another graph-backed override kind.
+	//
+	// Only an animation graph is mirrored, and only into a Blueprint that
+	// supports anim layers, so an ordinary function override cannot change
+	// shape because of this.
+	TSubclassOf<UEdGraph> GraphClass = UEdGraph::StaticClass();
+	TSubclassOf<UEdGraphSchema> SchemaClass = UEdGraphSchema_K2::StaticClass();
+	FString MirroredFromGraph;
+	if (Blueprint->SupportsAnimLayers())
+	{
+		if (UBlueprint* DeclaringBlueprint = UBlueprint::GetBlueprintFromClass(OverrideFuncClass))
+		{
+			for (UEdGraph* SourceGraph : DeclaringBlueprint->FunctionGraphs)
+			{
+				if (!SourceGraph || SourceGraph->GetFName() != FuncName) continue;
+				if (SourceGraph->IsA<UAnimationGraph>())
+				{
+					GraphClass = SourceGraph->GetClass();
+					MirroredFromGraph = SourceGraph->GetPathName();
+					if (UClass* SourceSchema = SourceGraph->Schema.Get())
+					{
+						SchemaClass = SourceSchema;
+					}
+					else
+					{
+						SchemaClass = UAnimationGraphSchema::StaticClass();
+					}
+				}
+				break;
+			}
+		}
+	}
+
 	// Function-form override: create the graph seeded from the override class so
 	// the entry/result terminators carry the base function's exact signature.
 	// (This is the fix for #688 - create_function produced a blank graph that
 	// never bound as the override.)
 	UEdGraph* NewGraph = FBlueprintEditorUtils::CreateNewGraph(
-		Blueprint, FuncName, UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
+		Blueprint, FuncName, GraphClass, SchemaClass);
 	if (!NewGraph)
 	{
 		return MCPError(FString::Printf(TEXT("Failed to create override graph: %s"), *FunctionName));
@@ -875,6 +922,19 @@ TSharedPtr<FJsonValue> FBlueprintHandlers::OverrideFunction(const TSharedPtr<FJs
 	Result->SetStringField(TEXT("graphName"), NewGraph->GetName());
 	Result->SetStringField(TEXT("sourceClass"), OverrideFuncClass->GetPathName());
 	Result->SetStringField(TEXT("source"), Source);
+	// #894: report the graph's actual type. An anim layer override that came
+	// back as an EdGraph on the K2 schema was the whole bug, and it was
+	// invisible from the response.
+	Result->SetStringField(TEXT("graphClass"), NewGraph->GetClass()->GetName());
+	if (UClass* AppliedSchema = NewGraph->Schema.Get())
+	{
+		Result->SetStringField(TEXT("schemaClass"), AppliedSchema->GetName());
+	}
+	if (!MirroredFromGraph.IsEmpty())
+	{
+		Result->SetBoolField(TEXT("animationGraph"), true);
+		Result->SetStringField(TEXT("mirroredFromGraph"), MirroredFromGraph);
+	}
 
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
 	Payload->SetStringField(TEXT("path"), AssetPath);
