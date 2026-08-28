@@ -800,7 +800,15 @@ inline AActor* MCPResolveActor(
  *  can return directly (or an MCPError when OnConflict == "error"). When
  *  Label is empty or no match exists, returns an unset shared pointer so the
  *  caller proceeds to spawn. Mirrors MCPCheckAssetExists's contract for
- *  in-world actors. */
+ *  in-world actors.
+ *
+ *  #983: this asks "does this label already name something", so several
+ *  matches is an answer rather than a refusal, and refusing here would break
+ *  a rerun of a spawn that is meant to be idempotent. But it hands back an
+ *  actorPath the caller may then write to, so it must not be an arbitrary
+ *  one: the search is the shared, path-sorted one, and when the label names
+ *  several actors the result says so and lists them all instead of presenting
+ *  one as though it were the only. */
 inline TSharedPtr<FJsonValue> MCPCheckActorLabelExists(
 	UWorld* World,
 	const FString& Label,
@@ -808,22 +816,37 @@ inline TSharedPtr<FJsonValue> MCPCheckActorLabelExists(
 	const FString& FriendlyType = TEXT("Actor"))
 {
 	if (!World || Label.IsEmpty()) return TSharedPtr<FJsonValue>();
-	for (TActorIterator<AActor> It(World); It; ++It)
+	TArray<AActor*> Matches;
+	MCPCollectActorsByToken(World, Label, EMCPActorMatch::Label, Matches);
+	if (Matches.Num() == 0) return TSharedPtr<FJsonValue>();
+
+	if (OnConflict == TEXT("error"))
 	{
-		if (It->GetActorLabel() == Label)
-		{
-			if (OnConflict == TEXT("error"))
-			{
-				return MCPError(FString::Printf(TEXT("%s '%s' already exists"), *FriendlyType, *Label));
-			}
-			auto Existing = MCPSuccess();
-			MCPSetExisted(Existing);
-			Existing->SetStringField(TEXT("actorLabel"), Label);
-			Existing->SetStringField(TEXT("actorPath"), It->GetPathName());
-			return MCPResult(Existing);
-		}
+		return MCPError(FString::Printf(TEXT("%s '%s' already exists"), *FriendlyType, *Label));
 	}
-	return TSharedPtr<FJsonValue>();
+
+	auto Existing = MCPSuccess();
+	MCPSetExisted(Existing);
+	Existing->SetStringField(TEXT("actorLabel"), Label);
+	Existing->SetStringField(TEXT("actorPath"), Matches[0]->GetPathName());
+	Existing->SetNumberField(TEXT("existingCount"), Matches.Num());
+	if (Matches.Num() > 1)
+	{
+		// Deliberately NOT the 'ambiguous' key: that one marks a refusal, and
+		// this is a success. A consumer branching on 'ambiguous' must not read
+		// an idempotent no-op as a call that did nothing because it refused.
+		Existing->SetBoolField(TEXT("labelIsAmbiguous"), true);
+		TArray<TSharedPtr<FJsonValue>> Rows;
+		for (AActor* Match : Matches)
+		{
+			Rows.Add(MakeShared<FJsonValueObject>(MCPDescribeActorCandidate(Match)));
+		}
+		Existing->SetArrayField(TEXT("candidates"), Rows);
+		Existing->SetStringField(TEXT("note"), FString::Printf(
+			TEXT("%d actors already carry the label '%s'. actorPath names the first by object path; address any of them with the actorPath from candidates."),
+			Matches.Num(), *Label));
+	}
+	return MCPResult(Existing);
 }
 
 /** Load a Blueprint by path and return its CDO cast to T. Returns nullptr
