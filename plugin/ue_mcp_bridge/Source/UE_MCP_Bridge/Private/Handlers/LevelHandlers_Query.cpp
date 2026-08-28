@@ -25,6 +25,7 @@
 #include "LevelHandlers.h"
 
 #include "HandlerRegistry.h"
+#include "HandlerQuery.h"
 #include "HandlerUtils.h"
 #include "LevelHandlers_Internal.h"
 
@@ -115,19 +116,6 @@ namespace
 		}
 	}
 
-	/** "EComponentMobility::Movable" and "EComponentMobility.Movable" both
-	 *  reduce to "Movable". UEnum renders namespaced enums either way
-	 *  depending on how they were declared. */
-	FString MCPQueryShortEnumName(const FString& Raw)
-	{
-		int32 Index = INDEX_NONE;
-		if (Raw.FindLastChar(TEXT(':'), Index) || Raw.FindLastChar(TEXT('.'), Index))
-		{
-			return Raw.RightChop(Index + 1);
-		}
-		return Raw;
-	}
-
 	// ── JSON shaping ────────────────────────────────────────────────────────
 
 	TSharedPtr<FJsonObject> MCPQueryVec(const FVector& V)
@@ -146,247 +134,6 @@ namespace
 		Obj->SetNumberField(TEXT("yaw"), R.Yaw);
 		Obj->SetNumberField(TEXT("roll"), R.Roll);
 		return Obj;
-	}
-
-	/**
-	 * A UPROPERTY as typed JSON rather than as ExportText.
-	 *
-	 * Typed matters: a predicate like `props.CullDistance > 0` has to compare
-	 * numbers, and a string "0.000000" is not a number. Anything without a
-	 * natural JSON shape still falls back to its exported text so the value is
-	 * never simply lost.
-	 */
-	TSharedPtr<FJsonValue> MCPQueryPropertyToJson(FProperty* Property, const void* ValuePtr)
-	{
-		if (!Property || !ValuePtr)
-		{
-			return MakeShared<FJsonValueNull>();
-		}
-
-		if (const FBoolProperty* BoolProp = CastField<FBoolProperty>(Property))
-		{
-			return MakeShared<FJsonValueBoolean>(BoolProp->GetPropertyValue(ValuePtr));
-		}
-		if (const FEnumProperty* EnumProp = CastField<FEnumProperty>(Property))
-		{
-			const int64 Value = EnumProp->GetUnderlyingProperty()->GetSignedIntPropertyValue(ValuePtr);
-			UEnum* Enum = EnumProp->GetEnum();
-			return MakeShared<FJsonValueString>(
-				Enum ? MCPQueryShortEnumName(Enum->GetNameStringByValue(Value)) : LexToString(Value));
-		}
-		if (const FNumericProperty* NumericProp = CastField<FNumericProperty>(Property))
-		{
-			if (UEnum* Enum = NumericProp->GetIntPropertyEnum())
-			{
-				const int64 Value = NumericProp->GetSignedIntPropertyValue(ValuePtr);
-				return MakeShared<FJsonValueString>(MCPQueryShortEnumName(Enum->GetNameStringByValue(Value)));
-			}
-			if (NumericProp->IsFloatingPoint())
-			{
-				return MakeShared<FJsonValueNumber>(NumericProp->GetFloatingPointPropertyValue(ValuePtr));
-			}
-			return MakeShared<FJsonValueNumber>(
-				static_cast<double>(NumericProp->GetSignedIntPropertyValue(ValuePtr)));
-		}
-		if (const FStrProperty* StrProp = CastField<FStrProperty>(Property))
-		{
-			return MakeShared<FJsonValueString>(StrProp->GetPropertyValue(ValuePtr));
-		}
-		if (const FNameProperty* NameProp = CastField<FNameProperty>(Property))
-		{
-			return MakeShared<FJsonValueString>(NameProp->GetPropertyValue(ValuePtr).ToString());
-		}
-		if (const FObjectPropertyBase* ObjectProp = CastField<FObjectPropertyBase>(Property))
-		{
-			UObject* Value = ObjectProp->GetObjectPropertyValue(ValuePtr);
-			if (!Value)
-			{
-				return MakeShared<FJsonValueNull>();
-			}
-			return MakeShared<FJsonValueString>(Value->GetPathName());
-		}
-		if (const FSoftObjectProperty* SoftProp = CastField<FSoftObjectProperty>(Property))
-		{
-			const FSoftObjectPtr& Value = SoftProp->GetPropertyValue(ValuePtr);
-			const FString Path = Value.ToString();
-			if (Path.IsEmpty())
-			{
-				return MakeShared<FJsonValueNull>();
-			}
-			return MakeShared<FJsonValueString>(Path);
-		}
-
-		FString Exported;
-		Property->ExportText_Direct(Exported, ValuePtr, ValuePtr, nullptr, PPF_None);
-		return MakeShared<FJsonValueString>(Exported);
-	}
-
-	/** Resolve a dotted field path such as `shadow.effectiveCastShadow` inside
-	 *  a row. Returns an invalid pointer when the path does not exist, which is
-	 *  what the `exists` / `notExists` operators test. */
-	TSharedPtr<FJsonValue> MCPQueryResolvePath(const TSharedPtr<FJsonObject>& Row, const FString& Path)
-	{
-		if (!Row.IsValid() || Path.IsEmpty())
-		{
-			return nullptr;
-		}
-
-		TArray<FString> Segments;
-		Path.ParseIntoArray(Segments, TEXT("."), true);
-		TSharedPtr<FJsonObject> Current = Row;
-		for (int32 Index = 0; Index < Segments.Num(); ++Index)
-		{
-			if (!Current.IsValid())
-			{
-				return nullptr;
-			}
-			const TSharedPtr<FJsonValue>* Found = Current->Values.Find(Segments[Index]);
-			if (!Found || !Found->IsValid())
-			{
-				return nullptr;
-			}
-			if (Index == Segments.Num() - 1)
-			{
-				return *Found;
-			}
-			if ((*Found)->Type != EJson::Object)
-			{
-				return nullptr;
-			}
-			Current = (*Found)->AsObject();
-		}
-		return nullptr;
-	}
-
-	/** One value rendered as the string a group key or a histogram bucket uses. */
-	FString MCPQueryValueKey(const TSharedPtr<FJsonValue>& Value)
-	{
-		if (!Value.IsValid())
-		{
-			return TEXT("<absent>");
-		}
-		switch (Value->Type)
-		{
-		case EJson::Null:    return TEXT("<null>");
-		case EJson::Boolean: return Value->AsBool() ? TEXT("true") : TEXT("false");
-		case EJson::Number:  return FString::SanitizeFloat(Value->AsNumber());
-		case EJson::String:  return Value->AsString();
-		default:             return TEXT("<complex>");
-		}
-	}
-
-	// ── Predicates ──────────────────────────────────────────────────────────
-
-	struct FMCPQueryPredicate
-	{
-		FString Field;
-		FString Op;
-		TSharedPtr<FJsonValue> Value;
-	};
-
-	bool MCPQueryValuesEqual(const TSharedPtr<FJsonValue>& Left, const TSharedPtr<FJsonValue>& Right)
-	{
-		if (!Left.IsValid() || !Right.IsValid())
-		{
-			return false;
-		}
-		if (Left->Type == EJson::Number && Right->Type == EJson::Number)
-		{
-			return FMath::IsNearlyEqual(Left->AsNumber(), Right->AsNumber(), UE_KINDA_SMALL_NUMBER);
-		}
-		if (Left->Type == EJson::Boolean || Right->Type == EJson::Boolean)
-		{
-			return Left->AsBool() == Right->AsBool();
-		}
-		// Strings compare case-insensitively: an agent that types "movable"
-		// should not silently match nothing, which is the exact shape of the
-		// bug #943 reported against its own client-side filter.
-		return MCPQueryValueKey(Left).Equals(MCPQueryValueKey(Right), ESearchCase::IgnoreCase);
-	}
-
-	bool MCPQueryEvaluate(const FMCPQueryPredicate& Predicate, const TSharedPtr<FJsonObject>& Row)
-	{
-		const TSharedPtr<FJsonValue> Actual = MCPQueryResolvePath(Row, Predicate.Field);
-
-		if (Predicate.Op == TEXT("exists"))    return Actual.IsValid();
-		if (Predicate.Op == TEXT("notExists")) return !Actual.IsValid();
-		if (Predicate.Op == TEXT("isNull"))    return !Actual.IsValid() || Actual->Type == EJson::Null;
-		if (Predicate.Op == TEXT("isNotNull")) return Actual.IsValid() && Actual->Type != EJson::Null;
-		if (Predicate.Op == TEXT("isTrue"))    return Actual.IsValid() && Actual->Type == EJson::Boolean && Actual->AsBool();
-		if (Predicate.Op == TEXT("isFalse"))   return Actual.IsValid() && Actual->Type == EJson::Boolean && !Actual->AsBool();
-
-		if (!Actual.IsValid())
-		{
-			// Every remaining operator compares against a value, and an absent
-			// field has none. `notExists` above is how a caller asks for that.
-			return false;
-		}
-
-		if (Predicate.Op == TEXT("eq")) return MCPQueryValuesEqual(Actual, Predicate.Value);
-		if (Predicate.Op == TEXT("ne")) return !MCPQueryValuesEqual(Actual, Predicate.Value);
-
-		if (Predicate.Op == TEXT("lt") || Predicate.Op == TEXT("lte") ||
-			Predicate.Op == TEXT("gt") || Predicate.Op == TEXT("gte"))
-		{
-			if (Actual->Type != EJson::Number || !Predicate.Value.IsValid() || Predicate.Value->Type != EJson::Number)
-			{
-				return false;
-			}
-			const double A = Actual->AsNumber();
-			const double B = Predicate.Value->AsNumber();
-			if (Predicate.Op == TEXT("lt"))  return A < B;
-			if (Predicate.Op == TEXT("lte")) return A <= B;
-			if (Predicate.Op == TEXT("gt"))  return A > B;
-			return A >= B;
-		}
-
-		if (Predicate.Op == TEXT("contains") || Predicate.Op == TEXT("notContains") ||
-			Predicate.Op == TEXT("startsWith") || Predicate.Op == TEXT("endsWith"))
-		{
-			const FString Haystack = MCPQueryValueKey(Actual);
-			const FString Needle = MCPQueryValueKey(Predicate.Value);
-			if (Predicate.Op == TEXT("contains"))    return Haystack.Contains(Needle, ESearchCase::IgnoreCase);
-			if (Predicate.Op == TEXT("notContains")) return !Haystack.Contains(Needle, ESearchCase::IgnoreCase);
-			if (Predicate.Op == TEXT("startsWith"))  return Haystack.StartsWith(Needle, ESearchCase::IgnoreCase);
-			return Haystack.EndsWith(Needle, ESearchCase::IgnoreCase);
-		}
-
-		if (Predicate.Op == TEXT("in") || Predicate.Op == TEXT("notIn"))
-		{
-			bool bFound = false;
-			if (Predicate.Value.IsValid() && Predicate.Value->Type == EJson::Array)
-			{
-				for (const TSharedPtr<FJsonValue>& Candidate : Predicate.Value->AsArray())
-				{
-					if (MCPQueryValuesEqual(Actual, Candidate))
-					{
-						bFound = true;
-						break;
-					}
-				}
-			}
-			return Predicate.Op == TEXT("in") ? bFound : !bFound;
-		}
-
-		return false;
-	}
-
-	bool MCPQueryIsKnownOp(const FString& Op)
-	{
-		static const TCHAR* const Known[] = {
-			TEXT("eq"), TEXT("ne"), TEXT("lt"), TEXT("lte"), TEXT("gt"), TEXT("gte"),
-			TEXT("contains"), TEXT("notContains"), TEXT("startsWith"), TEXT("endsWith"),
-			TEXT("in"), TEXT("notIn"), TEXT("exists"), TEXT("notExists"),
-			TEXT("isNull"), TEXT("isNotNull"), TEXT("isTrue"), TEXT("isFalse"),
-		};
-		for (const TCHAR* Candidate : Known)
-		{
-			if (Op.Equals(Candidate, ESearchCase::CaseSensitive))
-			{
-				return true;
-			}
-		}
-		return false;
 	}
 
 	// ── Projection ──────────────────────────────────────────────────────────
@@ -470,7 +217,7 @@ namespace
 		{
 			return nullptr;
 		}
-		return MCPQueryPropertyToJson(Property, Property->ContainerPtrToValuePtr<void>(Object));
+		return MCPQuery::PropertyToJson(Property, Property->ContainerPtrToValuePtr<void>(Object));
 	}
 
 	struct FMCPQueryRow
@@ -565,48 +312,23 @@ TSharedPtr<FJsonValue> FLevelHandlers::QueryComponents(const TSharedPtr<FJsonObj
 			TEXT("'propertyNames' exceeds the maximum of %d entries"), MCPQueryMaxProjectedProperties));
 	}
 
-	// Predicates.
-	TArray<FMCPQueryPredicate> Predicates;
+	// Predicates. Parsing and evaluation live in the shared query header, so
+	// this action and asset(bulk_read_properties) cannot drift apart on what
+	// an operator name means.
+	TArray<MCPQuery::FPredicate> Predicates;
 	{
 		const TArray<TSharedPtr<FJsonValue>>* WhereValues = nullptr;
-		if (Params->TryGetArrayField(TEXT("where"), WhereValues) && WhereValues)
+		Params->TryGetArrayField(TEXT("where"), WhereValues);
+		FString ParseError;
+		if (!MCPQuery::ParsePredicates(WhereValues, MCPQueryMaxPredicates, Predicates, ParseError))
 		{
-			if (WhereValues->Num() > MCPQueryMaxPredicates)
-			{
-				return MCPError(FString::Printf(
-					TEXT("'where' exceeds the maximum of %d predicates"), MCPQueryMaxPredicates));
-			}
-			for (int32 Index = 0; Index < WhereValues->Num(); ++Index)
-			{
-				const TSharedPtr<FJsonValue>& Entry = (*WhereValues)[Index];
-				if (!Entry.IsValid() || Entry->Type != EJson::Object)
-				{
-					return MCPError(FString::Printf(TEXT("'where[%d]' must be an object"), Index));
-				}
-				const TSharedPtr<FJsonObject> EntryObject = Entry->AsObject();
-				FMCPQueryPredicate Predicate;
-				if (!EntryObject->TryGetStringField(TEXT("field"), Predicate.Field) || Predicate.Field.IsEmpty())
-				{
-					return MCPError(FString::Printf(TEXT("'where[%d].field' is required"), Index));
-				}
-				Predicate.Op = EntryObject->HasField(TEXT("op"))
-					? EntryObject->GetStringField(TEXT("op"))
-					: FString(TEXT("eq"));
-				if (!MCPQueryIsKnownOp(Predicate.Op))
-				{
-					return MCPError(FString::Printf(
-						TEXT("'where[%d].op' is '%s'. Valid: eq, ne, lt, lte, gt, gte, contains, notContains, startsWith, endsWith, in, notIn, exists, notExists, isNull, isNotNull, isTrue, isFalse"),
-						Index, *Predicate.Op));
-				}
-				const TSharedPtr<FJsonValue>* Value = EntryObject->Values.Find(TEXT("value"));
-				Predicate.Value = Value ? *Value : nullptr;
-				Predicates.Add(MoveTemp(Predicate));
-			}
+			return MCPError(ParseError);
 		}
 	}
+
 	if (bSuspectOnly)
 	{
-		FMCPQueryPredicate Suspect;
+		MCPQuery::FPredicate Suspect;
 		Suspect.Field = TEXT("health.suspect");
 		Suspect.Op = TEXT("isTrue");
 		Predicates.Add(MoveTemp(Suspect));
@@ -645,7 +367,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::QueryComponents(const TSharedPtr<FJsonObj
 			FString Tail;
 			MCPQueryApplyFieldName(Path.Split(TEXT("."), &Head, &Tail) ? Head : Path, Fields);
 		};
-		for (const FMCPQueryPredicate& Predicate : Predicates) EnableGroupNamedBy(Predicate.Field);
+		for (const MCPQuery::FPredicate& Predicate : Predicates) EnableGroupNamedBy(Predicate.Field);
 		for (const FString& CountPath : CountByPaths) EnableGroupNamedBy(CountPath);
 		if (!GroupBy.IsEmpty()) EnableGroupNamedBy(GroupBy);
 	}
@@ -1187,32 +909,15 @@ TSharedPtr<FJsonValue> FLevelHandlers::QueryComponents(const TSharedPtr<FJsonObj
 						continue;
 					}
 					PropsObject->SetField(PropertyName,
-						MCPQueryPropertyToJson(Property, Property->ContainerPtrToValuePtr<void>(Component)));
+						MCPQuery::PropertyToJson(Property, Property->ContainerPtrToValuePtr<void>(Component)));
 				}
 				Row->SetObjectField(TEXT("props"), PropsObject);
 			}
 
 			// ── Predicates, evaluated here rather than in the client ────────
-			if (Predicates.Num() > 0)
+			if (!MCPQuery::EvaluateAll(Predicates, Row, WhereMode == TEXT("all")))
 			{
-				bool bPass = WhereMode == TEXT("all");
-				for (const FMCPQueryPredicate& Predicate : Predicates)
-				{
-					const bool bResult = MCPQueryEvaluate(Predicate, Row);
-					if (WhereMode == TEXT("all"))
-					{
-						if (!bResult) { bPass = false; break; }
-					}
-					else if (bResult)
-					{
-						bPass = true;
-						break;
-					}
-				}
-				if (!bPass)
-				{
-					continue;
-				}
+				continue;
 			}
 
 			++Matched;
@@ -1222,7 +927,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::QueryComponents(const TSharedPtr<FJsonObj
 			// answer dressed up as a total.
 			if (!GroupBy.IsEmpty())
 			{
-				const FString Key = MCPQueryValueKey(MCPQueryResolvePath(Row, GroupBy));
+				const FString Key = MCPQuery::ValueKey(MCPQuery::ResolvePath(Row, GroupBy));
 				if (int32* Existing = GroupCounts.Find(Key))
 				{
 					++(*Existing);
@@ -1251,7 +956,7 @@ TSharedPtr<FJsonValue> FLevelHandlers::QueryComponents(const TSharedPtr<FJsonObj
 			for (const FString& CountPath : CountByPaths)
 			{
 				TMap<FString, int32>& Histogram = CountByHistograms.FindOrAdd(CountPath);
-				const FString Key = MCPQueryValueKey(MCPQueryResolvePath(Row, CountPath));
+				const FString Key = MCPQuery::ValueKey(MCPQuery::ResolvePath(Row, CountPath));
 				if (int32* Existing = Histogram.Find(Key))
 				{
 					++(*Existing);
