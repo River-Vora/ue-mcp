@@ -15,6 +15,9 @@ public class UE_MCP_Bridge : ModuleRules
 	// Private/Handlers/LevelHandlers_InstanceProjection.cpp and
 	// Private/Tests/LevelInstanceProjectionTests.cpp: same reason.
 	// Private/Tests/PackageSaveExtensionTests.cpp: same reason.
+	// Private/Handlers/AnimationHandlers_ControlRigSequencer.cpp and
+	// Private/Handlers/AnimationHandlers_Validation.cpp plus
+	// Private/Tests/AnimationControlRigTimelineTests.cpp: same reason.
 	public UE_MCP_Bridge(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
@@ -56,6 +59,7 @@ public class UE_MCP_Bridge : ModuleRules
 				"ContentBrowser",
 				"ControlRig",
 				"ControlRigDeveloper",
+				"ControlRigEditor",
 				"RigVMDeveloper",
 				"DataValidation",
 				"EditorScriptingUtilities",
@@ -79,6 +83,7 @@ public class UE_MCP_Bridge : ModuleRules
 				"LevelEditor",
 				"LevelSequence",
 				"LevelSequenceEditor",
+				"MainFrame",
 				"MaterialEditor",
 				"MovieScene",
 				"MovieSceneTracks",
