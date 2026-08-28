@@ -101,7 +101,7 @@ const MUTATE_VERBS: ReadonlySet<string> = new Set<string>([
 const READ_VERBS: ReadonlySet<string> = new Set<string>([
   ...READ_PREFIXES,
   "is", "scan", "sample", "health", "diagnose", "compare", "query", "dump",
-  "fetch", "lookup", "enumerate",
+  "fetch", "lookup", "enumerate", "summarize", "measure", "audit",
 ]);
 
 /**

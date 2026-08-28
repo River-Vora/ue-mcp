@@ -63,8 +63,10 @@ export const REGISTERED_HANDLER_TIMEOUT_SECONDS: Readonly<Record<string, number>
   load_actor_descs: 300,
   paint_landscape_layer: 120,
   read_blueprint_graph: 180,
+  refresh_landscape_physical_material_collision: 600,
   run_automation_tests: 300,
   sculpt_landscape: 120,
+  snap_instances_to_surface: 300,
 };
 
 /** What the editor will wait for this method, in ms, or undefined for the default. */
