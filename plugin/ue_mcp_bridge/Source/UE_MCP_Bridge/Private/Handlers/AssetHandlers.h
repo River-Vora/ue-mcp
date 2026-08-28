@@ -32,6 +32,9 @@ private:
 	// #726: create an asset of any concrete UObject class via its registered
 	// factory (or NewObject fallback), not just UDataAsset subclasses.
 	static TSharedPtr<FJsonValue> CreateAssetByClass(const TSharedPtr<FJsonObject>& Params);
+	// A named subobject inside an existing asset's package (#975). Lives in
+	// AssetHandlers_Subobject.cpp.
+	static TSharedPtr<FJsonValue> CreateSubobject(const TSharedPtr<FJsonObject>& Params);
 	static TSharedPtr<FJsonValue> SaveAsset(const TSharedPtr<FJsonObject>& Params);
 	// #429: bulk save of every dirty package - one-shot end-of-workflow flush.
 	static TSharedPtr<FJsonValue> SaveAllDirty(const TSharedPtr<FJsonObject>& Params);

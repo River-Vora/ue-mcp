@@ -162,6 +162,9 @@ void FAssetHandlers::RegisterHandlers(FMCPHandlerRegistry& Registry)
 	// #726: generic create-any-concrete-UObject-class asset (physical materials,
 	// curves, settings objects) - not restricted to UDataAsset subclasses.
 	Registry.RegisterHandler(TEXT("create_asset_by_class"), &CreateAssetByClass);
+	// #975: a named subobject inside an existing asset package, which
+	// create_asset_by_class cannot make because it always creates a package.
+	Registry.RegisterHandler(TEXT("create_subobject"), &CreateSubobject);
 	Registry.RegisterHandler(TEXT("save_asset"), &SaveAsset);
 	Registry.RegisterHandler(TEXT("save_all_dirty"), &SaveAllDirty);
 	Registry.RegisterHandler(TEXT("list_textures"), &ListTextures);
