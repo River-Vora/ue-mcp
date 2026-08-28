@@ -176,48 +176,69 @@ $out = foreach ($p in $procs) {
 // keeps a burst of callers from paying for the same query repeatedly, while
 // staying far below the timescale on which an editor starts or dies.
 const PROCESS_CACHE_MS = 3000;
-let processCache: { at: number; value: EditorProcess[] } | null = null;
+let processCache: { at: number; value: EditorProcess[]; failed: boolean } | null = null;
+
+interface ProcessProbe {
+  processes: EditorProcess[];
+  /**
+   * #965: the probe itself did not run. PowerShell timing out, a policy that
+   * blocks CIM, or `ps` being unavailable all produce an empty list that means
+   * "I could not look", not "there is no editor". The two must never be
+   * reported as the same thing.
+   */
+  failed: boolean;
+}
 
 /**
  * Every UnrealEditor process on this machine, with enough detail to tell an
  * interactive editor for one project apart from a headless shard for another.
  */
 export async function listEditorProcesses(): Promise<EditorProcess[]> {
-  if (processCache && Date.now() - processCache.at < PROCESS_CACHE_MS) {
-    return processCache.value;
-  }
-  const value = await queryEditorProcesses();
-  processCache = { at: Date.now(), value };
-  return value;
+  return (await probeEditorProcesses()).processes;
 }
 
-async function queryEditorProcesses(): Promise<EditorProcess[]> {
+async function probeEditorProcesses(): Promise<ProcessProbe> {
+  if (processCache && Date.now() - processCache.at < PROCESS_CACHE_MS) {
+    return { processes: processCache.value, failed: processCache.failed };
+  }
+  const probe = await queryEditorProcesses();
+  processCache = { at: Date.now(), value: probe.processes, failed: probe.failed };
+  return probe;
+}
+
+async function queryEditorProcesses(): Promise<ProcessProbe> {
   try {
     if (IS_WINDOWS) {
       const raw = await powershell(WINDOWS_PROCESS_SCRIPT, 20000);
       const rows = parseJsonLoose<{ pid: number; cmd: string; responding: boolean; title: string }>(raw);
-      return rows
-        .filter((r) => typeof r?.pid === "number")
-        .map((r) => classify(r.pid, r.cmd ?? "", r.responding !== false, r.title ?? null));
+      return {
+        processes: rows
+          .filter((r) => typeof r?.pid === "number")
+          .map((r) => classify(r.pid, r.cmd ?? "", r.responding !== false, r.title ?? null)),
+        failed: false,
+      };
     }
 
     // POSIX: `ps` gives the full argv, which carries the .uproject and the
     // headless flags. There is no cheap "responding" equivalent, so report
     // true and let the log-staleness signal stand in for a wedge.
     const { stdout } = await execFileAsync("ps", ["-eo", "pid=,args="], { timeout: 10000, maxBuffer: 4 * 1024 * 1024 });
-    return stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => /UnrealEditor/.test(line) && !/\bgrep\b/.test(line))
-      .map((line) => {
-        const space = line.indexOf(" ");
-        const pid = Number(line.slice(0, space));
-        return classify(pid, line.slice(space + 1), true, null);
-      })
-      .filter((p) => Number.isFinite(p.pid));
+    return {
+      processes: stdout
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => /UnrealEditor/.test(line) && !/\bgrep\b/.test(line))
+        .map((line) => {
+          const space = line.indexOf(" ");
+          const pid = Number(line.slice(0, space));
+          return classify(pid, line.slice(space + 1), true, null);
+        })
+        .filter((p) => Number.isFinite(p.pid)),
+      failed: false,
+    };
   } catch (err) {
     log.debug("engine-observer", "process probe failed", err);
-    return [];
+    return { processes: [], failed: true };
   }
 }
 
@@ -595,6 +616,17 @@ export interface EngineState {
   log: LogState;
   snapshot: EngineSnapshot | null;
   dialogs: NativeWindow[];
+  /**
+   * #965: the out-of-process probe could not run. Reported on its own rather
+   * than folded into an empty `processes`, because "I could not look" and
+   * "there is no editor" are different answers and only one of them is a
+   * reason to conclude the editor is down.
+   */
+  processProbeFailed: boolean;
+  /** What `running` is asserted on. A bridge reply outranks the process table. */
+  runningEvidence: "bridge-snapshot" | "process-table" | "none";
+  /** Where `snapshot` came from. */
+  snapshotSource: "bridge" | "status.json" | "none";
   /** One line an agent can act on without reading any of the above. */
   summary: string;
   /** True when something is waiting on a human answer. */
@@ -603,8 +635,33 @@ export interface EngineState {
 
 function summarise(state: Omit<EngineState, "summary" | "blocked">): { summary: string; blocked: boolean } {
   const ours = state.processes;
+  if (ours.length === 0 && !state.running) {
+    return {
+      summary: state.processProbeFailed
+        ? `The process probe failed, so whether an editor is running for this project is unknown. Log phase: ${state.log.phase}.`
+        : `No editor process for this project. Log phase: ${state.log.phase}.`,
+      blocked: false,
+    };
+  }
+
+  // #965: an editor answered this request over the bridge while the process
+  // table came back empty, and the report said "No editor process for this
+  // project" in the same breath as it returned that editor's own snapshot.
+  // Whatever the process table managed to see, an editor that replied exists.
   if (ours.length === 0) {
-    return { summary: `No editor process for this project. Log phase: ${state.log.phase}.`, blocked: false };
+    const modal = state.snapshot?.modal;
+    if (modal) {
+      return {
+        summary: `Editor answered over the bridge and is blocked on modal "${modal.title}": ${modal.message} [${(modal.buttons ?? []).join(", ")}]`,
+        blocked: true,
+      };
+    }
+    return {
+      summary:
+        `Editor answered over the bridge (phase: ${state.snapshot?.phase ?? state.log.phase}), but the process probe ` +
+        `${state.processProbeFailed ? "failed" : "did not find it"}, so no pid or command line is available.`,
+      blocked: false,
+    };
   }
 
   if (state.dialogs.length > 0) {
@@ -656,7 +713,11 @@ export async function readEngineState(
   projectPath: string | null | undefined,
   opts: { probeWindows?: boolean } = {},
 ): Promise<EngineState> {
-  const processes = await findInteractiveEditors(projectPath);
+  const probe = await probeEditorProcesses();
+  // Every interactive editor holding this .uproject open, not just one: two
+  // editors on one project is a legitimate state and hiding the second is how
+  // a stop lands on the wrong one (#965).
+  const processes = selectEditorsForProject(probe.processes, projectPath);
   const logState = readLogState(projectPath);
   const snapshot = readEngineSnapshot(projectPath);
 
@@ -665,6 +726,39 @@ export async function readEngineState(
     dialogs = dialogLikeWindows(await readNativeWindows(processes.map((p) => p.pid)));
   }
 
-  const base = { running: processes.length > 0, processes, log: logState, snapshot, dialogs };
+  const base: Omit<EngineState, "summary" | "blocked"> = {
+    running: processes.length > 0,
+    processes,
+    log: logState,
+    snapshot,
+    dialogs,
+    processProbeFailed: probe.failed,
+    runningEvidence: processes.length > 0 ? "process-table" : "none",
+    snapshotSource: snapshot ? "status.json" : "none",
+  };
+  return { ...base, ...summarise(base) };
+}
+
+/**
+ * Fold in a snapshot the editor served over its own bridge.
+ *
+ * #965: one report contained `"running": false, "processes": []` and, in the
+ * same object, a live snapshot with an uptime and a ticking game thread, served
+ * BY the editor over the bridge. An editor that answers a request is running;
+ * a process table that came back empty is a failed measurement, not a fact
+ * about the world. So a bridge reply sets `running` and the process probe's
+ * silence is reported as its own field.
+ */
+export function withBridgeSnapshot(state: EngineState, snapshot: EngineSnapshot): EngineState {
+  const base: Omit<EngineState, "summary" | "blocked"> = {
+    ...state,
+    // It was served in answer to this call, so its age is zero. Leaving it
+    // unset made the summary's freshness gate treat it as 999 seconds old and
+    // skip the modal and slow-task lines it was fetched to provide.
+    snapshot: { ...snapshot, ageSeconds: 0 },
+    snapshotSource: "bridge",
+    running: true,
+    runningEvidence: "bridge-snapshot",
+  };
   return { ...base, ...summarise(base) };
 }

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { categoryTool, bp, directive, type ToolDef, type ToolContext } from "../types.js";
 import { startEditor, stopEditor, restartEditor, buildProject, resolveOwnedEditor } from "../editor-control.js";
-import { readEngineState } from "../engine-observer.js";
+import { readEngineState, withBridgeSnapshot, type EngineSnapshot } from "../engine-observer.js";
 import { progressRenderingNote } from "../client-quirks.js";
 import { pushWorkaround, workaroundCount } from "../workaround-tracker.js";
 import { searchTools } from "../tool-search.js";
@@ -48,7 +48,7 @@ export const editorTool: ToolDef = categoryTool(
       },
     },
     get_engine_state: {
-      description: "What the engine is REALLY doing, read from outside the game thread: startup phase from the editor's own log, process table (PID, command line, responding), the plugin's status snapshot (slow-task name and percent, active modal dialog, game-thread stall), and native dialog windows. Call this ONCE when something is already wrong (handlers timing out, an editor that will not come up). Never call it in a wait loop: start_editor blocks until ready on its own, and polling this during startup burns tokens re-reading state that is already tracked. Params: probeWindows? (default true; scans native windows, costs ~2s)",
+      description: "What the engine is REALLY doing, read from outside the game thread: startup phase from the editor's own log, every process holding this project's .uproject open (PID, command line, responding), the plugin's status snapshot (slow-task name and percent, active modal dialog, game-thread stall), and native dialog windows. `running` follows the strongest evidence: an editor that answered over the bridge is running whatever the process table saw, and a probe that could not run is reported as processProbeFailed rather than as an absent editor (#965). Call this ONCE when something is already wrong (handlers timing out, an editor that will not come up). Never call it in a wait loop: start_editor blocks until ready on its own, and polling this during startup burns tokens re-reading state that is already tracked. Params: probeWindows? (default true; scans native windows, costs ~2s)",
       handler: async (ctx: ToolContext, p: Record<string, unknown>) => {
         const probeWindows = p?.probeWindows !== false;
         const state = await readEngineState(ctx.project.projectPath ?? null, { probeWindows });
@@ -57,15 +57,18 @@ export const editorTool: ToolDef = categoryTool(
         // any game-thread work, so it stays reachable while every other handler
         // is timing out. Prefer it over the on-disk snapshot when it replies,
         // and never let it block the rest of the report.
-        let live: unknown = null;
+        let live: EngineSnapshot | null = null;
         if (ctx.bridge.isConnected) {
           try {
-            live = await ctx.bridge.call("get_engine_state", {});
+            const answered = await ctx.bridge.call("get_engine_state", {});
+            live = answered && typeof answered === "object" ? (answered as EngineSnapshot) : null;
           } catch {
             live = null;
           }
         }
-        return live ? { ...state, snapshot: live, snapshotSource: "bridge" } : { ...state, snapshotSource: "status.json" };
+        // An editor served that snapshot, so it exists. Reporting running:false
+        // alongside it is the report contradicting itself (#965).
+        return live ? withBridgeSnapshot(state, live) : state;
       },
     },
     stop_editor: {
