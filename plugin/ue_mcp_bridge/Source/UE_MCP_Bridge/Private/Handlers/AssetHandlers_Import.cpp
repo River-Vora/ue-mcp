@@ -1815,10 +1815,14 @@ TSharedPtr<FJsonValue> FAssetHandlers::SetDataTableRow(const TSharedPtr<FJsonObj
 	Writes.Reserve((*RowObj)->Values.Num());
 	for (const auto& Pair : (*RowObj)->Values)
 	{
+		// FJsonObject::Values is not keyed by FString on UE 5.8, so the key has
+		// to be materialised before it can be compared with a property name.
+		// FString(*Pair.Key) is the idiom the rest of this module already uses.
+		const FString FieldName(*Pair.Key);
 		FProperty* FieldProp = nullptr;
 		for (TFieldIterator<FProperty> It(RowStruct); It; ++It)
 		{
-			if (It->GetName() == Pair.Key || It->GetAuthoredName() == Pair.Key)
+			if (It->GetName() == FieldName || It->GetAuthoredName() == FieldName)
 			{
 				FieldProp = *It;
 				break;

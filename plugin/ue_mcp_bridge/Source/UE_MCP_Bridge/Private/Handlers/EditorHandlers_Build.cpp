@@ -29,7 +29,7 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 
-+namespace
+namespace
 {
 	static FString MCPDataValidationResultToString(const EDataValidationResult Result)
 	{
