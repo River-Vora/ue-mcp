@@ -26,6 +26,7 @@
 #include "Async/Async.h"
 #include "Handlers/EditorHandlers.h"
 #include "Handlers/AssetHandlers.h"
+#include "Handlers/AssetHandlers_Geometry.h"
 #include "Handlers/BlueprintHandlers.h"
 #include "Handlers/ProjectHandlers.h"
 #include "Handlers/LevelHandlers.h"
@@ -129,6 +130,7 @@ FMCPBridgeServer::FMCPBridgeServer(int32 Port, const FString& InPortSource, bool
 	// Register core handlers
 	FEditorHandlers::RegisterHandlers(HandlerRegistry);
 	FAssetHandlers::RegisterHandlers(HandlerRegistry);
+	FAssetGeometryHandlers::RegisterHandlers(HandlerRegistry);
 	FBlueprintHandlers::RegisterHandlers(HandlerRegistry);
 	FLevelHandlers::RegisterHandlers(HandlerRegistry);
 	FReflectionHandlers::RegisterHandlers(HandlerRegistry);
