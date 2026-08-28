@@ -333,16 +333,16 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 
 | Action | Description |
 |--------|-------------|
-| `read` | Read material structure. Params: `assetPath` |
-| `list_parameters` | List overridable parameters. Params: `assetPath` |
-| `set_parameter` | Set parameter on MaterialInstance. Params: `assetPath, parameterName, parameterType, value` |
+| `read` | Read material structure. Accepts a Material or a MaterialInstance; an instance answers with its lineage, shading setup and resolved parameters instead of a graph (#952). Params: `assetPath` |
+| `list_parameters` | List parameters. On a MaterialInstance each entry carries the resolved value, the parent's defaultValue and whether this instance overrides it (#952). Params: `assetPath` |
+| `set_parameter` | Set parameter on MaterialInstance. A vector/colour value may be passed as value OR color, shaped {r,g,b,a}, [r,g,b,a] or '(R=..,G=..,B=..,A=..)'. Saves the instance and returns readBack + saved so a set/verify round trip needs no second call (#952). Params: `assetPath, parameterName, parameterType? (scalar\|vector\|texture, auto-detected when omitted), value, association?` |
 | `read_instance` | Read a MaterialInstanceConstant parent and override summary. Params: `assetPath` |
 | `set_instance_parent` | Set a MaterialInstanceConstant parent. Params: `assetPath, newParentPath (or parentPath)` |
 | `batch_set_instances` | Batch reparent + reassign parameters across many Material Instances in one call. Params: `instances[] = [{assetPath, parentPath?, parameters?:[{name, type (scalar\|vector\|texture), value}]}]` |
 | `clear_instance_parameters` | Clear all MaterialInstanceConstant parameter overrides. Params: `assetPath` |
 | `list_static_switches` | List static switch parameters on a Material or MaterialInstance. Params: `assetPath` |
 | `set_static_switch` | Set a MaterialInstanceConstant static switch parameter. Params: `assetPath, parameterName, value, association?, parameterIndex?` |
-| `set_expression_value` | Set a value on an expression node. Common typed knobs: value (constant/param default), texturePath (TextureSample/TextureSampleParameter2D default texture). For any OTHER UPROPERTY on the expression (e.g. SamplerType, SamplerSource, Group), pass propertyName + value to hit the generic reflection setter. Params: `materialPath, expressionIndex, value?, texturePath?, propertyName? (#663)` |
+| `set_expression_value` | Set a value on an expression node. Common typed knobs: value (constant/param default), texturePath (TextureSample/TextureSampleParameter2D default texture). Constant2Vector/3Vector/4Vector and VectorParameter all take value (or color) as {r,g,b,a}, {x,y,z,w}, [r,g,b,a] or '(R=..,G=..)'; Constant2Vector reads the first two components (#979). Saves the material and reports saved. For any OTHER UPROPERTY on the expression (e.g. SamplerType, SamplerSource, Group), pass propertyName + value to hit the generic reflection setter. Params: `materialPath, expressionIndex, value?, color?, texturePath?, propertyName? (#663)` |
 | `set_custom_expression` | Read/write a MaterialExpressionCustom (HLSL) node: code, named inputs[] (rebuilds input pins; wire them with connect_expressions targetInput=<name>), outputType (float1\|float2\|float3\|float4\|materialAttributes), description. Omit code/inputs to read. Add the node first via add_expression expressionType=Custom. Params: `materialPath, expressionIndex, code?, inputs?, outputType?, description? (#617)` |
 | `disconnect_property` | Disconnect a material property input. Params: `materialPath, property` |
 | `create_instance` | Create material instance. Params: `parentPath, name?, packagePath?` |
@@ -351,6 +351,7 @@ UE-MCP exposes **<!-- count:tools -->24<!-- /count --> category tools** covering
 | `add_function_expression` | Add an expression node to a MaterialFunction graph. Params: `functionPath, expressionType (e.g. Constant3Vector, FunctionInput, FunctionOutput, If), positionX?, positionY?, inputName? (for FunctionInput), inputType? (Scalar\|Vector2\|Vector3\|Vector4\|Texture2D\|TextureCube\|StaticBool\|MaterialAttributes), outputName? (for FunctionOutput) (#463)` |
 | `connect_function_expressions` | Wire two expressions inside a MaterialFunction. Params: `functionPath, sourceExpression (name or index), sourceOutput?, targetExpression (name or index), targetInput? (#463)` |
 | `list_function_expressions` | List expression nodes inside a MaterialFunction. Params: `functionPath (#463)` |
+| `build_material` | Build a PBR material from a texture set in one call: creates a TextureSample per entry, picks each sampler type FROM THE TEXTURE (a virtual/UDIM texture silently loses its material connection on recompile unless it samples through the Virtual* variant), wires them, recompiles, saves, and reports which connections survived the recompile. Params: `name + packagePath? (create) OR materialPath (build into an existing material); textures = {baseColor, normal, roughness, metallic, specular, emissive, opacity, opacityMask, ambientOcclusion, ...} plus packed keys orm (R=AO,G=Roughness,B=Metallic) and rma; samplerTypes? = per-key override (e.g. {normal: 'VirtualNormal'}); clearExisting?; assignToMesh? (StaticMesh or SkeletalMesh asset) with meshSlots? (names or indices, default all) (#946)` |
 | `create_simple` | Single-call simple material. Params: `name, packagePath?, baseColor? ({r,g,b}), metallic?, specular?, roughness?, emissive?, usages?[] (e.g. InstancedStaticMeshes, Nanite, NiagaraSprites)` |
 | `set_usage` | Set EMaterialUsage flag(s) on a material. Params: `assetPath, usage OR usages[], enabled? (default true)` |
 | `set_shading_model` | Set shading model. Params: `assetPath, shadingModel` |
