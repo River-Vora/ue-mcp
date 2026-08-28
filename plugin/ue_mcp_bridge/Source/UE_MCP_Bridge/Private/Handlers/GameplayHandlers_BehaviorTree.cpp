@@ -368,6 +368,28 @@ namespace
 }
 
 // -----------------------------------------------------------------
+// Shared primitives (#889)
+// -----------------------------------------------------------------
+
+UBehaviorTree* FGameplayHandlers::LoadBehaviorTree(const FString& AssetPath)
+{
+	return MCPBTLoad(AssetPath);
+}
+
+void FGameplayHandlers::MapBTNodeAddresses(UBehaviorTree* Tree, TMap<UBTNode*, FString>& OutAddresses)
+{
+	OutAddresses.Reset();
+	if (!Tree) return;
+
+	TArray<FMCPBTNodeRef> Nodes;
+	MCPBTCollectTree(Tree, Nodes);
+	for (const FMCPBTNodeRef& Ref : Nodes)
+	{
+		if (Ref.Node) OutAddresses.Add(Ref.Node, Ref.Path);
+	}
+}
+
+// -----------------------------------------------------------------
 // Blackboard keys
 // -----------------------------------------------------------------
 

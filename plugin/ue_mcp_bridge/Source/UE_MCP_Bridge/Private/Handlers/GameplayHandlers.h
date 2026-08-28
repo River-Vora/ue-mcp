@@ -4,6 +4,7 @@
 #include "Dom/JsonValue.h"
 #include "Dom/JsonObject.h"
 
+class UBehaviorTree;
 class UBlackboardData;
 class UBTNode;
 
@@ -39,6 +40,18 @@ public:
 	 *  FValueOrBBKey_* field lands on its DefaultValue; a class-valued leaf
 	 *  accepts a short name, a /Script path or a Blueprint asset path. */
 	static bool WriteBTNodeProperty(UBTNode* Node, const FString& PropertyPath, const TSharedPtr<FJsonValue>& Value, FString& OutError);
+
+	/** Load a BehaviorTree from a caller-supplied asset path, or null. */
+	static UBehaviorTree* LoadBehaviorTree(const FString& AssetPath);
+
+	/** Every runtime node in a compiled tree, keyed by the structural address
+	 *  the read surface reports ("Root.Children[0].Decorators[1]").
+	 *
+	 *  #889 authoring addresses editor-graph nodes by guid, but a caller who
+	 *  just read the tree holds these addresses instead, so both surfaces walk
+	 *  this one map rather than growing a second scheme. Defined next to the
+	 *  walker it wraps in GameplayHandlers_BehaviorTree.cpp. */
+	static void MapBTNodeAddresses(UBehaviorTree* Tree, TMap<UBTNode*, FString>& OutAddresses);
 
 private:
 	static TSharedPtr<FJsonValue> CreateSmartObjectDefinition(const TSharedPtr<FJsonObject>& Params);
@@ -122,6 +135,15 @@ private:
 	// #919/#940: scoped nested write onto one owned BT node subobject.
 	// Registered as both set_bt_node_property and set_bt_task_property.
 	static TSharedPtr<FJsonValue> SetBTNodeProperty(const TSharedPtr<FJsonObject>& Params);
+
+	// #889/#947: BehaviorTree editor-graph authoring. These drive
+	// UBehaviorTreeGraph and its node classes, then recompile the graph into
+	// the runnable UBTCompositeNode tree, which is the step no reflected
+	// runtime API can perform. Definitions in GameplayHandlers_BTAuthoring.cpp.
+	static TSharedPtr<FJsonValue> ListBTGraphNodes(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> AddBTNode(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> MoveBTNode(const TSharedPtr<FJsonObject>& Params);
+	static TSharedPtr<FJsonValue> RemoveBTNode(const TSharedPtr<FJsonObject>& Params);
 
 	// #163 - detailed navmesh configuration
 	static TSharedPtr<FJsonValue> GetNavmeshDetails(const TSharedPtr<FJsonObject>& Params);
