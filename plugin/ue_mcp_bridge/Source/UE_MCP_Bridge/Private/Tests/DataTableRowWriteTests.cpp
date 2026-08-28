@@ -137,6 +137,15 @@ bool FDataTableSingleFieldWritePreservesRowTest::RunTest(const FString& Paramete
 	FAssetHandlers::RegisterHandlers(Registry);
 	TestTrue(TEXT("set_datatable_cell is registered"), Registry.HasHandler(TEXT("set_datatable_cell")));
 
+	// Stated up front so a resolution failure reads as one, rather than as a
+	// pile of downstream assertions about a row that was never reached.
+	if (!TestTrue(
+			TEXT("the handler resolves the transient table by path"),
+			MCPLoadAssetObject(Table->GetPathName()) == Table))
+	{
+		return false;
+	}
+
 	FString Error;
 	const TSharedPtr<FJsonValue> Response = Registry.ExecuteHandler(
 		TEXT("set_datatable_cell"),
@@ -207,6 +216,13 @@ bool FDataTableRejectedWriteLeavesRowIntactTest::RunTest(const FString& Paramete
 
 	FMCPHandlerRegistry Registry;
 	FAssetHandlers::RegisterHandlers(Registry);
+
+	if (!TestTrue(
+			TEXT("the handler resolves the transient table by path"),
+			MCPLoadAssetObject(Table->GetPathName()) == Table))
+	{
+		return false;
+	}
 
 	// A field the row struct does not have. Nothing may be written, and no
 	// save may be attempted, so this test expects no log errors at all.
